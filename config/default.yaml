@@ -1,0 +1,66 @@
+# ── prop-firm-pilot 預設配置 ────────────────────────────────────────
+# 此檔案定義系統預設值。帳戶專用配置請見 e8_signature_50k.yaml
+
+# 交易品種
+symbols:
+  - EURUSD
+  - GBPUSD
+  - USDJPY
+  - AUDUSD
+  - XAUUSD
+
+# 數據設定
+data:
+  interval: "1d"
+  lookback_days: 730  # 2 年歷史數據
+  provider: "itick"   # itick | tradermade | alpha_vantage
+  duckdb_path: "data/fx_prices.duckdb"
+  qlib_binary_dir: "data/qlib_binary"
+
+# Scanner 設定
+scanner:
+  project_path: "../../qlib_market_scanner"
+  topk: 3
+  n_drop: 1
+  enable_rdagent_factors: true
+  min_factor_ic_ir: 0.5
+
+# TradingAgents 設定
+agents:
+  project_path: "../../TradingAgents"
+  selected_analysts:
+    - market
+    - news
+    - social
+  deep_think_llm: "volcengine/glm-4.7"
+  quick_think_llm: "volcengine/glm-4.7"
+  output_language: "繁體中文"
+
+# 交易執行
+execution:
+  max_positions: 3          # 同時持倉上限
+  default_risk_pct: 0.01    # 每筆風險 1% 帳戶淨值
+  max_risk_pct: 0.02        # 單筆最大風險 2%
+  random_delay_min: 0.5     # 隨機延遲下限 (秒)
+  random_delay_max: 3.0     # 隨機延遲上限 (秒)
+  position_offset_pct: 0.10 # 倉位 ±10% 隨機偏移
+
+# 監控
+monitor:
+  equity_check_interval: 60   # 淨值檢查間隔 (秒)
+  drawdown_alert_pct: 0.80    # 回撤達 80% 限額時警報
+  auto_close_pct: 0.90        # 回撤達 90% 限額時自動平倉
+  trade_journal_path: "data/trade_journal.jsonl"
+
+# 排程 (UTC)
+schedule:
+  daily_cycle: "06:00"       # 每日主循環
+  equity_monitor: "always"   # 全天運行
+  rdagent_trigger: "weekend" # 週末觸發因子挖掘
+
+# 日誌
+logging:
+  level: "INFO"
+  file: "logs/prop_firm_pilot.log"
+  rotation: "10 MB"
+  retention: "30 days"

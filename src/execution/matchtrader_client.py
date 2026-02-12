@@ -1,0 +1,604 @@
+"""
+MatchTrader REST API client for E8 Markets prop firm trading.
+
+Handles JWT authentication, auto-refresh, rate limiting (2000 req/day),
+and all trading operations (open/close/modify positions, balance queries).
+
+API Reference:
+    - https://app.theneo.io/match-trade/platform-api
+    - https://docs.match-trade.com/docs/match-trader-api-documentation/
+"""
+
+import asyncio
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Literal
+
+import httpx
+from loguru import logger
+from pydantic import BaseModel, Field
+
+
+# ── Response Models ─────────────────────────────────────────────────────────
+
+
+class AuthTokens(BaseModel):
+    """Tokens returned from login / refresh."""
+
+    trading_api_token: str = Field(description="JWT for Auth-trading-api header")
+    refresh_token: str = Field(description="Token used to refresh the JWT")
+    system_uuid: str = Field(description="Account system UUID for API paths")
+
+
+class BalanceInfo(BaseModel):
+    """Account balance snapshot from MatchTrader."""
+
+    balance: float = 0.0
+    equity: float = 0.0
+    margin: float = 0.0
+    free_margin: float = Field(default=0.0, alias="freeMargin")
+    currency: str = "USD"
+
+    model_config = {"populate_by_name": True}
+
+
+class PositionInfo(BaseModel):
+    """Open position details."""
+
+    position_id: str = Field(alias="positionId")
+    symbol: str = ""
+    side: str = ""
+    volume: float = 0.0
+    open_price: float = Field(default=0.0, alias="openPrice")
+    current_price: float = Field(default=0.0, alias="currentPrice")
+    profit: float = 0.0
+    sl_price: float | None = Field(default=None, alias="slPrice")
+    tp_price: float | None = Field(default=None, alias="tpPrice")
+    open_time: str = Field(default="", alias="openTime")
+
+    model_config = {"populate_by_name": True}
+
+
+class OrderResult(BaseModel):
+    """Result from opening/closing/modifying a position."""
+
+    success: bool = False
+    position_id: str = ""
+    message: str = ""
+    raw_response: Dict[str, Any] = {}
+
+
+class ClosedPosition(BaseModel):
+    """Historical closed position."""
+
+    position_id: str = Field(default="", alias="positionId")
+    symbol: str = ""
+    side: str = ""
+    volume: float = 0.0
+    open_price: float = Field(default=0.0, alias="openPrice")
+    close_price: float = Field(default=0.0, alias="closePrice")
+    profit: float = 0.0
+    open_time: str = Field(default="", alias="openTime")
+    close_time: str = Field(default="", alias="closeTime")
+
+    model_config = {"populate_by_name": True}
+
+
+# ── Rate Limiter ────────────────────────────────────────────────────────────
+
+
+class RateLimiter:
+    """Simple daily rate limiter for MatchTrader API (2000 req/day)."""
+
+    def __init__(self, daily_limit: int = 2000):
+        self._daily_limit = daily_limit
+        self._count = 0
+        self._reset_date = datetime.now(timezone.utc).date()
+
+    def _maybe_reset(self) -> None:
+        today = datetime.now(timezone.utc).date()
+        if today != self._reset_date:
+            self._count = 0
+            self._reset_date = today
+
+    def record(self) -> None:
+        self._maybe_reset()
+        self._count += 1
+
+    @property
+    def remaining(self) -> int:
+        self._maybe_reset()
+        return max(0, self._daily_limit - self._count)
+
+    @property
+    def count(self) -> int:
+        self._maybe_reset()
+        return self._count
+
+    def can_proceed(self, reserve: int = 50) -> bool:
+        """Check if we can make a request, keeping a reserve for emergencies."""
+        return self.remaining > reserve
+
+
+# ── MatchTrader Client ──────────────────────────────────────────────────────
+
+
+class MatchTraderClient:
+    """Async client for MatchTrader REST API.
+
+    Usage:
+        client = MatchTraderClient(
+            base_url="https://trade.e8markets.com/api",
+            email="user@example.com",
+            password="secret",
+            broker_id="e8markets",
+        )
+        async with client:
+            await client.login()
+            balance = await client.get_balance()
+            order = await client.open_position("EURUSD", "BUY", 0.1, sl=1.0500, tp=1.1000)
+    """
+
+    # Token lifetime: 15 min. Refresh at 12 min to be safe.
+    TOKEN_REFRESH_SECONDS = 12 * 60
+
+    def __init__(
+        self,
+        base_url: str,
+        email: str,
+        password: str,
+        broker_id: str = "e8markets",
+        daily_request_limit: int = 2000,
+        max_retries: int = 3,
+    ):
+        self._base_url = base_url.rstrip("/")
+        self._email = email
+        self._password = password
+        self._broker_id = broker_id
+        self._max_retries = max_retries
+
+        self._tokens: AuthTokens | None = None
+        self._last_auth_time: float = 0.0
+        self._rate_limiter = RateLimiter(daily_request_limit)
+        self._client: httpx.AsyncClient | None = None
+
+    # ── Context Manager ─────────────────────────────────────────────────
+
+    async def __aenter__(self) -> "MatchTraderClient":
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            follow_redirects=True,
+        )
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+
+    # ── Properties ──────────────────────────────────────────────────────
+
+    @property
+    def is_authenticated(self) -> bool:
+        return self._tokens is not None
+
+    @property
+    def system_uuid(self) -> str:
+        if not self._tokens:
+            raise RuntimeError("Not authenticated. Call login() first.")
+        return self._tokens.system_uuid
+
+    @property
+    def rate_limiter(self) -> RateLimiter:
+        return self._rate_limiter
+
+    # ── Auth ────────────────────────────────────────────────────────────
+
+    async def login(self) -> AuthTokens:
+        """Authenticate with MatchTrader and obtain JWT tokens."""
+        logger.info("MatchTrader: logging in as {}", self._email)
+
+        response = await self._raw_request(
+            "POST",
+            "/manager/co-login",
+            json={
+                "email": self._email,
+                "password": self._password,
+                "brokerId": self._broker_id,
+            },
+            authenticated=False,
+        )
+
+        data = response.json()
+
+        # Extract system UUID from accounts list
+        accounts = data.get("accounts", [])
+        if not accounts:
+            raise RuntimeError(f"No trading accounts found for {self._email}")
+
+        # Use first account by default
+        system_uuid = accounts[0].get("systemUUID", accounts[0].get("id", ""))
+        if not system_uuid:
+            raise RuntimeError("Could not extract systemUUID from login response")
+
+        self._tokens = AuthTokens(
+            trading_api_token=data["tradingApiToken"],
+            refresh_token=data.get("token", data.get("refreshToken", "")),
+            system_uuid=system_uuid,
+        )
+        self._last_auth_time = time.monotonic()
+
+        logger.info(
+            "MatchTrader: login successful. systemUUID={}, accounts={}",
+            system_uuid,
+            len(accounts),
+        )
+        return self._tokens
+
+    async def refresh_token(self) -> None:
+        """Refresh JWT before it expires (15 min lifetime)."""
+        if not self._tokens:
+            raise RuntimeError("Cannot refresh: not authenticated.")
+
+        logger.debug("MatchTrader: refreshing JWT token")
+
+        response = await self._raw_request(
+            "POST",
+            "/refresh-token",
+            json={"token": self._tokens.refresh_token},
+            authenticated=False,
+        )
+
+        data = response.json()
+        self._tokens.trading_api_token = data.get("tradingApiToken", self._tokens.trading_api_token)
+        if "token" in data:
+            self._tokens.refresh_token = data["token"]
+
+        self._last_auth_time = time.monotonic()
+        logger.debug("MatchTrader: token refreshed successfully")
+
+    async def _ensure_auth(self) -> None:
+        """Auto-refresh token if it's about to expire."""
+        if not self._tokens:
+            raise RuntimeError("Not authenticated. Call login() first.")
+
+        elapsed = time.monotonic() - self._last_auth_time
+        if elapsed >= self.TOKEN_REFRESH_SECONDS:
+            await self.refresh_token()
+
+    # ── Account Info ────────────────────────────────────────────────────
+
+    async def get_balance(self) -> BalanceInfo:
+        """Get current account balance, equity, margin."""
+        await self._ensure_auth()
+        response = await self._api_request("GET", f"/mtr-api/{self.system_uuid}/balance")
+        return BalanceInfo(**response.json())
+
+    async def get_account_details(self) -> Dict[str, Any]:
+        """Get account details (leverage, offer name, etc.)."""
+        await self._ensure_auth()
+        response = await self._api_request("GET", f"/mtr-api/{self.system_uuid}/account-details")
+        return response.json()
+
+    # ── Position Queries ────────────────────────────────────────────────
+
+    async def get_open_positions(self) -> List[PositionInfo]:
+        """Get all currently open positions."""
+        await self._ensure_auth()
+        response = await self._api_request("GET", f"/mtr-api/{self.system_uuid}/open-positions")
+        data = response.json()
+
+        # API may return list directly or wrapped in a key
+        positions_raw = data if isinstance(data, list) else data.get("positions", [])
+        return [PositionInfo(**p) for p in positions_raw]
+
+    async def get_closed_positions(
+        self,
+        from_ts: int,
+        to_ts: int,
+    ) -> List[ClosedPosition]:
+        """Get closed positions within a time range.
+
+        Args:
+            from_ts: Start timestamp (milliseconds).
+            to_ts: End timestamp (milliseconds).
+        """
+        await self._ensure_auth()
+        response = await self._api_request(
+            "POST",
+            f"/mtr-api/{self.system_uuid}/get-closed-positions",
+            json={"from": from_ts, "to": to_ts},
+        )
+        data = response.json()
+        positions_raw = data if isinstance(data, list) else data.get("positions", [])
+        return [ClosedPosition(**p) for p in positions_raw]
+
+    # ── Trading Operations ──────────────────────────────────────────────
+
+    async def open_position(
+        self,
+        symbol: str,
+        side: Literal["BUY", "SELL"],
+        volume: float,
+        sl: float | None = None,
+        tp: float | None = None,
+    ) -> OrderResult:
+        """Open a new trading position.
+
+        Args:
+            symbol: Instrument name (e.g. "EURUSD").
+            side: "BUY" or "SELL".
+            volume: Lot size (e.g. 0.1).
+            sl: Stop loss price (optional).
+            tp: Take profit price (optional).
+        """
+        await self._ensure_auth()
+
+        body: Dict[str, Any] = {
+            "symbol": symbol,
+            "side": side.upper(),
+            "volume": volume,
+        }
+        if sl is not None:
+            body["slPrice"] = sl
+        if tp is not None:
+            body["tpPrice"] = tp
+
+        logger.info(
+            "MatchTrader: opening {} {} {} lots (SL={}, TP={})",
+            side,
+            symbol,
+            volume,
+            sl,
+            tp,
+        )
+
+        try:
+            response = await self._api_request(
+                "POST",
+                f"/mtr-api/{self.system_uuid}/position/open",
+                json=body,
+            )
+            data = response.json()
+            return OrderResult(
+                success=True,
+                position_id=str(data.get("positionId", data.get("id", ""))),
+                message="Position opened successfully",
+                raw_response=data,
+            )
+        except MatchTraderError as e:
+            logger.error("MatchTrader: failed to open position: {}", e)
+            return OrderResult(
+                success=False,
+                message=str(e),
+                raw_response={"error": str(e)},
+            )
+
+    async def close_position(
+        self,
+        position_id: str,
+        symbol: str,
+        side: str,
+        volume: float | None = None,
+    ) -> OrderResult:
+        """Close an existing position (full or partial).
+
+        Args:
+            position_id: The position ID to close.
+            symbol: Instrument name.
+            side: Original order side ("BUY" or "SELL").
+            volume: Volume to close (None = close all).
+        """
+        await self._ensure_auth()
+
+        body: Dict[str, Any] = {
+            "positionId": position_id,
+            "instrument": symbol,
+            "orderSide": side.upper(),
+        }
+        if volume is not None:
+            body["volume"] = volume
+
+        logger.info(
+            "MatchTrader: closing position {} ({} {} vol={})",
+            position_id,
+            symbol,
+            side,
+            volume,
+        )
+
+        try:
+            response = await self._api_request(
+                "POST",
+                f"/mtr-api/{self.system_uuid}/position/close",
+                json=body,
+            )
+            data = response.json()
+            return OrderResult(
+                success=True,
+                position_id=position_id,
+                message="Position closed successfully",
+                raw_response=data,
+            )
+        except MatchTraderError as e:
+            logger.error("MatchTrader: failed to close position {}: {}", position_id, e)
+            return OrderResult(
+                success=False,
+                position_id=position_id,
+                message=str(e),
+                raw_response={"error": str(e)},
+            )
+
+    async def close_all_positions(self) -> List[OrderResult]:
+        """Emergency: close ALL open positions."""
+        logger.warning("MatchTrader: CLOSING ALL POSITIONS (emergency)")
+        positions = await self.get_open_positions()
+        results = []
+
+        for pos in positions:
+            result = await self.close_position(
+                position_id=pos.position_id,
+                symbol=pos.symbol,
+                side=pos.side,
+                volume=pos.volume,
+            )
+            results.append(result)
+
+        closed_count = sum(1 for r in results if r.success)
+        logger.warning("MatchTrader: closed {}/{} positions", closed_count, len(positions))
+        return results
+
+    async def modify_position(
+        self,
+        position_id: str,
+        sl: float | None = None,
+        tp: float | None = None,
+    ) -> OrderResult:
+        """Modify stop loss and/or take profit of an existing position.
+
+        Args:
+            position_id: The position ID to modify.
+            sl: New stop loss price (None = don't change).
+            tp: New take profit price (None = don't change).
+        """
+        await self._ensure_auth()
+
+        body: Dict[str, Any] = {"positionId": position_id}
+        if sl is not None:
+            body["slPrice"] = sl
+        if tp is not None:
+            body["tpPrice"] = tp
+
+        logger.info(
+            "MatchTrader: modifying position {} (SL={}, TP={})",
+            position_id,
+            sl,
+            tp,
+        )
+
+        try:
+            response = await self._api_request(
+                "POST",
+                f"/mtr-api/{self.system_uuid}/position/edit",
+                json=body,
+            )
+            data = response.json()
+            return OrderResult(
+                success=True,
+                position_id=position_id,
+                message="Position modified successfully",
+                raw_response=data,
+            )
+        except MatchTraderError as e:
+            logger.error("MatchTrader: failed to modify position {}: {}", position_id, e)
+            return OrderResult(
+                success=False,
+                position_id=position_id,
+                message=str(e),
+                raw_response={"error": str(e)},
+            )
+
+    # ── HTTP Internals ──────────────────────────────────────────────────
+
+    def _build_headers(self, authenticated: bool = True) -> Dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if authenticated and self._tokens:
+            headers["Auth-trading-api"] = self._tokens.trading_api_token
+        return headers
+
+    async def _raw_request(
+        self,
+        method: str,
+        path: str,
+        json: Dict[str, Any] | None = None,
+        authenticated: bool = True,
+    ) -> httpx.Response:
+        """Make a raw HTTP request without retry logic."""
+        if not self._client:
+            raise RuntimeError("Client not initialized. Use 'async with' context manager.")
+
+        url = f"{self._base_url}{path}"
+        headers = self._build_headers(authenticated)
+
+        response = await self._client.request(method, url, json=json, headers=headers)
+        self._rate_limiter.record()
+
+        if response.status_code == 401 and authenticated:
+            raise MatchTraderAuthError("Authentication failed (401). Token may have expired.")
+
+        if response.status_code == 429:
+            raise MatchTraderRateLimitError("Rate limit exceeded (429).")
+
+        if response.status_code >= 400:
+            raise MatchTraderError(f"API error {response.status_code}: {response.text[:500]}")
+
+        return response
+
+    async def _api_request(
+        self,
+        method: str,
+        path: str,
+        json: Dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """Make an authenticated API request with retry + auto-refresh logic."""
+        if not self._rate_limiter.can_proceed():
+            raise MatchTraderRateLimitError(
+                f"Daily API request budget exhausted ({self._rate_limiter.count} used). "
+                "Remaining requests reserved for emergencies."
+            )
+
+        last_error: Exception | None = None
+
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                await self._ensure_auth()
+                return await self._raw_request(method, path, json=json, authenticated=True)
+
+            except MatchTraderAuthError:
+                # Token expired mid-request — refresh and retry
+                logger.warning("MatchTrader: auth failed, refreshing token (attempt {})", attempt)
+                try:
+                    await self.refresh_token()
+                except Exception as refresh_err:
+                    logger.error("MatchTrader: token refresh failed: {}", refresh_err)
+                    # Re-login as last resort
+                    await self.login()
+
+            except MatchTraderRateLimitError as e:
+                # Rate limited — exponential backoff
+                wait = 2**attempt
+                logger.warning("MatchTrader: rate limited, waiting {}s (attempt {})", wait, attempt)
+                await asyncio.sleep(wait)
+                last_error = e
+
+            except httpx.HTTPError as e:
+                # Network error — retry with backoff
+                wait = 2**attempt
+                logger.warning(
+                    "MatchTrader: network error '{}', retrying in {}s (attempt {})",
+                    e,
+                    wait,
+                    attempt,
+                )
+                await asyncio.sleep(wait)
+                last_error = e
+
+        raise MatchTraderError(f"Request failed after {self._max_retries} retries: {last_error}")
+
+
+# ── Exceptions ──────────────────────────────────────────────────────────────
+
+
+class MatchTraderError(Exception):
+    """Base exception for MatchTrader API errors."""
+
+
+class MatchTraderAuthError(MatchTraderError):
+    """Authentication failure (expired/invalid token)."""
+
+
+class MatchTraderRateLimitError(MatchTraderError):
+    """Daily API request limit approached or exceeded."""

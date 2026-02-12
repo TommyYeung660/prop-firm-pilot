@@ -1,0 +1,57 @@
+# ── E8 Markets Signature $50,000 帳戶配置 ──────────────────────────
+# 繼承 default.yaml，此處僅覆蓋帳戶專用設定
+
+# 帳戶資訊
+account:
+  broker: "E8 Markets"
+  plan: "Signature"
+  initial_balance: 50000
+  currency: "USD"
+
+# E8 合規規則 (硬編碼，不可修改)
+compliance:
+  daily_drawdown_limit: 0.05    # 5% 每日回撤 (Soft Breach → Daily Pause)
+  max_drawdown_limit: 0.08      # 8% 最大回撤 (Hard Breach → 帳戶終止)
+  profit_target: 0.08            # 8% 利潤目標 = $4,000
+  best_day_ratio: 0.40           # 40% Best Day Rule
+  best_day_limit: 1600           # $4,000 × 40% = $1,600/天
+  daily_api_request_limit: 2000  # 每日 API 請求上限
+  drawdown_type: "balance"       # balance-based (非 equity-based)
+
+  # 安全裕度 (提前停止交易)
+  daily_drawdown_stop: 0.85      # 日內回撤達限額 85% 時停止新開倉
+  max_drawdown_stop: 0.85        # 最大回撤達限額 85% 時停止新開倉
+  best_day_stop: 0.85            # 單日獲利達 Best Day 限額 85% 時停止
+
+# FX 品種特定設定
+instruments:
+  EURUSD:
+    pip_value: 10.0     # 1 standard lot = $10/pip
+    pip_size: 0.0001
+    min_lot: 0.01
+    max_lot: 50.0
+    avg_spread_pips: 1.2
+  GBPUSD:
+    pip_value: 10.0
+    pip_size: 0.0001
+    min_lot: 0.01
+    max_lot: 50.0
+    avg_spread_pips: 1.5
+  USDJPY:
+    pip_value: 6.67     # 依 USD/JPY 匯率浮動
+    pip_size: 0.01
+    min_lot: 0.01
+    max_lot: 50.0
+    avg_spread_pips: 1.3
+  AUDUSD:
+    pip_value: 10.0
+    pip_size: 0.0001
+    min_lot: 0.01
+    max_lot: 50.0
+    avg_spread_pips: 1.4
+  XAUUSD:
+    pip_value: 1.0      # 1 lot = 100 oz, $0.01 move = $1
+    pip_size: 0.01
+    min_lot: 0.01
+    max_lot: 20.0
+    avg_spread_pips: 25.0  # Gold spread 通常較大
