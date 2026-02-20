@@ -246,6 +246,9 @@ class PropFirmPilot:
             risk_amount=risk_amount,
         )
 
+        # Query actual open positions from MatchTrader to enforce hard limit
+        open_positions = await client.get_open_positions()
+
         # Build AccountSnapshot
         account = AccountSnapshot(
             balance=balance_info.balance,
@@ -254,7 +257,7 @@ class PropFirmPilot:
             free_margin=balance_info.free_margin,
             day_start_balance=balance_info.balance,  # Fallback to current balance
             initial_balance=self.config.account.initial_balance,
-            open_positions=self.order_manager.active_count,
+            open_positions=len(open_positions),
             daily_pnl=balance_info.equity - balance_info.balance,
             total_pnl=balance_info.equity - self.config.account.initial_balance,
             equity_high_water_mark=self.config.account.initial_balance,
