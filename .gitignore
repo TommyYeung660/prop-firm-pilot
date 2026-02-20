@@ -34,3 +34,4 @@ Thumbs.db
 
 # UV
 uv.lock
+config/default.yaml
