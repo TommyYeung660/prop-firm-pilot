@@ -35,6 +35,24 @@ instruments:
     min_lot: 0.01
     max_lot: 5.0
     spread_pips: 0.2
+  GBPUSD:
+    pip_size: 0.0001
+    pip_value: 10.0
+    min_lot: 0.01
+    max_lot: 5.0
+    spread_pips: 0.3
+  USDJPY:
+    pip_size: 0.01
+    pip_value: 10.0
+    min_lot: 0.01
+    max_lot: 5.0
+    spread_pips: 0.4
+  AUDUSD:
+    pip_size: 0.0001
+    pip_value: 10.0
+    min_lot: 0.01
+    max_lot: 5.0
+    spread_pips: 0.3
   XAUUSD:
     pip_size: 0.01
     pip_value: 1.0
