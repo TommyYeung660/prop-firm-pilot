@@ -1,15 +1,15 @@
-import sys
-import os
-import shutil
-from pathlib import Path
 import asyncio
+import os
+import sys
+from pathlib import Path
 
 # Add project root
 sys.path.append(os.getcwd())
 
 from src.config import load_config
-from src.signal.scanner_bridge import ScannerBridge
 from src.decision.agent_bridge import AgentBridge
+from src.signal.scanner_bridge import ScannerBridge
+
 # from src.data.fx_data_fetcher import FxDataFetcher # Not used directly here
 
 

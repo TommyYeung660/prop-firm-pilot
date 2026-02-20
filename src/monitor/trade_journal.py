@@ -7,7 +7,7 @@ compliance audit trails, and TradingAgents' reflect_and_remember() feedback.
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 from loguru import logger
 
@@ -28,7 +28,7 @@ class TradeJournal:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
-    def log_trade(self, trade_data: Dict[str, Any]) -> None:
+    def log_trade(self, trade_data: dict[str, Any]) -> None:
         """Append a trade record to the journal."""
         entry = {
             "type": "TRADE",
@@ -37,7 +37,7 @@ class TradeJournal:
         self._append(entry)
         logger.debug("Journal: logged trade for {}", trade_data.get("symbol", "?"))
 
-    def log_event(self, event_type: str, details: Dict[str, Any] | None = None) -> None:
+    def log_event(self, event_type: str, details: dict[str, Any] | None = None) -> None:
         """Log a non-trade event (compliance check, equity alert, etc.)."""
         entry = {
             "type": event_type,
@@ -63,7 +63,7 @@ class TradeJournal:
             }
         )
 
-    def get_daily_returns(self, date_str: str) -> List[Dict[str, Any]]:
+    def get_daily_returns(self, date_str: str) -> list[dict[str, Any]]:
         """Read all closed trades for a specific date.
 
         Used by TradingAgents' reflect_and_remember() to learn from results.
@@ -78,7 +78,7 @@ class TradeJournal:
         if not self._path.exists():
             return results
 
-        with open(self._path, "r", encoding="utf-8") as f:
+        with open(self._path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -100,13 +100,13 @@ class TradeJournal:
 
         return results
 
-    def get_all_trades(self) -> List[Dict[str, Any]]:
+    def get_all_trades(self) -> list[dict[str, Any]]:
         """Read all trade records from journal."""
         results = []
         if not self._path.exists():
             return results
 
-        with open(self._path, "r", encoding="utf-8") as f:
+        with open(self._path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -120,7 +120,7 @@ class TradeJournal:
 
         return results
 
-    def _append(self, entry: Dict[str, Any]) -> None:
+    def _append(self, entry: dict[str, Any]) -> None:
         """Append a JSON line to the journal file."""
         try:
             with open(self._path, "a", encoding="utf-8") as f:

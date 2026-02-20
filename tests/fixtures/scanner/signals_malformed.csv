@@ -1,0 +1,5 @@
+datetime,instrument,score,rank,score_gap,drop_distance,topk_spread,confidence,weight
+2026-02-16,EURUSD,0.85,1.0,0.10,0.20,0.15,high,0.5
+2026-02-16,,invalid_score,2.0,0.05,0.10,0.08,medium,0.5
+2026-02-16,GBPUSD,not_a_number,3.0,0.03,0.05,0.08,low,0.5
+2026-02-16,USDJPY,0.72,4.0,0.02,0.04,0.08,medium,0.5

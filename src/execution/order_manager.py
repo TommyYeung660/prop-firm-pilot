@@ -6,7 +6,7 @@ cohesive order flow. This is the "traffic controller" between decision and execu
 """
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal
+from typing import Any, Literal
 
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -59,14 +59,14 @@ class OrderManager:
     The main orchestrator (PropFirmPilot) coordinates the actual calls.
     """
 
-    def __init__(self, instruments: Dict[str, Dict[str, Any]]) -> None:
+    def __init__(self, instruments: dict[str, dict[str, Any]]) -> None:
         """
         Args:
             instruments: Map of symbol -> instrument config dict with pip_size, pip_value.
         """
         self._instruments = instruments
-        self._active_orders: Dict[str, TradeRecord] = {}  # position_id -> TradeRecord
-        self._history: List[TradeRecord] = []
+        self._active_orders: dict[str, TradeRecord] = {}  # position_id -> TradeRecord
+        self._history: list[TradeRecord] = []
 
     def calculate_sl_tp_prices(
         self,
@@ -184,11 +184,11 @@ class OrderManager:
         return len(self._active_orders)
 
     @property
-    def active_orders(self) -> Dict[str, TradeRecord]:
+    def active_orders(self) -> dict[str, TradeRecord]:
         return dict(self._active_orders)
 
     @property
-    def history(self) -> List[TradeRecord]:
+    def history(self) -> list[TradeRecord]:
         return list(self._history)
 
     def total_active_risk(self) -> float:

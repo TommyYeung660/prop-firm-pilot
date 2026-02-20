@@ -3,7 +3,7 @@ Decision formatter — converts TradingAgents decisions into
 actionable trade parameters for the execution layer.
 """
 
-from typing import Any, Dict, Literal
+from typing import Any, Literal
 
 from loguru import logger
 
@@ -41,7 +41,7 @@ class FormattedDecision:
 
 
 # Default SL/TP pips by instrument
-DEFAULT_SL_TP: Dict[str, Dict[str, float]] = {
+DEFAULT_SL_TP: dict[str, dict[str, float]] = {
     "EURUSD": {"sl_pips": 40, "tp_pips": 80},
     "GBPUSD": {"sl_pips": 50, "tp_pips": 100},
     "USDJPY": {"sl_pips": 45, "tp_pips": 90},
@@ -55,7 +55,7 @@ def format_decision(
     decision: str,
     scanner_score: float,
     scanner_confidence: str,
-    agent_state: Dict[str, Any] | None = None,
+    agent_state: dict[str, Any] | None = None,
 ) -> FormattedDecision:
     """Convert raw decision into execution-ready format.
 

@@ -10,12 +10,10 @@ Schema mirrors the qlib_market_scanner's DuckDB store but adapted for FX:
 
 from datetime import date
 from pathlib import Path
-from typing import Dict, List
 
 import duckdb
 import pandas as pd
 from loguru import logger
-
 
 # DuckDB schema for FX daily bars
 CREATE_TABLE_SQL = """
@@ -144,7 +142,7 @@ class FxDuckDbStore:
             DataFrame with columns: date, open, high, low, close, volume.
         """
         query = "SELECT date, open, high, low, close, volume FROM fx_daily WHERE symbol = ?"
-        params: List[str | date] = [symbol]
+        params: list[str | date] = [symbol]
 
         if start_date:
             query += " AND date >= ?"
@@ -161,10 +159,10 @@ class FxDuckDbStore:
 
     def read_all_symbols(
         self,
-        symbols: List[str],
+        symbols: list[str],
         start_date: date | None = None,
         end_date: date | None = None,
-    ) -> Dict[str, pd.DataFrame]:
+    ) -> dict[str, pd.DataFrame]:
         """Read cached data for multiple symbols."""
         return {sym: self.read(sym, start_date, end_date) for sym in symbols}
 
@@ -188,7 +186,7 @@ class FxDuckDbStore:
         symbol: str,
         start_date: date,
         end_date: date,
-    ) -> List[date]:
+    ) -> list[date]:
         """Find dates missing from the cache (for incremental fetching).
 
         Note: Only checks weekdays (Mon-Fri) since FX markets close on weekends.

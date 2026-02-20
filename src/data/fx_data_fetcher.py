@@ -13,12 +13,10 @@ Usage:
 import abc
 import asyncio
 from datetime import date, timedelta
-from typing import Dict, List
 
 import httpx
 import pandas as pd
 from loguru import logger
-
 
 # ── Abstract Base ───────────────────────────────────────────────────────────
 
@@ -77,7 +75,7 @@ class TraderMadeProvider(FxDataProvider):
         client: httpx.AsyncClient,
     ) -> pd.DataFrame:
         """Fetch daily bars, paginating if range > 1 year."""
-        all_frames: List[pd.DataFrame] = []
+        all_frames: list[pd.DataFrame] = []
         current_start = start_date
 
         while current_start < end_date:
@@ -220,7 +218,7 @@ class ITickProvider(FxDataProvider):
         client: httpx.AsyncClient,
     ) -> pd.DataFrame:
         """Fetch daily bars using reverse pagination (from end_date backwards)."""
-        all_frames: List[pd.DataFrame] = []
+        all_frames: list[pd.DataFrame] = []
         end_ts = int(pd.Timestamp(end_date).timestamp() * 1000)
         start_ts = int(pd.Timestamp(start_date).timestamp() * 1000)
 
@@ -377,10 +375,10 @@ def create_provider(provider: str, api_key: str) -> FxDataProvider:
 
 async def fetch_all_symbols(
     provider: FxDataProvider,
-    symbols: List[str],
+    symbols: list[str],
     start_date: date,
     end_date: date,
-) -> Dict[str, pd.DataFrame]:
+) -> dict[str, pd.DataFrame]:
     """Fetch daily bars for multiple symbols sequentially.
 
     Sequential to respect rate limits. Use with care.
@@ -394,7 +392,7 @@ async def fetch_all_symbols(
     Returns:
         Dict of symbol -> DataFrame.
     """
-    results: Dict[str, pd.DataFrame] = {}
+    results: dict[str, pd.DataFrame] = {}
 
     async with httpx.AsyncClient() as client:
         for symbol in symbols:

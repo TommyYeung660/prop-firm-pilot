@@ -10,7 +10,6 @@ via the existing load_rdagent_factors() interface.
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
 
 import yaml
 from loguru import logger
@@ -114,7 +113,7 @@ class RdAgentBridge:
         """Upload discovered factors to Dropbox."""
         return self._run_command("upload")
 
-    def load_factors(self, min_ic_ir: float = 0.5) -> List[DiscoveredFactor]:
+    def load_factors(self, min_ic_ir: float = 0.5) -> list[DiscoveredFactor]:
         """Load discovered factors from YAML, filtered by IC IR threshold.
 
         Args:
@@ -127,7 +126,7 @@ class RdAgentBridge:
             logger.warning("RdAgentBridge: factors YAML not found: {}", self._factors_yaml_path)
             return []
 
-        with open(self._factors_yaml_path, "r", encoding="utf-8") as f:
+        with open(self._factors_yaml_path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
         if not data or "factors" not in data:

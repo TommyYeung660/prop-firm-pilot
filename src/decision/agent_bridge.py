@@ -3,11 +3,12 @@ Bridge to TradingAgents — invokes the multi-agent decision engine
 with scanner signals and returns BUY/SELL/HOLD decisions.
 """
 
+import asyncio
 import importlib
-import sys
 import random
+import sys
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Tuple
+from typing import Any, Literal
 
 from loguru import logger
 
@@ -19,7 +20,7 @@ class AgentDecision:
         self,
         symbol: str,
         decision: Literal["BUY", "SELL", "HOLD"],
-        final_state: Dict[str, Any],
+        final_state: dict[str, Any],
         risk_report: str = "",
     ) -> None:
         self.symbol = symbol
@@ -41,7 +42,12 @@ class MockTradingGraph:
     def __init__(self, *args, **kwargs):
         pass
 
-    def propagate(self, company_name: str, trade_date: str, qlib_data: Any = None):
+    def propagate(
+        self,
+        company_name: str,
+        trade_date: str,
+        qlib_data: Any = None,
+    ):
         logger.warning(f"MockTradingGraph: simulating decision for {company_name}")
         # Random decision: 40% BUY, 40% SELL, 20% HOLD
         r = random.random()
@@ -77,8 +83,8 @@ class AgentBridge:
     def __init__(
         self,
         agents_path: str | Path,
-        selected_analysts: List[str] | None = None,
-        config: Dict[str, Any] | None = None,
+        selected_analysts: list[str] | None = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
         self._agents_path = Path(agents_path).resolve()
         self._selected_analysts = selected_analysts or ["market", "news", "social"]
@@ -97,20 +103,24 @@ class AgentBridge:
             logger.debug("AgentBridge: added {} to sys.path", agents_str)
 
         try:
-            module = importlib.import_module("graph.trading_graph")  # Try relative to project root
-            # Or absolute if installed as package
-            # module = importlib.import_module("tradingagents.graph.trading_graph")
-
-            # Since we added agents_path to sys.path, "graph.trading_graph" might work
-            # if TradingAgents has that structure. Let's try flexible import.
-            if not module:
+            try:
                 module = importlib.import_module("tradingagents.graph.trading_graph")
+                default_config_module = importlib.import_module("tradingagents.default_config")
+            except ModuleNotFoundError as e:
+                logger.warning(f"Fallback import due to {e}")
+                module = importlib.import_module("graph.trading_graph")
+                default_config_module = importlib.import_module("default_config")
 
             graph_cls = getattr(module, "TradingAgentsGraph")
+            default_config = getattr(default_config_module, "DEFAULT_CONFIG", {})
+
+            # Merge provided config into DEFAULT_CONFIG so keys like project_dir are present
+            merged_config = default_config.copy()
+            merged_config.update(self._config)
 
             self._graph = graph_cls(
                 selected_analysts=self._selected_analysts,
-                config=self._config,
+                config=merged_config,
             )
             logger.info(
                 "AgentBridge: loaded TradingAgentsGraph (analysts={})",
@@ -126,7 +136,7 @@ class AgentBridge:
         self,
         symbol: str,
         trade_date: str,
-        qlib_data: Dict[str, Any] | None = None,
+        qlib_data: dict[str, Any] | None = None,
     ) -> AgentDecision:
         """Run multi-agent decision for a single symbol.
 
@@ -143,6 +153,7 @@ class AgentBridge:
         logger.info("AgentBridge: deciding on {} for {}", symbol, trade_date)
 
         try:
+            # We don't pass market_type to propagate anymore as it's handled via __init__ config
             final_state, decision = self._graph.propagate(
                 company_name=symbol,
                 trade_date=trade_date,
@@ -152,7 +163,24 @@ class AgentBridge:
             # Extract risk report from final state if available
             risk_report = ""
             if isinstance(final_state, dict):
-                risk_report = final_state.get("risk_report", "")
+                # Check for TradingAgents standard outputs
+                if (
+                    "trader_investment_plan" in final_state
+                    and final_state["trader_investment_plan"]
+                ):
+                    risk_report = str(final_state["trader_investment_plan"])
+                elif (
+                    "risk_debate_state" in final_state
+                    and "judge_decision" in final_state["risk_debate_state"]
+                ):
+                    risk_report = str(final_state["risk_debate_state"]["judge_decision"])
+                elif (
+                    "investment_debate_state" in final_state
+                    and "judge_decision" in final_state["investment_debate_state"]
+                ):
+                    risk_report = str(final_state["investment_debate_state"]["judge_decision"])
+                else:
+                    risk_report = final_state.get("risk_report", "")
 
             result = AgentDecision(
                 symbol=symbol,
@@ -170,7 +198,11 @@ class AgentBridge:
             return result
 
         except Exception as e:
-            logger.error("AgentBridge: propagate() failed for {}: {}", symbol, e)
+            import traceback
+
+            logger.error(
+                "AgentBridge: propagate() failed for {}: {}\n{}", symbol, e, traceback.format_exc()
+            )
             return AgentDecision(
                 symbol=symbol,
                 decision="HOLD",
@@ -178,11 +210,31 @@ class AgentBridge:
                 risk_report=f"Error during agent decision: {e}",
             )
 
+    async def decide_async(
+        self,
+        symbol: str,
+        trade_date: str,
+        qlib_data: dict[str, Any] | None = None,
+    ) -> AgentDecision:
+        """Async wrapper around decide() — runs synchronous LLM call in a thread.
+
+        Prevents blocking the event loop while TradingAgents processes.
+
+        Args:
+            symbol: FX pair (e.g. "EURUSD").
+            trade_date: Date string (e.g. "2026-02-12").
+            qlib_data: Scanner signal data dict for injection.
+
+        Returns:
+            AgentDecision with BUY/SELL/HOLD and full state.
+        """
+        return await asyncio.to_thread(self.decide, symbol, trade_date, qlib_data)
+
     def decide_batch(
         self,
-        signals: List[Dict[str, Any]],
+        signals: list[dict[str, Any]],
         trade_date: str,
-    ) -> List[AgentDecision]:
+    ) -> list[AgentDecision]:
         """Run decisions for multiple symbols sequentially.
 
         Args:
@@ -219,7 +271,7 @@ class AgentBridge:
         )
         return results
 
-    def reflect(self, returns_losses: Dict[str, float]) -> None:
+    def reflect(self, returns_losses: dict[str, float]) -> None:
         """Feed realized PnL back to TradingAgents for memory updates.
 
         Calls reflect_and_remember() which updates all agent memories

@@ -1,9 +1,11 @@
 """
 E8 Markets Prop Firm compliance engine — safety-critical module.
 
-Enforces all E8 Signature rules before any trade is executed:
-1. Daily drawdown limit (5% Soft Breach → Daily Pause)
-2. Max drawdown limit (8% Hard Breach → account terminated)
+Enforces all E8 account rules before any trade is executed:
+1. Daily drawdown limit (Soft Breach → Daily Pause)
+2. Max drawdown limit (Hard Breach → account terminated)
+   - Balance-based (E8 Signature $50k): fixed floor from initial balance
+   - Dynamic / trailing (E8 Trial $5k): floor tracks equity high-water mark
 3. 40% Best Day Rule (single day profit cap)
 4. Position count limit
 5. API request budget (2000/day)
@@ -12,15 +14,13 @@ ALL checks must pass before a trade is placed. One failure = trade rejected.
 """
 
 import random
-import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal
+from typing import Any, Literal
 
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from src.config import ComplianceConfig, ExecutionConfig, InstrumentConfig
-
 
 # ── Data Models ─────────────────────────────────────────────────────────────
 
@@ -31,7 +31,7 @@ class ComplianceResult(BaseModel):
     passed: bool
     reason: str = ""
     rule_name: str = ""
-    details: Dict[str, Any] = {}
+    details: dict[str, Any] = {}
 
 
 class TradePlan(BaseModel):
@@ -57,13 +57,20 @@ class AccountSnapshot(BaseModel):
     open_positions: int = 0
     daily_pnl: float = Field(default=0.0, description="Realized + unrealized PnL for today")
     total_pnl: float = Field(default=0.0, description="Total PnL since account start")
+    equity_high_water_mark: float | None = Field(
+        default=None,
+        description=(
+            "Highest equity ever reached. Required for dynamic drawdown accounts. "
+            "If None, falls back to initial_balance for dynamic drawdown calculations."
+        ),
+    )
 
 
 # ── PropFirmGuard ───────────────────────────────────────────────────────────
 
 
 class PropFirmGuard:
-    """E8 Markets Signature $50k compliance engine.
+    """E8 Markets compliance engine — supports Signature and Trial accounts.
 
     Usage:
         guard = PropFirmGuard(config, execution_config, instruments)
@@ -76,7 +83,7 @@ class PropFirmGuard:
         self,
         config: ComplianceConfig,
         execution_config: ExecutionConfig,
-        instruments: Dict[str, InstrumentConfig],
+        instruments: dict[str, InstrumentConfig],
     ) -> None:
         self._config = config
         self._exec_config = execution_config
@@ -149,25 +156,48 @@ class PropFirmGuard:
         return ComplianceResult(passed=True, rule_name="DAILY_DRAWDOWN")
 
     def check_max_drawdown(self, trade: TradePlan, account: AccountSnapshot) -> ComplianceResult:
-        """E8 rule: (initial_balance - equity) must not exceed 8% of initial_balance."""
+        """E8 rule: max drawdown check — supports balance-based and dynamic (trailing HWM).
+
+        Balance-based (E8 Signature $50k):
+            Floor = initial_balance × (1 - max_drawdown_limit)
+            Loss measured from initial_balance.
+
+        Dynamic / Trailing (E8 Trial $5k):
+            Floor = equity_high_water_mark × (1 - max_drawdown_limit)
+            Loss measured from equity_high_water_mark. Floor only moves UP.
+        """
         limit = self._config.max_drawdown_limit
         stop_ratio = self._config.max_drawdown_stop
+        drawdown_type = self._config.drawdown_type
 
-        max_allowed_loss = account.initial_balance * limit
-        current_loss = max(0.0, account.initial_balance - account.equity)
+        # Determine reference point based on drawdown type
+        if drawdown_type == "dynamic":
+            # Dynamic: trailing high-water mark — floor rises with equity peaks
+            reference = account.equity_high_water_mark or account.initial_balance
+            rule_label = "MAX_DRAWDOWN_DYNAMIC"
+        else:
+            # Balance-based (default): fixed floor from initial balance
+            reference = account.initial_balance
+            rule_label = "MAX_DRAWDOWN"
+
+        max_allowed_loss = reference * limit
+        current_loss = max(0.0, reference - account.equity)
         projected_loss = current_loss + trade.risk_amount
         safe_limit = max_allowed_loss * stop_ratio
 
         if projected_loss >= safe_limit:
             return ComplianceResult(
                 passed=False,
-                rule_name="MAX_DRAWDOWN",
+                rule_name=rule_label,
                 reason=(
                     f"Projected total loss ${projected_loss:.2f} would exceed "
                     f"safety limit ${safe_limit:.2f} "
-                    f"({stop_ratio:.0%} of ${max_allowed_loss:.2f} max)"
+                    f"({stop_ratio:.0%} of ${max_allowed_loss:.2f} max, "
+                    f"type={drawdown_type}, ref=${reference:.2f})"
                 ),
                 details={
+                    "drawdown_type": drawdown_type,
+                    "reference": reference,
                     "current_loss": current_loss,
                     "trade_risk": trade.risk_amount,
                     "projected_loss": projected_loss,
@@ -176,7 +206,7 @@ class PropFirmGuard:
                 },
             )
 
-        return ComplianceResult(passed=True, rule_name="MAX_DRAWDOWN")
+        return ComplianceResult(passed=True, rule_name=rule_label)
 
     def check_best_day_rule(self, trade: TradePlan, account: AccountSnapshot) -> ComplianceResult:
         """E8 rule: daily PnL + potential profit must not exceed best_day_limit.
@@ -321,7 +351,7 @@ class PropFirmGuard:
             self._daily_api_reset_date = today
 
     def _estimate_potential_profit(self, trade: TradePlan) -> float:
-        """Estimate potential profit from take profit price.
+        """Estimate potential profit from take profit pips.
 
         This is a rough estimate for Best Day Rule checking.
         """
@@ -329,15 +359,12 @@ class PropFirmGuard:
         if inst is None:
             return trade.risk_amount * 2  # Assume 1:2 RR as fallback
 
-        pip_size = inst.pip_size
         pip_value = inst.pip_value
 
-        if trade.take_profit <= 0 or trade.stop_loss <= 0:
+        if trade.take_profit <= 0:
             return trade.risk_amount * 2
 
-        if trade.side == "BUY":
-            tp_pips = abs(trade.take_profit - trade.stop_loss) / pip_size
-        else:
-            tp_pips = abs(trade.stop_loss - trade.take_profit) / pip_size
+        # trade.take_profit is stored as pips in TradePlan
+        tp_pips = trade.take_profit
 
         return tp_pips * pip_value * trade.volume

@@ -8,8 +8,6 @@ The EquityMonitor calls update() periodically and reads the results.
 
 from typing import Literal
 
-from loguru import logger
-
 from src.config import ComplianceConfig
 
 

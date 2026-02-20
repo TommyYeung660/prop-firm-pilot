@@ -1,0 +1,44 @@
+# E8 Markets - E8 One $5,000 Challenge Account Configuration
+# Sourced from official Help Center (Trailing Drawdown / Daily Pause Rules)
+
+account_name: "e8_one_5k_challenge"
+
+account:
+  plan: "E8 One Challenge"
+  initial_balance: 5000
+
+compliance:
+  # E8 One 規則 (依據使用者 Dashboard 客製化數據):
+  daily_drawdown_limit: 0.04    # 4% Daily Drawdown (每日最大浮動或已實現虧損)
+  max_drawdown_limit: 0.06      # 6% Dynamic Drawdown (動態回撤，最高鎖定在初始資金)
+  profit_target: 0.09            # 9% 利潤目標 ($450)
+  best_day_ratio: 0.40           # 40% Best Day Rule (單日獲利不可超過總獲利的40%)
+  best_day_limit: 180            # $450 × 40% = $180/天 (安全閥)
+  daily_api_request_limit: 2000  # 每日 API 請求上限 (官網規定 2000)
+  drawdown_type: "dynamic"       # 動態回撤 (Trailing High-Water Mark)
+
+  # 安全裕度 (提前停止交易，避免觸碰紅線)
+  daily_drawdown_stop: 0.85      # 達到日損 85% 時停止
+  max_drawdown_stop: 0.85        # 達到總損 85% 時停止
+  best_day_stop: 0.85            # 達到最佳日限額 85% 時停止
+
+execution:
+  max_positions: 1               # E8 One 建議謹慎交易，設定為 1
+  default_risk_per_trade: 0.005  # 每筆交易風險 0.5% ($25)
+  max_slippage_pips: 2.0
+  random_delay_min: 0.5
+  random_delay_max: 2.0
+
+instruments:
+  EURUSD:
+    pip_size: 0.0001
+    pip_value: 10.0
+    min_lot: 0.01
+    max_lot: 5.0
+    spread_pips: 0.2
+  XAUUSD:
+    pip_size: 0.01
+    pip_value: 1.0
+    min_lot: 0.01
+    max_lot: 5.0
+    spread_pips: 1.5

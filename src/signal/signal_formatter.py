@@ -5,7 +5,7 @@ Primarily converts between scanner output format and TradingAgents input format.
 Also handles signal filtering and enrichment.
 """
 
-from typing import Any, Dict, List, Literal
+from typing import Any, Literal
 
 from loguru import logger
 
@@ -33,11 +33,11 @@ def classify_signal_strength(
 
 
 def filter_actionable_signals(
-    signals: List[Dict[str, Any]],
+    signals: list[dict[str, Any]],
     min_score: float = 0.0,
     min_confidence: str = "low",
     max_signals: int = 3,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Filter signals to only actionable ones.
 
     Args:
@@ -76,9 +76,9 @@ def filter_actionable_signals(
 
 
 def enrich_with_side_suggestion(
-    signal: Dict[str, Any],
+    signal: dict[str, Any],
     score_threshold: float = 0.5,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Add a suggested side (BUY/SELL) based on score.
 
     Scanner scores > threshold suggest BUY (model predicts upward movement).

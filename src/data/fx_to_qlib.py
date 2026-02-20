@@ -23,7 +23,7 @@ Qlib binary directory structure:
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -34,7 +34,7 @@ FEATURE_COLUMNS = ["open", "high", "low", "close", "volume", "factor"]
 
 
 def convert_to_qlib_binary(
-    data: Dict[str, pd.DataFrame],
+    data: dict[str, pd.DataFrame],
     output_dir: str | Path,
 ) -> Path:
     """Convert FX DataFrames to Qlib binary format.
@@ -60,7 +60,7 @@ def convert_to_qlib_binary(
 
     # Build unified trading calendar from all symbols
     all_dates: set[pd.Timestamp] = set()
-    processed_data: Dict[str, pd.DataFrame] = {}
+    processed_data: dict[str, pd.DataFrame] = {}
 
     for symbol, df in data.items():
         if df.empty:
@@ -124,7 +124,7 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _write_calendar(calendars_dir: Path, calendar: List[pd.Timestamp]) -> None:
+def _write_calendar(calendars_dir: Path, calendar: list[pd.Timestamp]) -> None:
     """Write calendars/day.txt — one date per line, YYYY-MM-DD."""
     cal_path = calendars_dir / "day.txt"
     with open(cal_path, "w", encoding="utf-8") as f:
@@ -136,8 +136,8 @@ def _write_calendar(calendars_dir: Path, calendar: List[pd.Timestamp]) -> None:
 
 def _write_instruments(
     instruments_dir: Path,
-    data: Dict[str, pd.DataFrame],
-    calendar: List[pd.Timestamp],
+    data: dict[str, pd.DataFrame],
+    calendar: list[pd.Timestamp],
 ) -> None:
     """Write instruments/all.txt — one line per instrument with date range."""
     all_path = instruments_dir / "all.txt"
@@ -154,7 +154,7 @@ def _write_symbol_features(
     features_dir: Path,
     symbol: str,
     df: pd.DataFrame,
-    cal_index: Dict[pd.Timestamp, int],
+    cal_index: dict[pd.Timestamp, int],
     cal_length: int,
 ) -> None:
     """Write binary feature files for a single symbol."""
@@ -179,8 +179,8 @@ def _write_symbol_features(
         else:
             # Create full-length array (NaN for missing days)
             values = np.full(cal_length, np.nan, dtype=np.float32)
-            datetime_col: List[Any] = df["datetime"].tolist()
-            col_values: List[Any] = df[col].tolist()
+            datetime_col: list[Any] = df["datetime"].tolist()
+            col_values: list[Any] = df[col].tolist()
             for i in range(len(datetime_col)):
                 idx = cal_index.get(datetime_col[i])
                 if idx is not None:

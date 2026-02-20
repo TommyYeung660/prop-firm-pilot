@@ -8,11 +8,10 @@ Usage:
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
-
 
 # ── FX Instrument Config ────────────────────────────────────────────────────
 
@@ -54,8 +53,13 @@ class ComplianceConfig(BaseModel):
         default=1600.0, description="profit_target * initial_balance * best_day_ratio"
     )
     daily_api_request_limit: int = Field(default=2000, description="API request limit per day")
-    drawdown_type: Literal["balance", "equity"] = Field(
-        default="balance", description="E8 uses balance-based drawdown"
+    drawdown_type: Literal["balance", "equity", "dynamic"] = Field(
+        default="balance",
+        description=(
+            "balance: fixed floor based on initial_balance (E8 Signature). "
+            "equity: floor based on current equity. "
+            "dynamic: trailing high-water mark — floor rises with equity peaks (E8 Trial)."
+        ),
     )
 
     # Safety margins — stop trading before hitting hard limits
@@ -94,7 +98,7 @@ class AgentsConfig(BaseModel):
     """Bridge config for TradingAgents."""
 
     project_path: str = "../../TradingAgents"
-    selected_analysts: List[str] = ["market", "news", "social"]
+    selected_analysts: list[str] = ["market", "news", "social"]
     deep_think_llm: str = "volcengine/glm-4.7"
     quick_think_llm: str = "volcengine/glm-4.7"
     output_language: str = "繁體中文"
@@ -118,6 +122,7 @@ class MonitorConfig(BaseModel):
     drawdown_alert_pct: float = 0.80
     auto_close_pct: float = 0.90
     trade_journal_path: str = "data/trade_journal.jsonl"
+    memory_dir: str = "MEMORY"
 
 
 class ScheduleConfig(BaseModel):
@@ -126,6 +131,35 @@ class ScheduleConfig(BaseModel):
     daily_cycle: str = "06:00"
     equity_monitor: str = "always"
     rdagent_trigger: str = "weekend"
+
+
+class DecisionStoreConfig(BaseModel):
+    """SQLite decision store settings for the Hybrid EA+LLM pipeline."""
+
+    db_path: str = "data/decisions.db"
+    claim_ttl_minutes: int = Field(default=30, description="Max minutes for LLM to process a claim")
+    intent_retention_days: int = Field(
+        default=7, description="Days to keep old intents before cleanup"
+    )
+
+
+class SchedulerConfig(BaseModel):
+    """Async scheduler cadences for the Hybrid EA+LLM pipeline."""
+
+    scanner_interval_seconds: int = Field(default=14400, description="Scanner cycle interval (4h)")
+    llm_poll_interval_seconds: int = Field(default=30, description="LLM worker poll interval")
+    execution_poll_interval_seconds: int = Field(default=10, description="Execution engine poll")
+    janitor_interval_seconds: int = Field(default=600, description="Janitor cleanup cycle (10min)")
+    llm_worker_count: int = Field(default=1, description="Number of concurrent LLM workers")
+    equity_poll_interval_seconds: int = Field(
+        default=60, description="Equity monitor poll interval"
+    )
+    position_monitor_interval_seconds: int = Field(
+        default=30, description="Position close detection poll interval"
+    )
+    daily_summary_hour_utc: int = Field(
+        default=22, description="UTC hour to send daily summary (0-23)"
+    )
 
 
 class LoggingConfig(BaseModel):
@@ -143,7 +177,7 @@ class LoggingConfig(BaseModel):
 class AppConfig(BaseModel):
     """Root configuration for prop-firm-pilot."""
 
-    symbols: List[str] = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"]
+    symbols: list[str] = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"]
     account: AccountConfig = AccountConfig()
     compliance: ComplianceConfig = ComplianceConfig()
     data: DataConfig = DataConfig()
@@ -153,13 +187,15 @@ class AppConfig(BaseModel):
     monitor: MonitorConfig = MonitorConfig()
     schedule: ScheduleConfig = ScheduleConfig()
     logging: LoggingConfig = LoggingConfig()
-    instruments: Dict[str, InstrumentConfig] = {}
+    instruments: dict[str, InstrumentConfig] = {}
+    decision_store: DecisionStoreConfig = DecisionStoreConfig()
+    scheduler: SchedulerConfig = SchedulerConfig()
 
 
 # ── Config Loading ──────────────────────────────────────────────────────────
 
 
-def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Recursively merge override into base dict."""
     merged = base.copy()
     for key, value in override.items():
@@ -190,15 +226,15 @@ def load_config(
         default_path = config_path.parent / "default.yaml"
 
     # Load default config
-    base_data: Dict[str, Any] = {}
+    base_data: dict[str, Any] = {}
     if Path(default_path).exists():
-        with open(default_path, "r", encoding="utf-8") as f:
+        with open(default_path, encoding="utf-8") as f:
             base_data = yaml.safe_load(f) or {}
 
     # Load account-specific config
-    override_data: Dict[str, Any] = {}
+    override_data: dict[str, Any] = {}
     if config_path.exists():
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             override_data = yaml.safe_load(f) or {}
 
     # Merge: account config overrides defaults

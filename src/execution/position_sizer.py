@@ -8,7 +8,6 @@ Applies random offset (±10%) to prevent duplicate strategy detection by E8.
 """
 
 import random
-from typing import Dict
 
 from loguru import logger
 
@@ -27,7 +26,7 @@ class PositionSizer:
     def __init__(
         self,
         config: ExecutionConfig,
-        instruments: Dict[str, InstrumentConfig],
+        instruments: dict[str, InstrumentConfig],
     ) -> None:
         self._config = config
         self._instruments = instruments

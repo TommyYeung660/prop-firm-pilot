@@ -5,14 +5,13 @@ Configures which analysts are active, which data sources they use,
 and how their prompts are adapted for FX trading.
 """
 
-from typing import Any, Dict, List
-
+from typing import Any
 
 # FX-appropriate analysts (removed: fundamentals, options — not applicable to FX)
-FX_ANALYSTS = ["market", "news", "social"]
+FX_ANALYSTS = ["macro", "market", "news", "social"]
 
 # Analyst-specific data vendor mapping for FX
-FX_DATA_VENDORS: Dict[str, Dict[str, str]] = {
+FX_DATA_VENDORS: dict[str, dict[str, str]] = {
     "market": {
         "source": "itick",
         "data_type": "OHLCV daily bars",
@@ -47,7 +46,7 @@ FX_KEY_EVENTS = [
 ]
 
 # FX pair characteristics for agent context
-FX_PAIR_CONTEXT: Dict[str, Dict[str, Any]] = {
+FX_PAIR_CONTEXT: dict[str, dict[str, Any]] = {
     "EURUSD": {
         "description": "Euro vs US Dollar — most liquid pair",
         "key_drivers": ["ECB/Fed rate differential", "EU GDP", "US NFP"],
@@ -85,7 +84,7 @@ def build_agent_config(
     deep_think_llm: str = "volcengine/glm-4.7",
     quick_think_llm: str = "volcengine/glm-4.7",
     output_language: str = "繁體中文",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Build TradingAgents config dict for FX trading.
 
     Returns:
@@ -95,6 +94,7 @@ def build_agent_config(
         "deep_think_llm": deep_think_llm,
         "quick_think_llm": quick_think_llm,
         "output_language": output_language,
+        "market_type": "fx",  # newly added for TradingAgents integration
         "data_vendors": {
             "core_stock_apis": "itick",
             "news_data": "alpha_vantage",
@@ -106,7 +106,7 @@ def build_agent_config(
     }
 
 
-def get_pair_context(symbol: str) -> Dict[str, Any]:
+def get_pair_context(symbol: str) -> dict[str, Any]:
     """Get FX pair context for agent prompts."""
     return FX_PAIR_CONTEXT.get(
         symbol,

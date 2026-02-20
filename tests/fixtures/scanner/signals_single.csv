@@ -1,0 +1,2 @@
+datetime,instrument,score,rank,score_gap,drop_distance,topk_spread,confidence,weight
+2026-02-16,EURUSD,0.9200000000000000,1.0,0.150000,0.300000,0.150000,high,0.333

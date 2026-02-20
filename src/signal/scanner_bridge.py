@@ -4,11 +4,9 @@ converts its output into the format expected by TradingAgents.
 """
 
 import csv
-import json
 import subprocess
-import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from loguru import logger
 
@@ -36,7 +34,7 @@ class ScannerSignal:
         self.topk_spread = topk_spread
         self.weight = weight
 
-    def to_qlib_data(self) -> Dict[str, Any]:
+    def to_qlib_data(self) -> dict[str, Any]:
         """Convert to qlib_data dict for TradingAgents.propagate().
 
         This matches the interface in run_qlib_integration.py:
@@ -85,8 +83,8 @@ class ScannerBridge:
     def run_pipeline(
         self,
         date: str | None = None,
-        tickers: List[str] | None = None,
-    ) -> List[ScannerSignal]:
+        tickers: list[str] | None = None,
+    ) -> list[ScannerSignal]:
         """Run the scanner pipeline and return parsed signals.
 
         Args:
@@ -102,9 +100,12 @@ class ScannerBridge:
             date or "default",
         )
 
-        # Build command: python -m src.main --profile fx ...
+        # Use 'uv run' to ensure we use the scanner's own environment/dependencies
+        # instead of inheriting the current pilot environment.
         cmd = [
-            sys.executable,
+            "uv",
+            "run",
+            "python",
             "-m",
             "src.main",
             "--profile",
@@ -164,7 +165,7 @@ class ScannerBridge:
             logger.error("ScannerBridge: failed to run pipeline: {}", e)
             return []
 
-    def load_signals_from_file(self, path: str | Path) -> List[ScannerSignal]:
+    def load_signals_from_file(self, path: str | Path) -> list[ScannerSignal]:
         """Load signals from a pre-existing signals.csv file."""
         path = Path(path)
         if not path.exists():
@@ -173,7 +174,7 @@ class ScannerBridge:
 
         signals = []
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for i, row in enumerate(reader):
                     try:
