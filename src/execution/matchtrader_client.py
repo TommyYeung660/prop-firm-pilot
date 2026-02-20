@@ -465,8 +465,16 @@ class MatchTraderClient:
         """
         await self._ensure_auth()
 
+        # Determine actual symbol to trade (append '.' if needed for this account)
+        trade_symbol = symbol
+        instruments = await self.get_effective_instruments()
+        for i in instruments:
+            if i.symbol == symbol or i.symbol == f"{symbol}.":
+                trade_symbol = i.symbol
+                break
+
         body: dict[str, Any] = {
-            "instrument": symbol,
+            "instrument": trade_symbol,
             "orderSide": side.upper(),
             "volume": volume,
         }
