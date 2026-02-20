@@ -13,7 +13,7 @@ symbols:
 data:
   interval: "1d"
   lookback_days: 730  # 2 年歷史數據
-  provider: "itick"   # itick | tradermade | alpha_vantage
+  provider: "alpha_vantage"   # itick | tradermade | alpha_vantage
   duckdb_path: "data/fx_prices.duckdb"
   qlib_binary_dir: "data/qlib_binary"
 
