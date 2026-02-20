@@ -251,7 +251,7 @@ class MatchTraderClient:
 
     async def __aenter__(self) -> "MatchTraderClient":
         self._session = AsyncSession(
-            impersonate="chrome",
+            impersonate="safari",
             timeout=30,
             allow_redirects=True,
         )
