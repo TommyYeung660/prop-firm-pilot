@@ -79,27 +79,17 @@ class EquityMonitor:
         while self._running:
             try:
                 equity = await get_equity()
-
-                # Calculate drawdown percentages
                 daily_dd_pct = self._calc_drawdown_pct(
                     equity, day_start_balance, daily_drawdown_limit
                 )
                 max_dd_pct = self._calc_drawdown_pct(equity, initial_balance, max_drawdown_limit)
-
-                # Determine alert level
                 worst_pct = max(daily_dd_pct, max_dd_pct)
                 level = self._classify_level(worst_pct)
-
-                # Log snapshot
                 if on_equity_snapshot:
                     await on_equity_snapshot(equity, daily_dd_pct, max_dd_pct)
-
-                # Trigger alert if level changed (upward)
                 if self._is_escalation(level) and on_alert:
                     await on_alert(level, daily_dd_pct, max_dd_pct, equity)
                     self._last_alert_level = level
-
-                # Emergency close
                 if worst_pct >= self._auto_close_pct:
                     logger.critical(
                         "EquityMonitor: CRITICAL drawdown {:.1%} — triggering emergency close!",
@@ -110,11 +100,16 @@ class EquityMonitor:
                     self._running = False
                     break
 
+            except asyncio.CancelledError:
+                logger.info("EquityMonitor: cancelled, exiting")
+                break
             except Exception as e:
                 logger.error("EquityMonitor: check failed: {}", e)
-
-            await asyncio.sleep(self._check_interval)
-
+            try:
+                await asyncio.sleep(self._check_interval)
+            except asyncio.CancelledError:
+                logger.info("EquityMonitor: sleep cancelled, exiting")
+                break
         logger.info("EquityMonitor: stopped")
 
     def stop(self) -> None:

@@ -105,10 +105,16 @@ class TelegramBotHandler:
 
                     self._offset = update_id + 1
 
+            except asyncio.CancelledError:
+                logger.info("TelegramBotHandler: cancelled, exiting")
+                break
             except Exception as e:
                 logger.error("TelegramBotHandler: poll error: {}", e)
-
-            await asyncio.sleep(self._poll_interval)
+            try:
+                await asyncio.sleep(self._poll_interval)
+            except asyncio.CancelledError:
+                logger.info("TelegramBotHandler: sleep cancelled, exiting")
+                break
 
         logger.info("TelegramBotHandler: stopped")
 

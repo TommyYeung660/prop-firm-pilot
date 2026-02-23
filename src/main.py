@@ -457,31 +457,39 @@ async def _run_scheduler(config: AppConfig) -> None:
             logger.info("PropFirmPilot: recovered {} stale claims", recovered)
 
         # ── Signal handlers for graceful shutdown ──────────────────────
+        shutdown_event = asyncio.Event()
+
+        def _request_shutdown():
+            logger.info("PropFirmPilot: shutdown signal received")
+            shutdown_event.set()
+
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                loop.add_signal_handler(
-                    sig,
-                    lambda: asyncio.create_task(scheduler.stop()),
-                )
+                loop.add_signal_handler(sig, _request_shutdown)
             except NotImplementedError:
                 # Windows does not support add_signal_handler for SIGTERM;
                 # SIGINT is handled via KeyboardInterrupt fallback below.
                 pass
 
+        # Run scheduler and bot in background tasks
+        scheduler_task = asyncio.create_task(scheduler.start())
+        bot_task = asyncio.create_task(bot_handler.start())
+
         try:
-            # Run scheduler and bot handler concurrently
-            await asyncio.gather(
-                scheduler.start(),
-                bot_handler.start(),
-            )
-        except KeyboardInterrupt:
-            logger.info("PropFirmPilot: KeyboardInterrupt received")
+            # Wait for shutdown signal
+            await shutdown_event.wait()
         finally:
+            logger.info("PropFirmPilot: initiating graceful shutdown")
             bot_handler.stop()
             await scheduler.stop()
+            # Cancel bot task if still running
+            if not bot_task.done():
+                bot_task.cancel()
+            # Wait for both tasks with timeout
+            await asyncio.gather(scheduler_task, bot_task, return_exceptions=True)
             store.close()
-            logger.info("PropFirmPilot: scheduler stopped cleanly")
+            logger.info("PropFirmPilot: shutdown complete")
 
 
 def setup_logging(config: AppConfig) -> None:

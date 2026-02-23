@@ -595,9 +595,12 @@ class TestStartStop:
         #   + position_monitor + daily_summary + 1 LLM worker
         args = mock_gather.call_args[0]
         assert len(args) == 7
-        # Close unawaited coroutines to suppress RuntimeWarning
-        for coro in args:
-            coro.close()
+        # Clean up unawaited coroutines / scheduled tasks to suppress warnings
+        for item in args:
+            if hasattr(item, 'close'):
+                item.close()
+            elif hasattr(item, 'cancel'):
+                item.cancel()
 
     async def test_start_with_multiple_llm_workers(
         self,
@@ -625,9 +628,12 @@ class TestStartStop:
         # 6 base loops + 3 LLM workers = 9
         args = mock_gather.call_args[0]
         assert len(args) == 9
-        # Close unawaited coroutines to suppress RuntimeWarning
-        for coro in args:
-            coro.close()
+        # Clean up unawaited coroutines / scheduled tasks to suppress warnings
+        for item in args:
+            if hasattr(item, 'close'):
+                item.close()
+            elif hasattr(item, 'cancel'):
+                item.cancel()
 
 
 # ── Helper Method Tests ─────────────────────────────────────────────────────

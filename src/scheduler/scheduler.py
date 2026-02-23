@@ -191,11 +191,19 @@ class Scheduler:
                         f"conf={signal.confidence})"
                     )
 
+            except asyncio.CancelledError:
+                logger.info("Scanner loop: cancelled")
+                return
             except Exception as e:
                 logger.error("Scanner loop error: {}", e)
                 await self._send_alert(f"⚠️ <b>Scanner Error</b>\n<code>{e}</code>")
+            try:
+                await asyncio.sleep(self._config.scheduler.scanner_interval_seconds)
+            except asyncio.CancelledError:
+                logger.info("Scanner loop: cancelled during sleep")
+                return
 
-            await asyncio.sleep(self._config.scheduler.scanner_interval_seconds)
+        logger.info("Scanner loop: stopped")
 
     async def _llm_worker_loop(self, worker_id: str) -> None:
         """Continuously claim pending intents and evaluate via LLM agents."""
@@ -215,6 +223,10 @@ class Scheduler:
                     intent.symbol,
                 )
                 await self._process_claimed_intent(worker_id, intent)
+
+            except asyncio.CancelledError:
+                logger.info("LLM worker {}: cancelled", worker_id)
+                return
 
             except Exception as e:
                 intent_id = intent.id if intent is not None else "unknown"
@@ -245,6 +257,8 @@ class Scheduler:
                     f"• Intent: {intent_id}\n"
                     f"• Error: <code>{e}</code>"
                 )
+
+        logger.info("LLM worker {}: stopped", worker_id)
 
     async def _process_claimed_intent(self, worker_id: str, intent: TradeIntent) -> None:
         """Evaluate a claimed intent via LLM agents and update the store."""
@@ -330,11 +344,19 @@ class Scheduler:
                 processed = await self._engine.execute_ready_intents()
                 if processed > 0:
                     logger.info("Execution loop: processed {} intents", processed)
+            except asyncio.CancelledError:
+                logger.info("Execution loop: cancelled")
+                return
             except Exception as e:
                 logger.error("Execution loop error: {}", e)
                 await self._send_alert(f"⚠️ <b>Execution Loop Error</b>\n<code>{e}</code>")
+            try:
+                await asyncio.sleep(self._config.scheduler.execution_poll_interval_seconds)
+            except asyncio.CancelledError:
+                logger.info("Execution loop: cancelled during sleep")
+                return
 
-            await asyncio.sleep(self._config.scheduler.execution_poll_interval_seconds)
+        logger.info("Execution loop: stopped")
 
     async def _janitor_loop(self) -> None:
         """Periodically recycle expired claims and clean old intents."""
@@ -348,10 +370,18 @@ class Scheduler:
                         recycled,
                         cleaned,
                     )
+            except asyncio.CancelledError:
+                logger.info("Janitor loop: cancelled")
+                return
             except Exception as e:
                 logger.error("Janitor loop error: {}", e)
+            try:
+                await asyncio.sleep(self._config.scheduler.janitor_interval_seconds)
+            except asyncio.CancelledError:
+                logger.info("Janitor loop: cancelled during sleep")
+                return
 
-            await asyncio.sleep(self._config.scheduler.janitor_interval_seconds)
+        logger.info("Janitor loop: stopped")
 
     async def _equity_monitor_loop(self) -> None:
         """Start equity monitoring with drawdown alerts."""
@@ -370,6 +400,10 @@ class Scheduler:
                 daily_drawdown_limit=self._config.compliance.daily_drawdown_limit,
                 max_drawdown_limit=self._config.compliance.max_drawdown_limit,
             )
+        except asyncio.CancelledError:
+            logger.info("Equity monitor loop: cancelled")
+            return
+
         except Exception as e:
             logger.error("Equity monitor loop error: {}", e)
 
@@ -408,11 +442,20 @@ class Scheduler:
                     if self._best_day_tracker.should_close_winners() and open_positions:
                         await self._close_winning_positions(open_positions)
 
+            except asyncio.CancelledError:
+                logger.info("Position monitor loop: cancelled")
+                return
             except Exception as e:
                 logger.error("Position monitor loop error: {}", e)
                 await self._send_alert(f"⚠️ <b>Position Monitor Error</b>\n<code>{e}</code>")
 
-            await asyncio.sleep(self._config.scheduler.position_monitor_interval_seconds)
+            try:
+                await asyncio.sleep(self._config.scheduler.position_monitor_interval_seconds)
+            except asyncio.CancelledError:
+                logger.info("Position monitor loop: cancelled during sleep")
+                return
+
+        logger.info("Position monitor loop: stopped")
 
     async def _handle_position_closed(self, intent: TradeIntent) -> None:
         """Process a detected position closure — update store and send alert.
@@ -598,10 +641,18 @@ class Scheduler:
                 if now.hour == target_hour and self._daily_summary_sent_date != today_str:
                     await self._send_daily_summary(today_str)
                     self._daily_summary_sent_date = today_str
+            except asyncio.CancelledError:
+                logger.info("Daily summary loop: cancelled")
+                return
             except Exception as e:
                 logger.error("Daily summary loop error: {}", e)
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                logger.info("Daily summary loop: cancelled during sleep")
+                return
 
-            await asyncio.sleep(60)
+        logger.info("Daily summary loop: stopped")
 
     # ── Alert Helper ────────────────────────────────────────────────────
 
