@@ -14,6 +14,7 @@ Usage:
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -97,6 +98,22 @@ CREATE TABLE IF NOT EXISTS api_calls (
     updated_at  TEXT NOT NULL,
     PRIMARY KEY (call_date)
 )
+"""
+
+CREATE_EQUITY_SNAPSHOTS_TABLE = """
+CREATE TABLE IF NOT EXISTS equity_snapshots (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp       TEXT NOT NULL,
+    equity          REAL NOT NULL,
+    balance         REAL,
+    daily_dd_pct    REAL NOT NULL DEFAULT 0,
+    max_dd_pct      REAL NOT NULL DEFAULT 0,
+    open_positions  INTEGER DEFAULT 0
+)
+"""
+
+CREATE_EQUITY_SNAPSHOTS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_equity_ts ON equity_snapshots(timestamp);
 """
 
 INSERT_INTENT_SQL = """
@@ -214,6 +231,8 @@ class DecisionStore:
         self._conn.executescript(CREATE_DECISIONS_TABLE)
         self._conn.executescript(CREATE_INDEXES)
         self._conn.executescript(CREATE_API_CALLS_TABLE)
+        self._conn.executescript(CREATE_EQUITY_SNAPSHOTS_TABLE)
+        self._conn.executescript(CREATE_EQUITY_SNAPSHOTS_INDEX)
         self._conn.commit()
         self._ensure_columns()
         logger.debug("Decision store tables ensured at {}", self._db_path)
@@ -586,6 +605,18 @@ class DecisionStore:
             intent_id, realized_pnl, exit_reason,
         )
 
+    def update_execution_meta(self, intent_id: str, meta_json: str) -> None:
+        """Persist execution metadata (latency, slippage, prices) on the decision record.
+        Args:
+            intent_id: The intent whose decision record to update.
+            meta_json: JSON string with execution details.
+        """
+        self._conn.execute(
+            "UPDATE decisions SET execution_meta = :meta WHERE intent_id = :id",
+            {"meta": meta_json, "id": intent_id},
+        )
+        self._conn.commit()
+        logger.debug("Updated execution_meta for intent {}", intent_id)
     # ── Queries ─────────────────────────────────────────────────────
 
     def get_pending_intents(self) -> list[TradeIntent]:
@@ -782,6 +813,55 @@ class DecisionStore:
         ).fetchone()
         return row["call_count"] if row else 0
 
+    # ── Equity Snapshots ────────────────────────────────────────────
+
+    def insert_equity_snapshot(
+        self,
+        equity: float,
+        daily_dd_pct: float,
+        max_dd_pct: float,
+        balance: float | None = None,
+        open_positions: int = 0,
+    ) -> None:
+        """Persist a periodic equity snapshot for drawdown analysis.
+        Called by the EquityMonitor callback to build an equity curve.
+        Args:
+            daily_dd_pct: Daily drawdown as fraction of limit consumed (0.0-1.0+).
+            max_dd_pct: Max drawdown as fraction of limit consumed (0.0-1.0+).
+            balance: Current account balance (optional).
+            open_positions: Number of currently open positions.
+        """
+        now_str = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            """INSERT INTO equity_snapshots
+               (timestamp, equity, balance, daily_dd_pct, max_dd_pct, open_positions)
+               VALUES (:ts, :equity, :balance, :daily_dd, :max_dd, :positions)""",
+            {
+                "ts": now_str,
+                "equity": equity,
+                "balance": balance,
+                "daily_dd": daily_dd_pct,
+                "max_dd": max_dd_pct,
+                "positions": open_positions,
+            },
+        )
+        self._conn.commit()
+
+    def get_equity_history(self, hours: int = 24) -> list[dict[str, Any]]:
+        """Query equity snapshots from the last N hours.
+
+        Returns:
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff_str = cutoff.isoformat()
+        rows = self._conn.execute(
+            """SELECT timestamp, equity, balance, daily_dd_pct, max_dd_pct, open_positions
+               FROM equity_snapshots
+               WHERE timestamp >= :cutoff
+               ORDER BY timestamp ASC""",
+            {"cutoff": cutoff_str},
+        ).fetchall()
+        return [dict(row) for row in rows]
     # ── Dashboard Query Helpers ─────────────────────────────────────
 
     def get_daily_summary(self, trade_date: str | None = None) -> dict[str, int]:
