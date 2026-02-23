@@ -105,7 +105,7 @@ class TradeIntent(BaseModel):
     # Close result (filled when position closes)
     realized_pnl: float | None = None
     exit_price: float | None = None
-    exit_reason: str | None = None  # tp_hit, sl_hit, manual_close, best_day_close, emergency_close
+    exit_reason: str | None = None  # tp_hit, sl_hit, manual_close, best_day_close, reeval_close, emergency_close
     hold_duration_seconds: int | None = None
 
     def can_transition_to(self, new_status: IntentStatus) -> bool:

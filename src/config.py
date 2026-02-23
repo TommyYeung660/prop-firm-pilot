@@ -161,6 +161,13 @@ class SchedulerConfig(BaseModel):
     daily_summary_hour_utc: int = Field(
         default=22, description="UTC hour to send daily summary (0-23)"
     )
+    breakeven_activation_pct: float = Field(
+        default=0.5,
+        description="Move SL to breakeven when profit reaches this fraction of TP distance",
+    )
+    reeval_interval_seconds: int = Field(
+        default=14400, description="Re-evaluate open positions via LLM every N seconds (4h)"
+    )
 
 
 class LoggingConfig(BaseModel):

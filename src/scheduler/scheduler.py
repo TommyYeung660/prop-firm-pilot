@@ -94,6 +94,13 @@ class Scheduler:
         self._daily_summary_sent_date: str = ""  # Track last daily summary date
         self._best_day_close_positions: set[str] = set()  # Track Best Day forced closes
 
+
+        # Phase 2.5: Trailing stop / breakeven tracking
+        self._breakeven_applied: set[str] = set()  # position IDs where SL moved to BE
+
+        # Phase 2.6: Re-evaluation tracking
+        self._last_reevaluation: dict[str, datetime] = {}  # position_id -> last eval time
+        self._reevaluation_close_positions: set[str] = set()  # positions closed by reeval
     # ── Public API ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -443,6 +450,14 @@ class Scheduler:
                     if self._best_day_tracker.should_close_winners() and open_positions:
                         await self._close_winning_positions(open_positions)
 
+                    # Phase 2.5: Trailing stop — move SL to breakeven
+                    if open_positions:
+                        await self._apply_breakeven_stops(open_positions, opened_intents)
+
+                    # Phase 2.6: Re-evaluate open positions via LLM
+                    if open_positions:
+                        await self._reevaluate_open_positions(open_positions, opened_intents)
+
             except asyncio.CancelledError:
                 logger.info("Position monitor loop: cancelled")
                 return
@@ -513,6 +528,14 @@ class Scheduler:
             exit_reason = "best_day_close"
             self._best_day_close_positions.discard(position_id)
 
+        # Override exit_reason if re-evaluation triggered this close
+        if position_id in self._reevaluation_close_positions:
+            exit_reason = "reeval_close"
+            self._reevaluation_close_positions.discard(position_id)
+
+
+        # Clean up reevaluation tracking
+        self._last_reevaluation.pop(position_id, None)
         # Calculate hold duration
         hold_duration_seconds: int | None = None
         if intent.executed_at is not None:
@@ -654,6 +677,193 @@ class Scheduler:
             f"• Total PnL locked: ${total_pnl:+.2f}\n"
             f"• {self._best_day_tracker.summary()}"
         )
+
+
+    async def _apply_breakeven_stops(
+        self, open_positions: list[Any], opened_intents: list[TradeIntent]
+    ) -> None:
+        """Move SL to breakeven when profit reaches configured fraction of TP distance.
+
+        For each open position with a matching intent that has suggested_tp_pips,
+        calculate if profit has reached breakeven_activation_pct of TP distance.
+        If so, modify the position's SL to the entry price (breakeven).
+
+        Args:
+            open_positions: Currently open positions from MatchTrader.
+            opened_intents: Intents in "opened" state from the store.
+        """
+        # Build intent lookup by position_id
+        intent_lookup = {
+            intent.position_id: intent
+            for intent in opened_intents
+            if intent.position_id is not None
+        }
+
+        for pos in open_positions:
+            try:
+                pos_id = str(pos.position_id)
+
+                # Skip if breakeven already applied
+                if pos_id in self._breakeven_applied:
+                    continue
+
+                # Find matching intent
+                intent = intent_lookup.get(pos_id)
+                if intent is None:
+                    continue
+
+                # Skip if no suggested_tp_pips
+                if intent.suggested_tp_pips is None:
+                    continue
+
+                # Resolve config symbol
+                if self._registry is not None:
+                    config_symbol = self._registry.to_config_safe(pos.symbol)
+                else:
+                    config_symbol = pos.symbol.rstrip(".")
+
+                # Get pip_size from instruments
+                instrument = self._config.instruments.get(config_symbol)
+                if instrument is None:
+                    continue
+
+                pip_size = instrument.pip_size
+
+                # Calculate TP distance and profit distance
+                tp_distance = intent.suggested_tp_pips * pip_size
+                profit_distance = abs(pos.current_price - pos.open_price)
+
+                # Check if reached breakeven activation threshold
+                if profit_distance >= tp_distance * self._config.scheduler.breakeven_activation_pct:
+                    result = await self._matchtrader.modify_position(
+                        position_id=pos_id,
+                        symbol=pos.symbol,
+                        side=pos.side,
+                        volume=pos.volume,
+                        sl=pos.open_price,
+                    )
+                    if result.success:
+                        self._breakeven_applied.add(pos_id)
+                        logger.info(
+                            "Breakeven stop applied for position {} ({}) - SL moved to entry price",
+                            pos_id,
+                            pos.symbol,
+                        )
+                        await self._send_alert(
+                            f"🛡️ <b>Breakeven Stop Applied</b>\n"
+                            f"• Position: {pos_id} ({pos.symbol})\n"
+                            f"• SL moved to entry price: {pos.open_price}"
+                        )
+                    else:
+                        logger.warning(
+                            "Failed to apply breakeven stop for position {}: {}",
+                            pos_id,
+                            result.message,
+                        )
+            except Exception as e:
+                logger.error(
+                    "Error applying breakeven stop for position {}: {}",
+                    str(pos.position_id),
+                    e,
+                )
+
+
+    async def _reevaluate_open_positions(
+        self, open_positions: list[Any], opened_intents: list[TradeIntent]
+    ) -> None:
+        """Re-evaluate open positions via LLM agents on a configurable interval.
+
+        When the LLM returns HOLD for a currently open position, actively close
+        that position. This allows the system to exit positions that no longer
+        have favorable conditions.
+
+        Args:
+            open_positions: Currently open positions from MatchTrader.
+            opened_intents: Intents in "opened" state from the store.
+        """
+        # Skip entirely if using mock agents
+        if self._agents.using_mock:
+            logger.debug("Skipping re-evaluation — using mock agents")
+            return
+
+        # Build position lookups
+        open_position_ids = {str(p.position_id) for p in open_positions}
+        position_lookup = {str(p.position_id): p for p in open_positions}
+
+        for intent in opened_intents:
+            try:
+                if intent.position_id is None:
+                    continue
+
+                if intent.position_id not in open_position_ids:
+                    continue
+
+                # Skip if already closed by re-evaluation
+                if intent.position_id in self._reevaluation_close_positions:
+                    continue
+
+                # Check timing - skip if re-evaluated recently
+                last_eval = self._last_reevaluation.get(intent.position_id)
+                if last_eval is not None:
+                    time_since = (self._now_utc() - last_eval).total_seconds()
+                    if time_since < self._config.scheduler.reeval_interval_seconds:
+                        continue
+
+                # Update last evaluation time
+                self._last_reevaluation[intent.position_id] = self._now_utc()
+
+                # Build qlib_data for decision
+                qlib_data = {
+                    "score": intent.scanner_score,
+                    "signal_strength": intent.scanner_confidence,
+                    "confidence": intent.scanner_confidence,
+                    "score_gap": intent.scanner_score_gap,
+                    "drop_distance": intent.scanner_drop_distance,
+                    "topk_spread": intent.scanner_topk_spread,
+                }
+
+                # Get LLM decision
+                decision = await asyncio.to_thread(
+                    self._agents.decide,
+                    symbol=intent.symbol,
+                    trade_date=intent.trade_date,
+                    qlib_data=qlib_data,
+                )
+
+                if decision.decision == "HOLD":
+                    # Get position and close it
+                    pos = position_lookup[intent.position_id]
+                    result = await self._matchtrader.close_position(
+                        position_id=intent.position_id,
+                        symbol=pos.symbol,
+                        side=pos.side,
+                        volume=pos.volume,
+                    )
+                    if result.success:
+                        self._reevaluation_close_positions.add(intent.position_id)
+                        logger.info(
+                            "Re-evaluation closed position {} ({}) - LLM returned HOLD",
+                            intent.position_id,
+                            intent.symbol,
+                        )
+                        await self._send_alert(
+                            f"🔄 <b>Re-evaluation Close</b>\n"
+                            f"• Position: {intent.position_id} ({intent.symbol})\n"
+                            f"• Reason: LLM returned HOLD"
+                        )
+                else:
+                    logger.info(
+                        "Re-evaluation confirms position {} ({}) - decision: {}",
+                        intent.position_id,
+                        intent.symbol,
+                        decision.decision,
+                    )
+            except Exception as e:
+                logger.error(
+                    "Error re-evaluating position {}: {}",
+                    intent.position_id if intent.position_id else "unknown",
+                    e,
+                )
 
     async def _daily_summary_loop(self) -> None:
         """Send a daily summary at the configured UTC hour.
