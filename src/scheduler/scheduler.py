@@ -27,6 +27,7 @@ from typing import Any
 
 from loguru import logger
 
+from src.compliance.best_day_tracker import BestDayTracker
 from src.config import AppConfig
 from src.decision.agent_bridge import AgentBridge
 from src.decision.decision_formatter import format_decision
@@ -67,6 +68,7 @@ class Scheduler:
         matchtrader: MatchTraderClient,
         alert_service: AlertService | None = None,
         instrument_registry: InstrumentRegistry | None = None,
+        best_day_tracker: BestDayTracker | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -76,6 +78,10 @@ class Scheduler:
         self._matchtrader = matchtrader
         self._alert_service = alert_service
         self._registry = instrument_registry
+        self._best_day_tracker = best_day_tracker or BestDayTracker(
+            best_day_limit=config.compliance.best_day_limit,
+            stop_ratio=config.compliance.best_day_stop,
+        )
 
         # Internal subsystems
         self._janitor = Janitor(store, config.decision_store.intent_retention_days)
@@ -242,6 +248,26 @@ class Scheduler:
 
     async def _process_claimed_intent(self, worker_id: str, intent: TradeIntent) -> None:
         """Evaluate a claimed intent via LLM agents and update the store."""
+        # Block mock-based decisions from executing real trades
+        if self._agents.using_mock:
+            logger.critical(
+                "LLM worker {}: BLOCKING intent {} — AgentBridge is using MockTradingGraph. "
+                "Real TradingAgents must be loaded for live trading.",
+                worker_id,
+                intent.id,
+            )
+            await asyncio.to_thread(
+                self._store.mark_cancelled,
+                intent.id,
+                "Mock LLM fallback active — refusing to trade with random decisions",
+            )
+            await self._send_alert(
+                f"🚫 <b>Trade BLOCKED</b>\n"
+                f"• Intent: {intent.symbol}\n"
+                f"• Reason: Mock LLM fallback active — TradingAgents import failed"
+            )
+            return
+
         # Build qlib_data from scanner fields
         qlib_data = {
             "score": intent.scanner_score,
@@ -350,6 +376,9 @@ class Scheduler:
     async def _position_monitor_loop(self) -> None:
         """Detect positions closed by SL/TP/manual and update store + send alerts.
 
+        Also monitors the Best Day Rule — if daily PnL approaches the limit,
+        proactively closes all winning positions to avoid breaching the rule.
+
         Polls every position_monitor_interval_seconds. Compares opened intents
         in the store against currently open positions from MatchTrader. When an
         intent's position_id is no longer in the open positions list, the position
@@ -365,10 +394,20 @@ class Scheduler:
                     open_positions = await self._matchtrader.get_open_positions()
                     open_position_ids = {str(p.position_id) for p in open_positions}
 
+                    # Update BestDayTracker with current unrealized PnL
+                    total_unrealized = sum(p.profit for p in open_positions)
+                    self._best_day_tracker.update_unrealized(total_unrealized)
+
+                    # Check for closed positions (SL/TP/manual)
                     for intent in opened_intents:
                         if intent.position_id and intent.position_id not in open_position_ids:
                             # Position was closed (SL/TP/manual)
                             await self._handle_position_closed(intent)
+
+                    # Best Day Rule: proactively close winners if approaching limit
+                    if self._best_day_tracker.should_close_winners() and open_positions:
+                        await self._close_winning_positions(open_positions)
+
             except Exception as e:
                 logger.error("Position monitor loop error: {}", e)
                 await self._send_alert(f"⚠️ <b>Position Monitor Error</b>\n<code>{e}</code>")
@@ -481,6 +520,67 @@ class Scheduler:
                     )
             except Exception as e:
                 logger.error("Position monitor: alert failed for {}: {}", position_id, e)
+
+    async def _close_winning_positions(self, open_positions: list) -> None:
+        """Close all winning (profitable) positions to protect Best Day Rule.
+
+        Called when BestDayTracker detects daily PnL is approaching the limit.
+        Only closes positions with positive profit to lock in gains.
+
+        Args:
+            open_positions: List of PositionInfo from MatchTrader.
+        """
+        winners = [p for p in open_positions if p.profit > 0]
+        if not winners:
+            logger.info("Position monitor: should_close_winners triggered but no winning positions")
+            return
+
+        logger.warning(
+            "Position monitor: Best Day Rule — closing {} winning position(s) ({})",
+            len(winners),
+            self._best_day_tracker.summary(),
+        )
+
+        closed_count = 0
+        total_pnl = 0.0
+        for pos in winners:
+            try:
+                result = await self._matchtrader.close_position(
+                    position_id=str(pos.position_id),
+                    symbol=pos.symbol,
+                    side=pos.side,
+                    volume=pos.volume,
+                )
+                if result.success:
+                    closed_count += 1
+                    total_pnl += pos.profit
+                    self._best_day_tracker.record_trade_pnl(pos.profit)
+                    logger.info(
+                        "Position monitor: closed winning position {} ({}) PnL=${:+.2f}",
+                        pos.position_id,
+                        pos.symbol,
+                        pos.profit,
+                    )
+                else:
+                    logger.error(
+                        "Position monitor: failed to close position {}: {}",
+                        pos.position_id,
+                        result.message,
+                    )
+            except Exception as e:
+                logger.error(
+                    "Position monitor: error closing position {}: {}",
+                    pos.position_id,
+                    e,
+                )
+
+        # Send alert about Best Day protection
+        await self._send_alert(
+            f"🛡️ <b>Best Day Protection</b>\n"
+            f"• Closed {closed_count}/{len(winners)} winning position(s)\n"
+            f"• Total PnL locked: ${total_pnl:+.2f}\n"
+            f"• {self._best_day_tracker.summary()}"
+        )
 
     async def _daily_summary_loop(self) -> None:
         """Send a daily summary at the configured UTC hour.

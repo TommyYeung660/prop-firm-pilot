@@ -703,3 +703,366 @@ class TestInstrumentRegistry:
 
         # Verify registry.to_broker() was called (and raised)
         mock_registry.to_broker.assert_called_once_with("UNKNOWN")
+
+
+# ── SL/TP Price Conversion Tests ─────────────────────────────────────────────
+
+
+class TestSLTPPriceConversion:
+    """Tests for SL/TP price conversion functionality."""
+
+    def test_extract_open_price_from_openPrice(self) -> None:
+        """Should return float from from openPrice key."""
+        raw = {"openPrice": "1.10000"}
+        result = ExecutionEngine._extract_open_price(raw)
+        assert result == 1.10000
+
+    def test_extract_open_price_from_open_price(self) -> None:
+        """Should return float from open_price_price key."""
+        raw = {"open_price": 1.10000}
+        result = ExecutionEngine._extract_open_price(raw)
+        assert result == 1.10000
+
+    def test_extract_open_price_from_price(self) -> None:
+        """Should return float from price key."""
+        raw = {"price": "1.10000"}
+        result = ExecutionEngine._extract_open_price(raw)
+        assert result == 1.10000
+
+    def test_extract_open_price_from_fillPrice(self) -> None:
+        """Should return float from fillPrice key."""
+        raw = {"fillPrice": 1.10000}
+        result = ExecutionEngine._extract_open_price(raw)
+        assert result == 1.10000
+
+    def test_extract_open_price_from_open(self) -> None:
+        """Should return float from open key."""
+        raw = {"open": "1.10000"}
+        result = ExecutionEngine._extract_open_price(raw)
+        assert result == 1.10000
+
+    def test_extract_open_price_empty_dict(self) -> None:
+        """Should return None for empty dict."""
+        result = ExecutionEngine._extract_open_price({})
+        assert result is None
+
+    def test_extract_open_price_non_numeric(self) -> None:
+        """Should return None for non-numeric values."""
+        raw = {"openPrice": "invalid"}
+        result = ExecutionEngine._extract_open_price(raw)
+        assert result is None
+
+    def test_extract_open_price_prioritizes_keys(self) -> None:
+        """Should prioritize keys in order (openPrice first)."""
+        raw = {
+            "openPrice": "1.10000",
+            "open_price": "1.20000",
+            "price": "1.30000",
+        }
+        result = ExecutionEngine._extract_open_price(raw)
+        assert result == 1.10000
+
+    async def test_fetch_position_open_price_found(self, engine: ExecutionEngine) -> None:
+        """Should return price when position found."""
+        mock_position = MagicMock()
+        mock_position.position_id = "pos_123"
+        mock_position.open_price = 1.10000
+        engine._matchtrader.get_open_positions.return_value = [mock_position]
+
+        result = await engine._fetch_position_open_price("pos_123")
+        assert result == 1.10000
+
+    async def test_fetch_position_open_price_not_found(self, engine: ExecutionEngine) -> None:
+        """Should return None when position not found."""
+        mock_position = MagicMock()
+        mock_position.position_id = "pos_456"
+        mock_position.open_price = 1.10000
+        engine._matchtrader.get_open_positions.return_value = [mock_position]
+
+        result = await engine._fetch_position_open_price("pos_123")
+        assert result is None
+
+    async def test_fetch_position_open_price_api_error(self, engine: ExecutionEngine) -> None:
+        """Should return None on API error."""
+        engine._matchtrader.get_open_positions.side_effect = RuntimeError("API error")
+
+        result = await engine._fetch_position_open_price("pos_123")
+        assert result is None
+
+    async def test_set_sl_tp_on_position_buy(self, engine: ExecutionEngine) -> None:
+        """BUY side: sl = open_price - sl_pips * pip_size, tp = open_price + tp_pips * pip_size."""
+        raw_response = {"openPrice": "1.10000"}
+        engine._matchtrader.modify_position.return_value = MagicMock(
+            success=True, position_id="pos_123", message="OK"
+        )
+
+        sl_price, tp_price = await engine._set_sl_tp_on_position(
+            position_id="pos_123",
+            broker_symbol="EURUSD",
+            config_symbol="EURUSD",
+            side="BUY",
+            sl_pips=40.0,
+            tp_pips=80.0,
+            raw_response=raw_response,
+        )
+
+        # BUY: sl = 1.10000 - 40 * 0.0001 = 1.09600, tp = 1.10000 + 80 * 0.0001 = 1.10800
+        assert sl_price == 1.09600
+        assert tp_price == 1.10800
+
+        engine._matchtrader.modify_position.assert_called_once_with(
+            position_id="pos_123", sl=1.09600, tp=1.10800
+        )
+
+    async def test_set_sl_tp_on_position_sell(self, engine: ExecutionEngine) -> None:
+        """SELL side: sl = open_price + sl_pips * pip_size, tp = open_price - tp_pips * pip_size."""
+        raw_response = {"openPrice": "1.10000"}
+        engine._matchtrader.modify_position.return_value = MagicMock(
+            success=True, position_id="pos_123", message="OK"
+        )
+
+        sl_price, tp_price = await engine._set_sl_tp_on_position(
+            position_id="pos_123",
+            broker_symbol="EURUSD",
+            config_symbol="EURUSD",
+            side="SELL",
+            sl_pips=40.0,
+            tp_pips=80.0,
+            raw_response=raw_response,
+        )
+
+        # SELL: sl = 1.10000 + 40 * 0.0001 = 1.10400, tp = 1.10000 - 80 * 0.0001 = 1.09200
+        assert sl_price == 1.10400
+        assert tp_price == 1.09200
+
+        engine._matchtrader.modify_position.assert_called_once_with(
+            position_id="pos_123", sl=1.10400, tp=1.09200
+        )
+
+    async def test_set_sl_tp_on_position_no_price(self, engine: ExecutionEngine) -> None:
+        """Returns (None, None) when open_price cannot be determined."""
+        raw_response = {}
+        engine._matchtrader.get_open_positions.return_value = []
+
+        sl_price, tp_price = await engine._set_sl_tp_on_position(
+            position_id="pos_123",
+            broker_symbol="EURUSD",
+            config_symbol="EURUSD",
+            side="BUY",
+            sl_pips=40.0,
+            tp_pips=80.0,
+            raw_response=raw_response,
+        )
+
+        assert sl_price is None
+        assert tp_price is None
+        engine._matchtrader.modify_position.assert_not_called()
+
+    async def test_set_sl_tp_on_position_invalid_price(self, engine: ExecutionEngine) -> None:
+        """Returns (None, None) when open_price is invalid (zero or negative)."""
+        raw_response = {"openPrice": "0.0"}
+
+        sl_price, tp_price = await engine._set_sl_tp_on_position(
+            position_id="pos_123",
+            broker_symbol="EURUSD",
+            config_symbol="EURUSD",
+            side="BUY",
+            sl_pips=40.0,
+            tp_pips=80.0,
+            raw_response=raw_response,
+        )
+
+        assert sl_price is None
+        assert tp_price is None
+        engine._matchtrader.modify_position.assert_not_called()
+
+    async def test_set_sl_tp_on_position_unknown_instrument(self, engine: ExecutionEngine) -> None:
+        """Returns (None, None) when config_symbol not in instruments."""
+        raw_response = {"openPrice": "1.10000"}
+
+        sl_price, tp_price = await engine._set_sl_tp_on_position(
+            position_id="pos_123",
+            broker_symbol="UNKNOWN",
+            config_symbol="UNKNOWN",
+            side="BUY",
+            sl_pips=40.0,
+            tp_pips=80.0,
+            raw_response=raw_response,
+        )
+
+        assert sl_price is None
+        assert tp_price is None
+        engine._matchtrader.modify_position.assert_not_called()
+
+    async def test_set_sl_tp_on_position_modify_fails(self, engine: ExecutionEngine) -> None:
+        """Returns (None, None) when modify_position fails."""
+        raw_response = {"openPrice": "1.10000"}
+        engine._matchtrader.modify_position.return_value = MagicMock(
+            success=False, position_id="", message="Failed"
+        )
+
+        sl_price, tp_price = await engine._set_sl_tp_on_position(
+            position_id="pos_123",
+            broker_symbol="EURUSD",
+            config_symbol="EURUSD",
+            side="BUY",
+            sl_pips=40.0,
+            tp_pips=80.0,
+            raw_response=raw_response,
+        )
+
+        assert sl_price is None
+        assert tp_price is None
+
+    async def test_set_sl_tp_on_position_modify_error(self, engine: ExecutionEngine) -> None:
+        """Returns (None, None) when modify_position raises."""
+        raw_response = {"openPrice": "1.10000"}
+        engine._matchtrader.modify_position.side_effect = RuntimeError("Network error")
+
+        sl_price, tp_price = await engine._set_sl_tp_on_position(
+            position_id="pos_123",
+            broker_symbol="EURUSD",
+            config_symbol="EURUSD",
+            side="BUY",
+            sl_pips=40.0,
+            tp_pips=80.0,
+            raw_response=raw_response,
+        )
+
+        assert sl_price is None
+        assert tp_price is None
+
+    async def test_set_sl_tp_on_position_with_registry(
+        self,
+        store: DecisionStore,
+        config: AppConfig,
+        mock_guard: MagicMock,
+        mock_matchtrader: AsyncMock,
+        mock_sizer: MagicMock,
+    ) -> None:
+        """Rounds to price_precision from registry."""
+        # Mock registry with price_precision=3
+        mock_registry = MagicMock()
+        mock_info = MagicMock()
+        mock_info.price_precision = 3
+        mock_registry.get_info.return_value = mock_info
+
+        engine = ExecutionEngine(
+            store=store,
+            guard=mock_guard,
+            matchtrader=mock_matchtrader,
+            sizer=mock_sizer,
+            config=config,
+            instrument_registry=mock_registry,
+        )
+
+        raw_response = {"openPrice": "1.100100"}
+        mock_matchtrader.modify_position.return_value = MagicMock(
+            success=True, position_id="pos_123", message="OK"
+        )
+
+        sl_price, tp_price = await engine._set_sl_tp_on_position(
+            position_id="pos_123",
+            broker_symbol="EURUSD",
+            config_symbol="EURUSD",
+            side="BUY",
+            sl_pips=40.0,
+            tp_pips=80.0,
+            raw_response=raw_response,
+        )
+
+        # With precision=3: sl=1.100100 - 0.00400 = 1.096100, tp=1.100100 + 0.00800 = 1.108100
+        # Rounded to 3 decimals: sl=1.096, tp=1.108
+        assert sl_price == 1.096
+        assert tp_price == 1.108
+
+        mock_registry.get_info.assert_called_once_with("EURUSD")
+
+    async def test_set_sl_tp_on_position_fallback_price_no_registry(
+        self, engine: ExecutionEngine
+    ) -> None:
+        """Uses fallback _fetch_position_open_price when raw_response has no price and no registry."""
+        # First, raw_response has no price
+        raw_response = {}
+
+        # Mock get_open_positions to return a position with open_price
+        mock_position = MagicMock()
+        mock_position.position_id = "pos_123"
+        mock_position.open_price = 1.10000
+        engine._matchtrader.get_open_positions.return_value = [mock_position]
+        engine._matchtrader.modify_position.return_value = MagicMock(
+            success=True, position_id="pos_123", message="OK"
+        )
+
+        sl_price, tp_price = await engine._set_sl_tp_on_position(
+            position_id="pos_123",
+            broker_symbol="EURUSD",
+            config_symbol="EURUSD",
+            side="BUY",
+            sl_pips=40.0,
+            tp_pips=80.0,
+            raw_response=raw_response,
+        )
+
+        assert sl_price == 1.09600
+        assert tp_price == 1.10800
+        engine._matchtrader.get_open_positions.assert_called_once()
+
+    async def test_set_sl_tp_on_position_no_registry_default_precision(
+        self, engine: ExecutionEngine
+    ) -> None:
+        """Falls back to precision=5 when no registry."""
+        raw_response = {"openPrice": "1.10000"}
+        engine._matchtrader.modify_position.return_value = MagicMock(
+            success=True, position_id="pos_123", message="OK"
+        )
+
+        sl_price, tp_price = await engine._set_sl_tp_on_position(
+            position_id="pos_123",
+            broker_symbol="EURUSD",
+            config_symbol="EURUSD",
+            side="BUY",
+            sl_pips=40.0,
+            tp_pips=80.0,
+            raw_response=raw_response,
+        )
+
+        # Default precision=5
+        assert sl_price == 1.09600
+        assert tp_price == 1.10800
+
+    async def test_integration_sl_tp_set_on_execution(
+        self,
+        store: DecisionStore,
+        config: AppConfig,
+        mock_guard: MagicMock,
+        mock_matchtrader: AsyncMock,
+        mock_sizer: MagicMock,
+    ) -> None:
+        """Successful execution calls modify_position with correct SL/TP prices."""
+        # Setup mock_matchtrader.open_position with raw_response
+        mock_matchtrader.open_position.return_value = MagicMock(
+            success=True,
+            position_id="pos_123",
+            message="OK",
+            raw_response={"openPrice": 1.10000},
+        )
+        mock_matchtrader.modify_position = AsyncMock(
+            return_value=MagicMock(success=True, position_id="pos_123", message="OK")
+        )
+
+        engine = ExecutionEngine(
+            store=store,
+            guard=mock_guard,
+            matchtrader=mock_matchtrader,
+            sizer=mock_sizer,
+            config=config,
+        )
+
+        _make_ready_intent(store, sl_pips=40.0, tp_pips=80.0)
+        await engine.execute_ready_intents()
+
+        # Verify modify_position was called with correct SL/TP
+        mock_matchtrader.modify_position.assert_called_once_with(
+            position_id="pos_123", sl=1.09600, tp=1.10800
+        )

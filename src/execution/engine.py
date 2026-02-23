@@ -203,8 +203,26 @@ class ExecutionEngine:
                     broker_symbol,
                     trade_plan.volume,
                 )
+
+                # Set SL/TP on the opened position
+                sl_price, tp_price = await self._set_sl_tp_on_position(
+                    position_id=order.position_id,
+                    broker_symbol=broker_symbol,
+                    config_symbol=symbol,
+                    side=side,
+                    sl_pips=trade_plan.stop_loss,
+                    tp_pips=trade_plan.take_profit,
+                    raw_response=order.raw_response,
+                )
+
                 await self._send_alert_opened(
-                    symbol, side, trade_plan.volume, account_snapshot.equity, order.position_id
+                    symbol,
+                    side,
+                    trade_plan.volume,
+                    account_snapshot.equity,
+                    order.position_id,
+                    sl_price,
+                    tp_price,
                 )
             else:
                 await asyncio.to_thread(self._store.mark_failed, intent_id, order.message)
@@ -325,6 +343,130 @@ class ExecutionEngine:
         }
         return json.dumps(data, default=str)
 
+    # ── SL/TP Price Helpers ───────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_open_price(raw_response: dict[str, Any]) -> float | None:
+        """Extract the fill/open price from the open_position raw response."""
+        for key in ("openPrice", "open_price", "price", "fillPrice", "open"):
+            val = raw_response.get(key)
+            if val is not None:
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    continue
+        return None
+
+    async def _fetch_position_open_price(self, position_id: str) -> float | None:
+        """Fetch open_price for a specific position from the broker."""
+        try:
+            positions = await self._matchtrader.get_open_positions()
+            for p in positions:
+                if str(p.position_id) == str(position_id):
+                    return p.open_price
+        except Exception as e:
+            logger.warning(
+                "ExecutionEngine: failed to fetch position {} for price: {}",
+                position_id,
+                e,
+            )
+        return None
+
+    async def _set_sl_tp_on_position(
+        self,
+        position_id: str,
+        broker_symbol: str,
+        config_symbol: str,
+        side: Literal["BUY", "SELL"],
+        sl_pips: float,
+        tp_pips: float,
+        raw_response: dict[str, Any],
+    ) -> tuple[float | None, float | None]:
+        """Calculate absolute SL/TP prices and set them on an opened position.
+
+        Uses the fill price from the raw_response or fetches the position's open_price.
+        Falls back gracefully if price cannot be determined.
+
+        Returns:
+            Tuple of (sl_price, tp_price) - None values if setting failed.
+        """
+        # Step 1: Get fill/open price
+        open_price = self._extract_open_price(raw_response)
+        if open_price is None or open_price <= 0:
+            # Fallback: query the position directly
+            open_price = await self._fetch_position_open_price(position_id)
+
+        if open_price is None or open_price <= 0:
+            logger.error(
+                "ExecutionEngine: cannot determine open price for position {} — SL/TP NOT SET",
+                position_id,
+            )
+            return None, None
+
+        # Step 2: Get pip_size from config
+        instrument = self._config.instruments.get(config_symbol)
+        if instrument is None:
+            logger.error(
+                "ExecutionEngine: no instrument config for {} — SL/TP NOT SET",
+                config_symbol,
+            )
+            return None, None
+        pip_size = instrument.pip_size
+
+        # Step 3: Calculate absolute prices
+        if side == "BUY":
+            sl_price = open_price - (sl_pips * pip_size)
+            tp_price = open_price + (tp_pips * pip_size)
+        else:  # SELL
+            sl_price = open_price + (sl_pips * pip_size)
+            tp_price = open_price - (tp_pips * pip_size)
+
+        # Step 4: Round to instrument's price precision
+        precision = 5  # default for most FX
+        if self._registry is not None:
+            info = self._registry.get_info(config_symbol)
+            if info is not None:
+                precision = info.price_precision
+        sl_price = round(sl_price, precision)
+        tp_price = round(tp_price, precision)
+
+        # Step 5: Modify position to set SL/TP
+        try:
+            result = await self._matchtrader.modify_position(
+                position_id=position_id,
+                sl=sl_price,
+                tp=tp_price,
+            )
+            if result.success:
+                logger.info(
+                    "ExecutionEngine: SL/TP set on position {} — SL={:.{}f} TP={:.{}f} "
+                    "(from open_price={:.{}f}, sl_pips={}, tp_pips={})",
+                    position_id,
+                    sl_price,
+                    precision,
+                    tp_price,
+                    precision,
+                    open_price,
+                    precision,
+                    sl_pips,
+                    tp_pips,
+                )
+                return sl_price, tp_price
+            else:
+                logger.error(
+                    "ExecutionEngine: failed to set SL/TP on position {}: {}",
+                    position_id,
+                    result.message,
+                )
+                return None, None
+        except Exception as e:
+            logger.error(
+                "ExecutionEngine: error setting SL/TP on position {}: {}",
+                position_id,
+                e,
+            )
+            return None, None
+
     # ── Symbol Resolution ───────────────────────────────────────────────
 
     def _resolve_broker_symbol(self, config_symbol: str) -> str:
@@ -357,8 +499,20 @@ class ExecutionEngine:
         volume: float,
         equity: float,
         position_id: str,
+        sl_price: float | None = None,
+        tp_price: float | None = None,
     ) -> None:
-        """Send Telegram notification for a successfully opened trade."""
+        """Send Telegram notification for a successfully opened trade.
+
+        Args:
+            symbol: Trading instrument name.
+            side: "BUY" or "SELL".
+            volume: Position volume in lots.
+            equity: Current account equity.
+            position_id: ID of the opened position.
+            sl_price: Stop loss price (optional, for logging).
+            tp_price: Take profit price (optional, for logging).
+        """
         if self._alert_service is not None:
             try:
                 await self._alert_service.trade_opened(
@@ -366,6 +520,8 @@ class ExecutionEngine:
                     side=side,
                     volume=volume,
                     price=0.0,  # Filled from position query if needed
+                    sl=sl_price,
+                    tp=tp_price,
                     equity=equity,
                     position_id=position_id,
                 )

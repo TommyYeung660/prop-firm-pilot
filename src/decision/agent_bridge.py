@@ -90,6 +90,12 @@ class AgentBridge:
         self._selected_analysts = selected_analysts or ["market", "news", "social"]
         self._config = config or {}
         self._graph: Any = None  # Lazy-loaded TradingAgentsGraph
+        self._using_mock: bool = False
+
+    @property
+    def using_mock(self) -> bool:
+        """Whether the bridge is using the mock fallback instead of real TradingAgents."""
+        return self._using_mock
 
     def _ensure_loaded(self) -> None:
         """Lazy-load TradingAgentsGraph on first use."""
@@ -127,10 +133,13 @@ class AgentBridge:
                 self._selected_analysts,
             )
         except Exception as e:
-            logger.warning(
-                "AgentBridge: failed to import TradingAgentsGraph ({}), falling back to Mock.", e
+            logger.critical(
+                "AgentBridge: failed to import TradingAgentsGraph ({}), "
+                "falling back to Mock — REAL TRADES WILL BE BLOCKED.",
+                e,
             )
             self._graph = MockTradingGraph()
+            self._using_mock = True
 
     def decide(
         self,

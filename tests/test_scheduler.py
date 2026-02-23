@@ -75,6 +75,7 @@ def mock_agents() -> MagicMock:
         final_state={"test": True},
         risk_report="test risk report",
     )
+    agents.using_mock = False  # Default to NOT using mock for existing tests
     return agents
 
 
@@ -1403,3 +1404,683 @@ class TestDailySummaryLoop:
             await _run_loop_once(sched, sched._daily_summary_loop())
 
         # Loop should complete without raising
+
+
+# ── Mock LLM Blocking Tests ──────────────────────────────────────────────────────
+
+
+class TestMockLLMBlocking:
+    """Tests for mock LLM blocking in _process_claimed_intent()."""
+
+    async def test_blocks_intent_when_using_mock(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """When agents.using_mock is True, intent should be cancelled without LLM call."""
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        mock_agents.using_mock = True
+
+        # Insert a pending intent
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.85,
+            scanner_confidence="high",
+        )
+        store.insert_intent(intent)
+
+        # Run one iteration of LLM worker loop
+        await _run_loop_once(sched, sched._llm_worker_loop("llm-0"))
+
+        # Verify: intent status == cancelled
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+
+        # Verify: agents.decide was NOT called (blocked before LLM call)
+        mock_agents.decide.assert_not_called()
+
+        # Verify: cancellation reason contains "Mock LLM fallback"
+        assert updated.execution_error is not None
+        assert "Mock LLM fallback" in updated.execution_error
+
+    async def test_sends_alert_when_blocking_mock(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Should send alert when blocking intent due to mock LLM."""
+        mock_alert = AsyncMock()
+        mock_alert.send = AsyncMock(return_value=True)
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            alert_service=mock_alert,
+        )
+        mock_agents.using_mock = True
+
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="GBPUSD",
+            scanner_score=0.75,
+            scanner_confidence="medium",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(sched, sched._llm_worker_loop("llm-0"))
+
+        # Verify alert was sent with BLOCKED or Mock in the message
+        mock_alert.send.assert_called_once()
+        alert_msg = mock_alert.send.call_args[0][0]
+        assert "BLOCKED" in alert_msg
+        assert "Mock" in alert_msg
+
+    async def test_allows_intent_when_not_using_mock(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """When agents.using_mock is False, normal flow should proceed."""
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        mock_agents.using_mock = False
+
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.85,
+            scanner_confidence="high",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(sched, sched._llm_worker_loop("llm-0"))
+
+        # Verify: agents.decide WAS called (normal flow)
+        mock_agents.decide.assert_called_once()
+
+        # Verify: intent goes to ready_for_exec (since default mock returns BUY)
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "ready_for_exec"
+        assert updated.suggested_side == "BUY"
+
+    async def test_blocks_multiple_intents_with_mock(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Multiple intents should all be blocked when using_mock is True."""
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        mock_agents.using_mock = True
+
+        # Insert multiple pending intents
+        intents = []
+        for symbol in ["EURUSD", "GBPUSD", "USDJPY"]:
+            intent = TradeIntent(
+                trade_date=Scheduler._today_str(),
+                symbol=symbol,
+                scanner_score=0.80,
+                scanner_confidence="high",
+            )
+            store.insert_intent(intent)
+            intents.append(intent)
+
+        # Run worker loop multiple times to process all intents
+        for _ in range(len(intents)):
+            await _run_loop_once(sched, sched._llm_worker_loop("llm-0"))
+
+        # Verify: all intents are cancelled
+        for intent in intents:
+            updated = store.get_intent(intent.id)
+            assert updated is not None
+            assert updated.status == "cancelled"
+            assert updated.execution_error is not None
+            assert "Mock LLM fallback" in updated.execution_error
+
+        # Verify: agents.decide was never called
+        mock_agents.decide.assert_not_called()
+
+# ── BestDayTracker Integration Tests ────────────────────────────────────────────
+
+
+class TestBestDayIntegration:
+    """Tests for BestDayTracker integration in position monitor loop."""
+
+    async def test_updates_unrealized_pnl_on_best_day_tracker(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Should call update_unrealized() with sum of open position profits."""
+        # Create mock BestDayTracker
+        mock_tracker = MagicMock()
+        mock_tracker.should_close_winners.return_value = False
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            best_day_tracker=mock_tracker,
+        )
+
+        # Create an opened intent (required for monitor loop to query open positions)
+        _advance_intent_to_opened(store, "EURUSD")
+
+        # Set up open positions with known profits
+        pos1 = MagicMock()
+        pos1.position_id = "pos_1"
+        pos1.profit = 100.0
+        pos2 = MagicMock()
+        pos2.position_id = "pos_2"
+        pos2.profit = 50.0
+        mock_matchtrader.get_open_positions.return_value = [pos1, pos2]
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # Should have called update_unrealized with total profit
+        mock_tracker.update_unrealized.assert_called_once_with(150.0)
+
+    async def test_closes_winners_when_threshold_reached(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Should close profitable positions when should_close_winners() returns True."""
+        # Create mock BestDayTracker that says we need to close winners
+        mock_tracker = MagicMock()
+        mock_tracker.should_close_winners.return_value = True
+        mock_tracker.summary.return_value = "test summary"
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            best_day_tracker=mock_tracker,
+        )
+
+        # Create opened intent to trigger position monitoring
+        _advance_intent_to_opened(store, "EURUSD")
+
+        # Set up open positions with some profitable ones
+        pos1 = MagicMock()
+        pos1.position_id = "pos_1"
+        pos1.symbol = "EURUSD"
+        pos1.side = "BUY"
+        pos1.volume = 0.01
+        pos1.profit = 200.0  # Profitable
+
+        pos2 = MagicMock()
+        pos2.position_id = "pos_2"
+        pos2.symbol = "GBPUSD"
+        pos2.side = "SELL"
+        pos2.volume = 0.02
+        pos2.profit = 50.0  # Profitable
+
+        mock_matchtrader.get_open_positions.return_value = [pos1, pos2]
+        mock_matchtrader.close_position.return_value = MagicMock(success=True)
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # Should have called close_position for both profitable positions
+        assert mock_matchtrader.close_position.call_count == 2
+
+        # Verify record_trade_pnl was called for each closed position
+        mock_tracker.record_trade_pnl.assert_any_call(200.0)
+        mock_tracker.record_trade_pnl.assert_any_call(50.0)
+
+    async def test_does_not_close_when_threshold_not_reached(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Should NOT close positions when should_close_winners() returns False."""
+        mock_tracker = MagicMock()
+        mock_tracker.should_close_winners.return_value = False
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            best_day_tracker=mock_tracker,
+        )
+
+        _advance_intent_to_opened(store, "EURUSD")
+
+        # Set up open positions
+        pos = MagicMock()
+        pos.position_id = "pos_1"
+        pos.profit = 200.0
+        mock_matchtrader.get_open_positions.return_value = [pos]
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # Should NOT have called close_position
+        mock_matchtrader.close_position.assert_not_called()
+
+    async def test_only_closes_profitable_positions(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Should only close positions with profit > 0."""
+        mock_tracker = MagicMock()
+        mock_tracker.should_close_winners.return_value = True
+        mock_tracker.summary.return_value = "test summary"
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            best_day_tracker=mock_tracker,
+        )
+
+        _advance_intent_to_opened(store, "EURUSD")
+
+        # Set up positions: one profitable, one losing
+        pos_profit = MagicMock()
+        pos_profit.position_id = "pos_win"
+        pos_profit.symbol = "EURUSD"
+        pos_profit.side = "BUY"
+        pos_profit.volume = 0.01
+        pos_profit.profit = 200.0  # Profitable
+
+        pos_loss = MagicMock()
+        pos_loss.position_id = "pos_loss"
+        pos_loss.symbol = "GBPUSD"
+        pos_loss.side = "SELL"
+        pos_loss.volume = 0.02
+        pos_loss.profit = -50.0  # Losing
+
+        mock_matchtrader.get_open_positions.return_value = [pos_profit, pos_loss]
+        mock_matchtrader.close_position.return_value = MagicMock(success=True)
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # Should only have closed the profitable position
+        assert mock_matchtrader.close_position.call_count == 1
+        close_call = mock_matchtrader.close_position.call_args
+        assert close_call[1]["position_id"] == "pos_win"
+
+        # Should only record the profitable PnL
+        mock_tracker.record_trade_pnl.assert_called_once_with(200.0)
+
+    async def test_sends_best_day_protection_alert(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Should send 🛡️ alert when closing winning positions."""
+        mock_tracker = MagicMock()
+        mock_tracker.should_close_winners.return_value = True
+        mock_tracker.summary.return_value = "BestDay: realized=+$200.00"
+
+        mock_alert = AsyncMock()
+        mock_alert.send = AsyncMock(return_value=True)
+
+        sched = Schedulerugscheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            best_day_tracker=mock_tracker,
+            alert_service=mock_alert,
+        )
+
+        _advance_intent_to_opened(store, "EURUSD")
+
+        pos = MagicMock()
+        pos.position_id = "pos_1"
+        pos.symbol = "EURUSD"
+        pos.side = "BUY"
+        pos.volume = 0.01
+        pos.profit = 200.0
+        mock_matchtrader.get_open_positions.return_value = [pos]
+        mock_matchtrader.close_position.return_value = MagicMock(success=True)
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # Should have sent alert with Best Day Protection message
+        mock_alert.send.assert_called()
+        alert_msg = mock_alert.send.call_args
+
+
+# ── BestDayTracker Integration Tests ────────────────────────────────────────────
+
+
+class TestBestDayIntegration:
+    """Tests for BestDayTracker integration in position monitor loop."""
+
+    async def test_updates_unrealized_pnl_on_best_day_tracker(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Should call update_unrealized() with sum of open position profits."""
+        # Create mock BestDayTracker
+        mock_tracker = MagicMock()
+        mock_tracker.should_close_winners.return_value = False
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            best_day_tracker=mock_tracker,
+        )
+
+        # Create an opened intent (required for monitor loop to query open positions)
+        _advance_intent_to_opened(store, "EURUSD")
+
+        # Set up open positions with known profits
+        pos1 = MagicMock()
+        pos1.position_id = "pos_1"
+        pos1.profit = 100.0
+        pos2 = MagicMock()
+        pos2.position_id = "pos_2"
+        pos2.profit = 50.0
+        mock_matchtrader.get_open_positions.return_value = [pos1, pos2]
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # Should have called update_unrealized with total profit
+        mock_tracker.update_unrealized.assert_called_once_with(150.0)
+
+    async def test_closes_winners_when_threshold_reached(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Should close profitable positions when should_close_winners() returns True."""
+        # Create mock BestDayTracker that says we need to close winners
+        mock_tracker = MagicMock()
+        mock_tracker.should_close_winners.return_value = True
+        mock_tracker.summary.return_value = "test summary"
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            best_day_tracker=mock_tracker,
+        )
+
+        # Create opened intent to trigger position monitoring
+        _advance_intent_to_opened(store, "EURUSD")
+
+        # Set up open positions with some profitable ones
+        pos1 = MagicMock()
+        pos1.position_id = "pos_1"
+        pos1.symbol = "EURUSD"
+        pos1.side = "BUY"
+        pos1.volume = 0.01
+        pos1.profit = 200.0  # Profitable
+
+        pos2 = MagicMock()
+        pos2.position_id = "pos_2"
+        pos2.symbol = "GBPUSD"
+        pos2.side = "SELL"
+        pos2.volume = 0.02
+        pos2.profit = 50.0  # Profitable
+
+        mock_matchtrader.get_open_positions.return_value = [pos1, pos2]
+        mock_matchtrader.close_position.return_value = MagicMock(success=True)
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # Should have called close_position for both profitable positions
+        assert mock_matchtrader.close_position.call_count == 2
+
+        # Verify record_trade_pnl was called for each closed position
+        mock_tracker.record_trade_pnl.assert_any_call(200.0)
+        mock_tracker.record_trade_pnl.assert_any_call(50.0)
+
+    async def test_does_not_close_when_threshold_not_reached(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Should NOT close positions when should_close_winners() returns False."""
+        mock_tracker = MagicMock()
+        mock_tracker.should_close_winners.return_value = False
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            best_day_tracker=mock_tracker,
+        )
+
+        _advance_intent_to_opened(store, "EURUSD")
+
+        # Set up open positions
+        pos = MagicMock()
+        pos.position_id = "pos_1"
+        pos.profit = 200.0
+        mock_matchtrader.get_open_positions.return_value = [pos]
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # Should NOT have called close_position
+        mock_matchtrader.close_position.assert_not_called()
+
+    async def test_only_closes_profitable_positions(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Should only close positions with profit > 0."""
+        mock_tracker = MagicMock()
+        mock_tracker.should_close_winners.return_value = True
+        mock_tracker.summary.return_value = "test summary"
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            best_day_tracker=mock_tracker,
+        )
+
+        _advance_intent_to_opened(store, "EURUSD")
+
+        # Set up positions: one profitable, one losing
+        pos_profit = MagicMock()
+        pos_profit.position_id = "pos_win"
+        pos_profit.symbol = "EURUSD"
+        pos_profit.side = "BUY"
+        pos_profit.volume = 0.01
+        pos_profit.profit = 200.0  # Profitable
+
+        pos_loss = MagicMock()
+        pos_loss.position_id = "pos_loss"
+        pos_loss.symbol = "GBPUSD"
+        pos_loss.side = "SELL"
+        pos_loss.volume = 0.02
+        pos_loss.profit = -50.0  # Losing
+
+        mock_matchtrader.get_open_positions.return_value = [pos_profit, pos_loss]
+        mock_matchtrader.close_position.return_value = MagicMock(success=True)
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # Should only have closed the profitable position
+        assert mock_matchtrader.close_position.call_count == 1
+        close_call = mock_matchtrader.close_position.call_args
+        assert close_call[1]["position_id"] == "pos_win"
+
+        # Should only record the profitable PnL
+        mock_tracker.record_trade_pnl.assert_called_once_with(200.0)
+
+    async def test_sends_best_day_protection_alert(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Should send alert when closing winning positions."""
+        mock_tracker = MagicMock()
+        mock_tracker.should_close_winners.return_value = True
+        mock_tracker.summary.return_value = "BestDay: realized=+$200.00"
+
+        mock_alert = AsyncMock()
+        mock_alert.send = AsyncMock(return_value=True)
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            best_day_tracker=mock_tracker,
+            alert_service=mock_alert,
+        )
+
+        _advance_intent_to_opened(store, "EURUSD")
+
+        pos = MagicMock()
+        pos.position_id = "pos_1"
+        pos.symbol = "EURUSD"
+        pos.side = "BUY"
+        pos.volume = 0.01
+        pos.profit = 200.0
+        mock_matchtrader.get_open_positions.return_value = [pos]
+        mock_matchtrader.close_position.return_value = MagicMock(success=True)
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # Should have sent alert with Best Day Protection message
+        mock_alert.send.assert_called()
+        alert_msg = mock_alert.send.call_args[0][0]
+        assert "Best Day" in alert_msg or "Protection" in alert_msg
+
+    async def test_best_day_tracker_auto_created_from_config(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Should auto-create BestDayTracker from config when not provided."""
+        # Create scheduler without explicit best_day_tracker
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            # best_day_tracker not passed - should be auto-created
+        )
+
+        # Verify tracker was created
+        assert sched._best_day_tracker is not None
+        # Verify it has correct config values
+        assert sched._best_day_tracker._best_day_limit == config.compliance.best_day_limit
+        assert sched._best_day_tracker._stop_ratio == config.compliance.best_day_stop
