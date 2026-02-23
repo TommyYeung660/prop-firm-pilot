@@ -346,25 +346,17 @@ class MatchTraderClient:
         return self._tokens
 
     async def refresh_token(self) -> None:
-        """Refresh JWT before it expires (15 min lifetime)."""
+        """Refresh JWT before it expires (15 min lifetime).
+
+        Since MatchTrader changed their /refresh-token endpoint, we simply
+        re-authenticate by calling login() which provides a fresh token
+        and updates our internal timestamps.
+        """
         if not self._tokens:
             raise RuntimeError("Cannot refresh: not authenticated.")
 
-        logger.debug("MatchTrader: refreshing JWT token")
-
-        response = await self._raw_request(
-            "POST",
-            "/refresh-token",
-            json={"token": self._tokens.refresh_token},
-            authenticated=False,
-        )
-
-        data = response.json()
-        self._tokens.trading_api_token = data.get("tradingApiToken", self._tokens.trading_api_token)
-        if "token" in data:
-            self._tokens.refresh_token = data["token"]
-
-        self._last_auth_time = time.monotonic()
+        logger.debug("MatchTrader: refreshing JWT token via re-login")
+        await self.login()
         logger.debug("MatchTrader: token refreshed successfully")
 
     async def _ensure_auth(self) -> None:
@@ -465,34 +457,34 @@ class MatchTraderClient:
         """
         await self._ensure_auth()
 
-        # Determine actual symbol to trade (append '.' if needed for this account)
-        trade_symbol = symbol
-        instruments = await self.get_effective_instruments()
-        for i in instruments:
-            if i.symbol == symbol or i.symbol == f"{symbol}.":
-                trade_symbol = i.symbol
-                break
-
-        body: dict[str, Any] = {
-            "instrument": trade_symbol,
-            "orderSide": side.upper(),
-            "volume": volume,
-        }
-        if sl is not None:
-            body["slPrice"] = sl
-        if tp is not None:
-            body["tpPrice"] = tp
-
-        logger.info(
-            "MatchTrader: opening {} {} {} lots (SL={}, TP={})",
-            side,
-            symbol,
-            volume,
-            sl,
-            tp,
-        )
-
         try:
+            # Determine actual symbol to trade (append '.' if needed for this account)
+            trade_symbol = symbol
+            instruments = await self.get_effective_instruments()
+            for i in instruments:
+                if i.symbol == symbol or i.symbol == f"{symbol}.":
+                    trade_symbol = i.symbol
+                    break
+
+            body: dict[str, Any] = {
+                "instrument": trade_symbol,
+                "orderSide": side.upper(),
+                "volume": volume,
+            }
+            if sl is not None:
+                body["slPrice"] = sl
+            if tp is not None:
+                body["tpPrice"] = tp
+
+            logger.info(
+                "MatchTrader: opening {} {} {} lots (SL={}, TP={})",
+                side,
+                symbol,
+                volume,
+                sl,
+                tp,
+            )
+
             response = await self._api_request(
                 "POST",
                 f"/mtr-api/{self.system_uuid}/position/open",

@@ -461,8 +461,14 @@ class TestTokenRefresh:
 
         # Refresh response
         refresh_response_data = {
-            "tradingApiToken": "new_jwt_token",
             "token": "new_refresh_token",
+            "accounts": [
+                {
+                    "tradingAccountId": "950552",
+                    "tradingApiToken": "new_jwt_token",
+                    "offer": {"system": {"uuid": "sys-123"}},
+                }
+            ],
         }
 
         call_count = 0
@@ -504,7 +510,7 @@ class TestTokenRefresh:
                 calls = mock_session.request.call_args_list
                 assert len(calls) == 1
                 assert calls[0][0][0] == "POST"
-                assert "/refresh-token" in calls[0][0][1]
+                assert "/manager/co-login" in calls[0][0][1]
 
                 # Verify token was updated
                 assert client._tokens.trading_api_token == "new_jwt_token"
@@ -558,6 +564,7 @@ class TestErrorHandling:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
 
                 with pytest.raises(MatchTraderAuthError):
                     await client._raw_request("GET", "/test", authenticated=True)
@@ -580,6 +587,7 @@ class TestErrorHandling:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
 
                 with pytest.raises(MatchTraderRateLimitError):
                     await client._raw_request("GET", "/test", authenticated=True)
@@ -602,6 +610,7 @@ class TestErrorHandling:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
 
                 with pytest.raises(MatchTraderError, match="API error 500"):
                     await client._raw_request("GET", "/test", authenticated=True)
@@ -630,6 +639,7 @@ class TestRateLimitingIntegration:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
 
                 initial_count = client._rate_limiter.count
                 await client._raw_request("GET", "/test", authenticated=True)
@@ -653,6 +663,7 @@ class TestRateLimitingIntegration:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
 
                 # Exhaust rate limit (minus reserve)
                 for _ in range(1949):
@@ -679,6 +690,7 @@ class TestRateLimitingIntegration:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
 
                 # Exhaust all requests
                 for _ in range(100):
@@ -719,6 +731,7 @@ class TestTradingOperations:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
 
                 balance = await client.get_balance()
 
@@ -766,6 +779,7 @@ class TestTradingOperations:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
                 # Set recent auth time to prevent auto-refresh
                 client._last_auth_time = 9999999999.0
 
@@ -797,6 +811,7 @@ class TestTradingOperations:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
 
                 result = await client.open_position(
                     symbol="EURUSD.", side="BUY", volume=0.1, sl=1.080, tp=1.090
@@ -833,6 +848,7 @@ class TestTradingOperations:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
                 # Set recent auth time to prevent auto-refresh
                 client._last_auth_time = 9999999999.0
 
@@ -858,6 +874,7 @@ class TestTradingOperations:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
 
                 result = await client.close_position(
                     position_id="pos-001", symbol="EURUSD.", side="BUY", volume=0.1
@@ -883,6 +900,7 @@ class TestTradingOperations:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
 
                 result = await client.modify_position(position_id="pos-001", sl=1.080, tp=1.090)
 
@@ -906,6 +924,7 @@ class TestTradingOperations:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
 
                 result = await client.modify_position(position_id="pos-001", sl=1.080)
 
@@ -969,6 +988,7 @@ class TestInstrumentInfo:
                     refresh_token="rt",
                     system_uuid="sys-123",
                 )
+                client._last_auth_time = __import__("time").monotonic()
                 # Set recent auth time to prevent auto-refresh
                 client._last_auth_time = 9999999999.0
 
