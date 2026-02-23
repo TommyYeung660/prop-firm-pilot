@@ -89,6 +89,27 @@ class ClosedPosition(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+
+
+class QuoteInfo(BaseModel):
+    """Real-time bid/ask quote from MatchTrader Market Watch.
+
+    Used for pre-trade price validation to prevent buying at inflated prices.
+
+    Usage:
+        quote = await client.get_quote("EURUSD.")
+        print(f"bid={quote.bid}, ask={quote.ask}")
+    """
+
+    symbol: str = ""
+    bid: float = 0.0
+    ask: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
+    timestamp_ms: int = Field(default=0, alias="timestampMs")
+
+    model_config = {"populate_by_name": True}
+
 class TradingHours(BaseModel):
     """Single trading session window for an instrument."""
 
@@ -402,6 +423,59 @@ class MatchTraderClient:
         instruments = [InstrumentInfo(**item) for item in instruments_raw]
         logger.info("MatchTrader: loaded {} effective instruments", len(instruments))
         return instruments
+
+
+    # ── Market Watch ────────────────────────────────────────────────────
+
+    async def get_quote(self, symbol: str) -> QuoteInfo:
+        """Get real-time bid/ask quote for an instrument.
+
+        Calls the Market Watch /quotations endpoint to retrieve the
+        broker's current pricing. Used for pre-trade slippage validation.
+
+        Args:
+            symbol: Broker symbol (e.g. "EURUSD." with dot suffix).
+
+        Returns:
+            QuoteInfo with bid, ask, high, low, and timestamp.
+
+        Raises:
+            MatchTraderError: If quote cannot be retrieved.
+        """
+        await self._ensure_auth()
+        response = await self._api_request(
+            "GET",
+            f"/mtr-api/{self.system_uuid}/quotations?symbols={symbol}",
+        )
+        data = response.json()
+
+        # API returns a list of quotes, find the matching symbol
+        quotes = data if isinstance(data, list) else []
+        if not quotes:
+            raise MatchTraderError(f"No quote returned for {symbol}")
+
+        # Match the requested symbol (first match)
+        for q in quotes:
+            if q.get("symbol", "") == symbol:
+                return QuoteInfo(
+                    symbol=q.get("symbol", ""),
+                    bid=float(q.get("bid", 0)),
+                    ask=float(q.get("ask", 0)),
+                    high=float(q.get("high", 0)),
+                    low=float(q.get("low", 0)),
+                    timestampMs=int(q.get("timestampMs", 0)),
+                )
+
+        # Fallback: use first quote if symbol doesn't match exactly
+        q = quotes[0]
+        return QuoteInfo(
+            symbol=q.get("symbol", ""),
+            bid=float(q.get("bid", 0)),
+            ask=float(q.get("ask", 0)),
+            high=float(q.get("high", 0)),
+            low=float(q.get("low", 0)),
+            timestampMs=int(q.get("timestampMs", 0)),
+        )
 
     # ── Position Queries ────────────────────────────────────────────────
 

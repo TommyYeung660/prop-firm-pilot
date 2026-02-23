@@ -175,6 +175,28 @@ class ExecutionEngine:
             await self._send_alert_rejection(symbol, side, compliance_result.reason)
             return
 
+        # Step 3.5: Pre-trade quote validation (slippage protection)
+        relevant_price = None
+        try:
+            quote = await self._matchtrader.get_quote(broker_symbol)
+            relevant_price = quote.ask if side == "BUY" else quote.bid
+            logger.info(
+                "ExecutionEngine: pre-trade quote for {} — bid={}, ask={}, using {}={:.5f}",
+                broker_symbol,
+                quote.bid,
+                quote.ask,
+                "ask" if side == "BUY" else "bid",
+                relevant_price,
+            )
+        except Exception as e:
+            relevant_price = None
+            logger.warning(
+                "ExecutionEngine: could not fetch pre-trade quote for {}: {} "
+                "— proceeding without slippage check",
+                broker_symbol,
+                e,
+            )
+
         # Step 4: Random delay (anti-duplicate-strategy detection by E8)
         delay = self._guard.add_random_delay()
         logger.debug("ExecutionEngine: applying {:.2f}s random delay for {}", delay, intent_id)
@@ -204,6 +226,43 @@ class ExecutionEngine:
                     trade_plan.volume,
                 )
 
+                # Post-trade slippage check
+                if relevant_price is not None and relevant_price > 0:
+                    fill_price = self._extract_open_price(order.raw_response)
+                    if fill_price is not None:
+                        instrument = self._config.instruments.get(symbol)
+                        if instrument is not None:
+                            pip_size = instrument.pip_size
+                            max_slippage = self._config.execution.max_slippage_pips * pip_size
+                            slippage = abs(fill_price - relevant_price)
+                            if slippage > max_slippage:
+                                logger.warning(
+                                    "ExecutionEngine: SLIPPAGE ALERT on {} — "
+                                    "fill={:.5f} vs quote={:.5f}, slippage={:.5f} > "
+                                    "max={:.5f} ({:.1f} pips)",
+                                    symbol,
+                                    fill_price,
+                                    relevant_price,
+                                    slippage,
+                                    max_slippage,
+                                    slippage / pip_size,
+                                )
+                                await self._send_alert_failed(
+                                    symbol,
+                                    side,
+                                    f"Slippage alert: {slippage / pip_size:.1f} pips "
+                                    f"(max: {self._config.execution.max_slippage_pips})",
+                                )
+                            else:
+                                logger.debug(
+                                    "ExecutionEngine: slippage OK for {} — "
+                                    "{:.5f} vs {:.5f} ({:.1f} pips, max {})",
+                                    symbol,
+                                    fill_price,
+                                    relevant_price,
+                                    slippage / pip_size,
+                                    self._config.execution.max_slippage_pips,
+                                )
                 # Set SL/TP on the opened position
                 sl_price, tp_price = await self._set_sl_tp_on_position(
                     position_id=order.position_id,

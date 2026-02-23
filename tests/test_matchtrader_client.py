@@ -22,6 +22,7 @@ from src.execution.matchtrader_client import (
     MatchTraderClient,
     MatchTraderError,
     MatchTraderRateLimitError,
+    QuoteInfo,
     RateLimiter,
 )
 
@@ -1000,3 +1001,45 @@ class TestInstrumentInfo:
                 assert instruments[0].contract_size == 100000
                 assert instruments[1].symbol == "GBPUSD."
                 assert instruments[1].price_precision == 5
+
+
+# ── QuoteInfo Model Tests ───────────────────────────────────────────────────
+
+
+class TestQuoteInfo:
+    """Tests for QuoteInfo model parsing from MatchTrader Market Watch API."""
+
+    def test_parse_from_api_response(self) -> None:
+        """Should parse quote data from typical API response dict."""
+        quote = QuoteInfo(
+            symbol="EURUSD.",
+            bid=float("1.10873"),
+            ask=float("1.10877"),
+            high=float("1.10901"),
+            low=float("1.10775"),
+            timestampMs=1726200032067,
+        )
+        assert quote.symbol == "EURUSD."
+        assert quote.bid == 1.10873
+        assert quote.ask == 1.10877
+        assert quote.high == 1.10901
+        assert quote.low == 1.10775
+        assert quote.timestamp_ms == 1726200032067
+
+    def test_default_values(self) -> None:
+        """Should have sensible defaults for all fields."""
+        quote = QuoteInfo()
+        assert quote.symbol == ""
+        assert quote.bid == 0.0
+        assert quote.ask == 0.0
+        assert quote.timestamp_ms == 0
+
+    def test_populate_by_name(self) -> None:
+        """Should accept both alias and field name."""
+        # Using alias
+        q1 = QuoteInfo(timestampMs=12345)
+        assert q1.timestamp_ms == 12345
+
+        # Using field name
+        q2 = QuoteInfo(timestamp_ms=67890)
+        assert q2.timestamp_ms == 67890

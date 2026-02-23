@@ -113,6 +113,7 @@ class ExecutionConfig(BaseModel):
     random_delay_min: float = 0.5
     random_delay_max: float = 3.0
     position_offset_pct: float = 0.10
+    max_slippage_pips: float = 2.0
 
 
 class MonitorConfig(BaseModel):

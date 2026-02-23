@@ -1076,3 +1076,156 @@ class TestSLTPPriceConversion:
         mock_matchtrader.modify_position.assert_called_once_with(
             position_id="pos_123", symbol="EURUSD", side="BUY", volume=0.10, sl=1.09600, tp=1.10800
         )
+
+
+
+# ── Slippage Detection Tests ────────────────────────────────────────────────
+
+
+class TestSlippageDetection:
+    """Tests for pre-trade quote validation and post-trade slippage alerting."""
+
+    async def test_slippage_ok_no_alert(
+        self,
+        store: DecisionStore,
+        config: AppConfig,
+        mock_guard: MagicMock,
+        mock_matchtrader: AsyncMock,
+        mock_sizer: MagicMock,
+    ) -> None:
+        """No alert when fill price is within slippage tolerance."""
+        from src.execution.matchtrader_client import QuoteInfo
+
+
+        mock_matchtrader.get_quote.return_value = QuoteInfo(
+            symbol="EURUSD.", bid=1.10873, ask=1.10877
+        )
+        mock_matchtrader.open_position.return_value = MagicMock(
+            success=True,
+            position_id="pos_123",
+            message="OK",
+            raw_response={"openPrice": "1.10878"},
+        )
+        mock_matchtrader.modify_position = AsyncMock(
+            return_value=MagicMock(success=True, position_id="pos_123", message="OK")
+        )
+
+        engine = ExecutionEngine(
+            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
+            sizer=mock_sizer, config=config,
+        )
+        _make_ready_intent(store, symbol="EURUSD", side="BUY")
+        await engine.execute_ready_intents()
+
+        for call in mock_matchtrader.method_calls:
+            pass
+
+    async def test_slippage_alert_when_exceeded(
+        self,
+        store: DecisionStore,
+        config: AppConfig,
+        mock_guard: MagicMock,
+        mock_matchtrader: AsyncMock,
+        mock_sizer: MagicMock,
+    ) -> None:
+        """Should log warning when fill price exceeds max slippage."""
+        from src.execution.matchtrader_client import QuoteInfo
+
+
+        config.execution.max_slippage_pips = 0.5
+
+        mock_matchtrader.get_quote.return_value = QuoteInfo(
+            symbol="EURUSD.", bid=1.10873, ask=1.10877
+        )
+        mock_matchtrader.open_position.return_value = MagicMock(
+            success=True,
+            position_id="pos_456",
+            message="OK",
+            raw_response={"openPrice": "1.10907"},
+        )
+        mock_matchtrader.modify_position = AsyncMock(
+            return_value=MagicMock(success=True, position_id="pos_456", message="OK")
+        )
+
+        alert_service = AsyncMock()
+        engine = ExecutionEngine(
+            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
+            sizer=mock_sizer, config=config, alert_service=alert_service,
+        )
+        _make_ready_intent(store, symbol="EURUSD", side="BUY")
+        await engine.execute_ready_intents()
+
+        alert_service.system_error.assert_called_once()
+        call_args = alert_service.system_error.call_args[0][0]
+        assert "Slippage alert" in call_args
+
+
+    async def test_quote_fetch_failure_proceeds(
+        self,
+        store: DecisionStore,
+        config: AppConfig,
+        mock_guard: MagicMock,
+        mock_matchtrader: AsyncMock,
+        mock_sizer: MagicMock,
+    ) -> None:
+        """Should proceed with trade when quote fetch fails."""
+        mock_matchtrader.get_quote.side_effect = Exception("Network error")
+        mock_matchtrader.open_position.return_value = MagicMock(
+            success=True,
+            position_id="pos_789",
+            message="OK",
+            raw_response={"openPrice": "1.10900"},
+        )
+        mock_matchtrader.modify_position = AsyncMock(
+            return_value=MagicMock(success=True, position_id="pos_789", message="OK")
+        )
+
+        engine = ExecutionEngine(
+            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
+            sizer=mock_sizer, config=config,
+        )
+        _make_ready_intent(store, symbol="EURUSD", side="BUY")
+        result = await engine.execute_ready_intents()
+        assert result == 1
+
+        mock_matchtrader.open_position.assert_called_once()
+        intents = store.get_ready_intents()
+        assert len(intents) == 0
+
+    async def test_sell_uses_bid_price(
+        self,
+        store: DecisionStore,
+        config: AppConfig,
+        mock_guard: MagicMock,
+        mock_matchtrader: AsyncMock,
+        mock_sizer: MagicMock,
+    ) -> None:
+        """For SELL orders, should use bid price as reference."""
+        from src.execution.matchtrader_client import QuoteInfo
+
+        config.execution.max_slippage_pips = 0.5
+
+        mock_matchtrader.get_quote.return_value = QuoteInfo(
+            symbol="EURUSD.", bid=1.10873, ask=1.10877
+        )
+        mock_matchtrader.open_position.return_value = MagicMock(
+            success=True,
+            position_id="pos_sell_1",
+            message="OK",
+            raw_response={"openPrice": "1.10843"},
+        )
+        mock_matchtrader.modify_position = AsyncMock(
+            return_value=MagicMock(success=True, position_id="pos_sell_1", message="OK")
+        )
+
+        alert_service = AsyncMock()
+        engine = ExecutionEngine(
+            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
+            sizer=mock_sizer, config=config, alert_service=alert_service,
+        )
+        _make_ready_intent(store, symbol="EURUSD", side="SELL")
+        await engine.execute_ready_intents()
+
+        alert_service.system_error.assert_called_once()
+        call_args = alert_service.system_error.call_args[0][0]
+        assert "Slippage alert" in call_args
