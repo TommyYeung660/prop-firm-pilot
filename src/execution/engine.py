@@ -177,8 +177,12 @@ class ExecutionEngine:
 
         # Step 3.5: Pre-trade quote validation (slippage protection)
         relevant_price = None
+        pre_trade_bid: float | None = None
+        pre_trade_ask: float | None = None
         try:
             quote = await self._matchtrader.get_quote(broker_symbol)
+            pre_trade_bid = quote.bid
+            pre_trade_ask = quote.ask
             relevant_price = quote.ask if side == "BUY" else quote.bid
             logger.info(
                 "ExecutionEngine: pre-trade quote for {} — bid={}, ask={}, using {}={:.5f}",
@@ -203,12 +207,14 @@ class ExecutionEngine:
         await asyncio.sleep(delay)
 
         # Step 5: Execute trade (use broker symbol for API call)
+        exec_start_time = asyncio.get_event_loop().time()
         try:
             order = await self._matchtrader.open_position(
                 symbol=broker_symbol,
                 side=side,
                 volume=trade_plan.volume,
             )
+            exec_latency_ms = (asyncio.get_event_loop().time() - exec_start_time) * 1000
 
             # Store compliance snapshot regardless of outcome
             await asyncio.to_thread(
@@ -283,6 +289,36 @@ class ExecutionEngine:
                     order.position_id,
                     sl_price,
                     tp_price,
+                )
+                # Build and persist execution_meta
+                meta_fill_price = self._extract_open_price(order.raw_response)
+                slippage_pips_val: float | None = None
+                if relevant_price is not None and meta_fill_price is not None:
+                    meta_instrument = self._config.instruments.get(symbol)
+                    if meta_instrument is not None:
+                        slippage_pips_val = (
+                            abs(meta_fill_price - relevant_price)
+                            / meta_instrument.pip_size
+                        )
+
+                execution_meta = self._build_execution_meta(
+                    fill_price=meta_fill_price,
+                    volume=trade_plan.volume,
+                    side=side,
+                    sl_price=sl_price,
+                    tp_price=tp_price,
+                    sl_pips=trade_plan.stop_loss,
+                    tp_pips=trade_plan.take_profit,
+                    pre_trade_bid=pre_trade_bid,
+                    pre_trade_ask=pre_trade_ask,
+                    slippage_pips=slippage_pips_val,
+                    execution_latency_ms=exec_latency_ms,
+                    random_delay_seconds=delay,
+                    compliance_passed=True,
+                    order_raw_response=order.raw_response,
+                )
+                await asyncio.to_thread(
+                    self._store.update_execution_meta, intent_id, execution_meta
                 )
             else:
                 await asyncio.to_thread(self._store.mark_failed, intent_id, order.message)
@@ -400,6 +436,44 @@ class ExecutionEngine:
                 "daily_pnl": snapshot.daily_pnl,
                 "total_pnl": snapshot.total_pnl,
             },
+        }
+        return json.dumps(data, default=str)
+
+    @staticmethod
+    def _build_execution_meta(
+        *,
+        fill_price: float | None,
+        volume: float,
+        side: str,
+        sl_price: float | None,
+        tp_price: float | None,
+        sl_pips: float,
+        tp_pips: float,
+        pre_trade_bid: float | None,
+        pre_trade_ask: float | None,
+        slippage_pips: float | None,
+        execution_latency_ms: float | None,
+        random_delay_seconds: float,
+        compliance_passed: bool,
+        order_raw_response: dict[str, Any],
+    ) -> str:
+        """Build execution metadata JSON string for persistence.
+        """
+        data: dict[str, Any] = {
+            "fill_price": fill_price,
+            "volume": volume,
+            "side": side,
+            "sl_price": sl_price,
+            "tp_price": tp_price,
+            "sl_pips": sl_pips,
+            "tp_pips": tp_pips,
+            "pre_trade_bid": pre_trade_bid,
+            "pre_trade_ask": pre_trade_ask,
+            "slippage_pips": slippage_pips,
+            "execution_latency_ms": execution_latency_ms,
+            "random_delay_seconds": random_delay_seconds,
+            "compliance_passed": compliance_passed,
+            "order_raw_response": order_raw_response,
         }
         return json.dumps(data, default=str)
 
