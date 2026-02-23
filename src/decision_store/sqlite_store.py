@@ -750,17 +750,19 @@ class DecisionStore:
     # ── Idempotency ─────────────────────────────────────────────────
 
     def intent_exists(self, symbol: str, trade_date: str, source: str) -> bool:
-        """Check if an intent already exists for this symbol+date+source combo.
+        """Check if an *in-progress* intent already exists for this symbol+date+source.
 
-        Used by the scanner to avoid creating duplicate intents for the same
-        signal on the same day.
+        Only intents that are still being processed (pending, claimed, ready_for_exec)
+        block new intent creation.  Completed intents (opened, closed) and terminal
+        intents (cancelled, timed_out, failed) do NOT block — the scanner is free to
+        create a fresh intent for the same symbol after a previous trade completes.
         """
         row = self._conn.execute(
             """SELECT 1 FROM intents
                WHERE symbol = :symbol
                  AND trade_date = :td
                  AND source = :source
-                 AND status NOT IN ('cancelled', 'timed_out', 'failed')
+                 AND status IN ('pending', 'claimed', 'ready_for_exec')
                LIMIT 1""",
             {"symbol": symbol, "td": trade_date, "source": source},
         ).fetchone()

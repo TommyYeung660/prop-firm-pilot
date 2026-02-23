@@ -261,6 +261,108 @@ class TestScannerLoop:
         assert len(intents) == config.scanner.topk
 
 
+
+    async def test_per_symbol_topk_deduplicates_same_symbol(
+        self,
+        scheduler: Scheduler,
+        mock_scanner: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """When all signals are the same symbol, only 1 intent is created."""
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("GBPUSD", score=0.95),
+            _make_mock_signal("GBPUSD", score=0.90),
+            _make_mock_signal("GBPUSD", score=0.85),
+            _make_mock_signal("GBPUSD", score=0.80),
+            _make_mock_signal("GBPUSD", score=0.75),
+        ]
+
+        await _run_loop_once(scheduler, scheduler._scanner_loop())
+
+        today = Scheduler._today_str()
+        intents = store.get_intents_by_date(today)
+        assert len(intents) == 1
+        assert intents[0].symbol == "GBPUSD"
+
+    async def test_per_symbol_topk_picks_best_score(
+        self,
+        scheduler: Scheduler,
+        mock_scanner: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """Should pick the highest-scoring signal per symbol."""
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("EURUSD", score=0.7),
+            _make_mock_signal("EURUSD", score=0.9),
+            _make_mock_signal("EURUSD", score=0.8),
+            _make_mock_signal("GBPUSD", score=0.6),
+            _make_mock_signal("GBPUSD", score=0.85),
+        ]
+
+        await _run_loop_once(scheduler, scheduler._scanner_loop())
+
+        today = Scheduler._today_str()
+        intents = store.get_intents_by_date(today)
+        symbols = {i.symbol for i in intents}
+        assert symbols == {"EURUSD", "GBPUSD"}
+        eur = [i for i in intents if i.symbol == "EURUSD"][0]
+        gbp = [i for i in intents if i.symbol == "GBPUSD"][0]
+        assert eur.scanner_score == 0.9
+        assert gbp.scanner_score == 0.85
+
+    async def test_per_symbol_topk_respects_topk_limit(
+        self,
+        scheduler: Scheduler,
+        mock_scanner: MagicMock,
+        store: DecisionStore,
+        config: AppConfig,
+    ) -> None:
+        """With 5 symbols, only topk=3 intents created (highest scores)."""
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("PAIR0", score=0.95),
+            _make_mock_signal("PAIR0", score=0.80),
+            _make_mock_signal("PAIR1", score=0.90),
+            _make_mock_signal("PAIR1", score=0.70),
+            _make_mock_signal("PAIR2", score=0.85),
+            _make_mock_signal("PAIR2", score=0.60),
+            _make_mock_signal("PAIR3", score=0.50),
+            _make_mock_signal("PAIR3", score=0.40),
+            _make_mock_signal("PAIR4", score=0.30),
+            _make_mock_signal("PAIR4", score=0.20),
+        ]
+
+        await _run_loop_once(scheduler, scheduler._scanner_loop())
+
+        today = Scheduler._today_str()
+        intents = store.get_intents_by_date(today)
+        assert len(intents) == config.scanner.topk  # 3
+        symbols = {i.symbol for i in intents}
+        # Top 3 best-per-symbol scores: PAIR0(0.95), PAIR1(0.90), PAIR2(0.85)
+        assert symbols == {"PAIR0", "PAIR1", "PAIR2"}
+
+    async def test_per_symbol_topk_diverse_over_monopoly(
+        self,
+        scheduler: Scheduler,
+        mock_scanner: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """Even when one symbol dominates, diversity is preserved."""
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("GBPUSD", score=0.95),
+            _make_mock_signal("GBPUSD", score=0.94),
+            _make_mock_signal("GBPUSD", score=0.93),
+            _make_mock_signal("EURUSD", score=0.80),
+            _make_mock_signal("USDJPY", score=0.75),
+        ]
+
+        await _run_loop_once(scheduler, scheduler._scanner_loop())
+
+        today = Scheduler._today_str()
+        intents = store.get_intents_by_date(today)
+        symbols = {i.symbol for i in intents}
+        # All 3 symbols should get intents, not 3x GBPUSD
+        assert symbols == {"GBPUSD", "EURUSD", "USDJPY"}
+
 # ── LLM Worker Loop Tests ──────────────────────────────────────────────────
 
 

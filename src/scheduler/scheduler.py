@@ -165,8 +165,25 @@ class Scheduler:
                     tickers=self._config.symbols,
                 )
 
-                for signal in signals[: self._config.scanner.topk]:
-                    # Idempotency: skip if intent already exists
+                # Per-symbol topk: pick the best signal per symbol, then take topk
+                best_per_symbol: dict[str, Any] = {}
+                for signal in signals:
+                    sym = signal.instrument
+                    if sym not in best_per_symbol or signal.score > best_per_symbol[sym].score:
+                        best_per_symbol[sym] = signal
+                candidates = sorted(
+                    best_per_symbol.values(), key=lambda s: s.score, reverse=True
+                )
+                topk_signals = candidates[: self._config.scanner.topk]
+                logger.info(
+                    "Scanner loop: {} signals -> {} symbols -> {} candidates",
+                    len(signals),
+                    len(best_per_symbol),
+                    len(topk_signals),
+                )
+
+                for signal in topk_signals:
+                    # Idempotency: skip if an in-progress intent already exists
                     exists = await asyncio.to_thread(
                         self._store.intent_exists,
                         signal.instrument,
@@ -174,8 +191,8 @@ class Scheduler:
                         "scanner",
                     )
                     if exists:
-                        logger.debug(
-                            "Scanner loop: intent already exists for {}, skipping",
+                        logger.info(
+                            "Scanner loop: in-progress intent exists for {}, skipping",
                             signal.instrument,
                         )
                         continue
