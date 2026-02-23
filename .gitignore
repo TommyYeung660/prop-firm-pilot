@@ -31,7 +31,29 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+nul
 
 # UV
 uv.lock
 config/default.yaml
+
+# Temp fix/debug scripts
+fix*.py
+rewrite_docs.py
+
+# Test artifacts
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Runtime data
+data/decisions.db
+data/decisions.db-shm
+data/decisions.db-wal
+data/trade_journal.jsonl
+
+# Eval results
+eval_results/
+
+# Temp directories
+tmp/
