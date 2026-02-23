@@ -1923,10 +1923,9 @@ class TestBestDayIntegration:
 
         # Should have called close_position for both profitable positions
         assert mock_matchtrader.close_position.call_count == 2
-
-        # Verify record_trade_pnl was called for each closed position
-        mock_tracker.record_trade_pnl.assert_any_call(200.0)
-        mock_tracker.record_trade_pnl.assert_any_call(50.0)
+        # Verify best_day_close_positions set tracks closed position IDs
+        assert "pos_1" in sched._best_day_close_positions
+        assert "pos_2" in sched._best_day_close_positions
 
     async def test_does_not_close_when_threshold_not_reached(
         self,
@@ -2015,8 +2014,9 @@ class TestBestDayIntegration:
         close_call = mock_matchtrader.close_position.call_args
         assert close_call[1]["position_id"] == "pos_win"
 
-        # Should only record the profitable PnL
-        mock_tracker.record_trade_pnl.assert_called_once_with(200.0)
+        # Verify only the profitable position was tracked for best day close
+        assert "pos_win" in sched._best_day_close_positions
+        assert "pos_loss" not in sched._best_day_close_positions
 
     async def test_sends_best_day_protection_alert(
         self,

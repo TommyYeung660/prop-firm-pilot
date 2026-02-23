@@ -55,7 +55,13 @@ CREATE TABLE IF NOT EXISTS intents (
     position_id         TEXT,
     executed_at         TEXT,
     execution_error     TEXT,
-    compliance_snapshot TEXT DEFAULT ''
+    compliance_snapshot TEXT DEFAULT '',
+
+    -- Close result
+    realized_pnl        REAL,
+    exit_price          REAL,
+    exit_reason         TEXT,
+    hold_duration_seconds INTEGER
 )
 """
 
@@ -72,9 +78,9 @@ CREATE TABLE IF NOT EXISTS decisions (
     order_id            TEXT,
     position_id         TEXT,
     failure_reason      TEXT DEFAULT '',
-
-    compliance_snapshot TEXT DEFAULT '',
-    execution_meta      TEXT DEFAULT ''
+    execution_meta      TEXT DEFAULT '',
+    realized_pnl        REAL,
+    exit_reason         TEXT
 )
 """
 
@@ -102,7 +108,8 @@ INSERT INTO intents (
     agent_risk_report, agent_state_json,
     source, status, claim_worker_id, claim_ts,
     claim_ttl_minutes, expires_at, idempotency_key,
-    position_id, executed_at, execution_error, compliance_snapshot
+    position_id, executed_at, execution_error, compliance_snapshot,
+    realized_pnl, exit_price, exit_reason, hold_duration_seconds
 ) VALUES (
     :id, :created_at, :trade_date, :symbol,
     :scanner_score, :scanner_confidence, :scanner_score_gap,
@@ -111,7 +118,8 @@ INSERT INTO intents (
     :agent_risk_report, :agent_state_json,
     :source, :status, :claim_worker_id, :claim_ts,
     :claim_ttl_minutes, :expires_at, :idempotency_key,
-    :position_id, :executed_at, :execution_error, :compliance_snapshot
+    :position_id, :executed_at, :execution_error, :compliance_snapshot,
+    :realized_pnl, :exit_price, :exit_reason, :hold_duration_seconds
 )
 """
 
@@ -207,8 +215,28 @@ class DecisionStore:
         self._conn.executescript(CREATE_INDEXES)
         self._conn.executescript(CREATE_API_CALLS_TABLE)
         self._conn.commit()
+        self._ensure_columns()
         logger.debug("Decision store tables ensured at {}", self._db_path)
 
+
+    def _ensure_columns(self) -> None:
+        """Idempotent migration: add columns that may not exist in older DBs."""
+        migrations = [
+            ("intents", "realized_pnl", "REAL"),
+            ("intents", "exit_price", "REAL"),
+            ("intents", "exit_reason", "TEXT"),
+            ("intents", "hold_duration_seconds", "INTEGER"),
+            ("decisions", "realized_pnl", "REAL"),
+            ("decisions", "exit_reason", "TEXT"),
+        ]
+        for table, col, col_type in migrations:
+            try:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+        self._conn.commit()
     def close(self) -> None:
         """Close the database connection."""
         self._conn.close()
@@ -251,6 +279,10 @@ class DecisionStore:
             "executed_at": _dt_to_str(intent.executed_at),
             "execution_error": intent.execution_error,
             "compliance_snapshot": intent.compliance_snapshot,
+            "realized_pnl": intent.realized_pnl,
+            "exit_price": intent.exit_price,
+            "exit_reason": intent.exit_reason,
+            "hold_duration_seconds": intent.hold_duration_seconds,
         }
         try:
             self._conn.execute(INSERT_INTENT_SQL, params)
@@ -505,23 +537,54 @@ class DecisionStore:
         self._conn.commit()
         logger.info("Intent {} cancelled: {}", intent_id, reason)
 
-    def mark_closed(self, intent_id: str) -> None:
-        """Transition intent from opened → closed (position closed by TP/SL/manual)."""
+    def mark_closed(
+        self,
+        intent_id: str,
+        *,
+        realized_pnl: float | None = None,
+        exit_price: float | None = None,
+        exit_reason: str | None = None,
+        hold_duration_seconds: int | None = None,
+    ) -> None:
+        """Transition intent from opened → closed with optional PnL data."""
         now = datetime.now(timezone.utc)
         updated = self._conn.execute(
-            """UPDATE intents SET status = 'closed' WHERE id = :id AND status = 'opened'""",
-            {"id": intent_id},
+            """UPDATE intents
+               SET status = 'closed',
+                   realized_pnl = :realized_pnl,
+                   exit_price = :exit_price,
+                   exit_reason = :exit_reason,
+                   hold_duration_seconds = :hold_duration_seconds
+               WHERE id = :id AND status = 'opened'""",
+            {
+                "realized_pnl": realized_pnl,
+                "exit_price": exit_price,
+                "exit_reason": exit_reason,
+                "hold_duration_seconds": hold_duration_seconds,
+                "id": intent_id,
+            },
         ).rowcount
         if not updated:
             raise InvalidTransitionError(f"Cannot close {intent_id}: not in 'opened' state")
         self._conn.execute(
             """UPDATE decisions
-               SET status = 'closed', closed_at = :closed_at
+               SET status = 'closed',
+                   closed_at = :closed_at,
+                   realized_pnl = :realized_pnl,
+                   exit_reason = :exit_reason
                WHERE intent_id = :intent_id""",
-            {"closed_at": _dt_to_str(now), "intent_id": intent_id},
+            {
+                "closed_at": _dt_to_str(now),
+                "realized_pnl": realized_pnl,
+                "exit_reason": exit_reason,
+                "intent_id": intent_id,
+            },
         )
         self._conn.commit()
-        logger.info("Intent {} closed", intent_id)
+        logger.info(
+            "Intent {} closed (pnl={}, reason={})",
+            intent_id, realized_pnl, exit_reason,
+        )
 
     # ── Queries ─────────────────────────────────────────────────────
 
@@ -543,6 +606,18 @@ class DecisionStore:
         """Get all intents with status='opened' (currently open positions)."""
         rows = self._conn.execute(
             "SELECT * FROM intents WHERE status = 'opened' ORDER BY executed_at ASC"
+        ).fetchall()
+        return [_row_to_intent(r) for r in rows]
+
+    def get_closed_intents(self, days: int = 7) -> list[TradeIntent]:
+        """Get closed intents from the last N days."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff_str = _dt_to_str(cutoff)
+        rows = self._conn.execute(
+            """SELECT * FROM intents
+               WHERE status = 'closed' AND created_at >= :cutoff
+               ORDER BY created_at DESC""",
+            {"cutoff": cutoff_str},
         ).fetchall()
         return [_row_to_intent(r) for r in rows]
 

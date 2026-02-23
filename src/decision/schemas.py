@@ -102,6 +102,12 @@ class TradeIntent(BaseModel):
     execution_error: str | None = None
     compliance_snapshot: str = ""  # JSON of compliance check results
 
+    # Close result (filled when position closes)
+    realized_pnl: float | None = None
+    exit_price: float | None = None
+    exit_reason: str | None = None  # tp_hit, sl_hit, manual_close, best_day_close, emergency_close
+    hold_duration_seconds: int | None = None
+
     def can_transition_to(self, new_status: IntentStatus) -> bool:
         """Check if transitioning from current status to new_status is valid."""
         return new_status in VALID_TRANSITIONS.get(self.status, [])
@@ -131,6 +137,8 @@ class DecisionRecord(BaseModel):
     order_id: str | None = None
     position_id: str | None = None
     failure_reason: str = ""
+    realized_pnl: float | None = None
+    exit_reason: str | None = None
 
     # Snapshots for post-trade analysis
     compliance_snapshot: str = ""

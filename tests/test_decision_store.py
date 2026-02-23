@@ -15,6 +15,7 @@ from src.decision_store.sqlite_store import (
     InvalidTransitionError,
 )
 
+# Currently Available: 2
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 
@@ -58,7 +59,7 @@ class TestInsertIntent:
         assert retrieved.scanner_score == 0.85
         assert retrieved.status == "pending"
 
-    def test_insert_creates_decision_record(
+    def test_insert_insert_creates_decision_record(
         self, store: DecisionStore, sample_intent: TradeIntent
     ) -> None:
         """Inserting an intent should also create a companion DecisionRecord."""
@@ -611,3 +612,180 @@ class TestDashboardQueries:
         """Should return total_active=0 when no active intents."""
         status = store.get_pipeline_status()
         assert status["total_active"] == 0
+
+
+# ── Mark Closed with PnL Tests ──────────────────────────────────────────────
+
+
+class TestMarkClosedWithPnL:
+    """Tests for mark_closed() with PnL keyword arguments (Phase 1)."""
+
+    def _open_intent(self, store: DecisionStore, symbol: str = "EURUSD") -> TradeIntent:
+        """Helper: create an intent and move it to 'opened' state."""
+        intent = TradeIntent(trade_date="2026-02-16", symbol=symbol)
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "BUY", 40.0, 80.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id=f"POS-{intent.id[:8]}")
+        return store.get_intent(intent.id)  # type: ignore[return-value]
+
+    def test_mark_closed_with_pnl_data(self, store: DecisionStore) -> None:
+        """mark_closed should store all PnL parameters correctly."""
+        intent = self._open_intent(store)
+        store.mark_closed(
+            intent.id,
+            realized_pnl=-15.50,
+            exit_price=1.0850,
+            exit_reason="sl_hit",
+            hold_duration_seconds=3600,
+        )
+
+        closed = store.get_intent(intent.id)
+        assert closed is not None
+        assert closed.status == "closed"
+        assert closed.realized_pnl == -15.50
+        assert closed.exit_price == 1.0850
+        assert closed.exit_reason == "sl_hit"
+        assert closed.hold_duration_seconds == 3600
+
+        decision = store.get_decision(intent.id)
+        assert decision is not None
+        assert decision.realized_pnl == -15.50
+        assert decision.exit_reason == "sl_hit"
+        assert decision.closed_at is not None
+
+    def test_mark_closed_without_pnl_data(self, store: DecisionStore) -> None:
+        """mark_closed with no PnL params should set all to None (backward compat)."""
+        intent = self._open_intent(store)
+        store.mark_closed(intent.id)
+
+        closed = store.get_intent(intent.id)
+        assert closed is not None
+        assert closed.status == "closed"
+        assert closed.realized_pnl is None
+        assert closed.exit_price is None
+        assert closed.exit_reason is None
+        assert closed.hold_duration_seconds is None
+
+        decision = store.get_decision(intent.id)
+        assert decision is not None
+        assert decision.realized_pnl is None
+        assert decision.exit_reason is None
+
+    def test_mark_closed_partial_pnl_data(self, store: DecisionStore) -> None:
+        """mark_closed should accept partial PnL params (only provided fields set)."""
+        intent = self._open_intent(store)
+        store.mark_closed(intent.id, realized_pnl=25.0, exit_reason="tp_hit")
+
+        closed = store.get_intent(intent.id)
+        assert closed is not None
+        assert closed.realized_pnl == 25.0
+        assert closed.exit_reason == "tp_hit"
+        assert closed.exit_price is None
+        assert closed.hold_duration_seconds is None
+
+    def test_mark_closed_not_opened_raises(self, store: DecisionStore) -> None:
+        """mark_closed should raise InvalidTransitionError if intent is not opened."""
+        intent = TradeIntent(trade_date="2026-02-16", symbol="EURUSD")
+        store.insert_intent(intent)
+
+        with pytest.raises(InvalidTransitionError):
+            store.mark_closed(intent.id)
+
+    def test_decision_record_tracks_pnl_on_close(self, store: DecisionStore) -> None:
+        """Decision record should track PnL data when intent is closed."""
+        intent = self._open_intent(store)
+        store.mark_closed(intent.id, realized_pnl=42.0, exit_reason="tp_hit")
+
+        decision = store.get_decision(intent.id)
+        assert decision is not None
+        assert decision.status == "closed"
+        assert decision.realized_pnl == 42.0
+        assert decision.exit_reason == "tp_hit"
+        assert decision.closed_at is not None
+
+
+# ── Get Closed Intents Tests ───────────────────────────────────────────────
+
+
+class TestGetClosedIntents:
+    """Tests for get_closed_intents() query method."""
+
+    def _open_and_close(
+        self,
+        store: DecisionStore,
+        symbol: str,
+        pnl: float | None = None,
+        exit_reason: str | None = None,
+    ) -> TradeIntent:
+        """Helper: create intent → open → close with PnL data."""
+        intent = TradeIntent(trade_date="2026-02-16", symbol=symbol)
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "BUY", 40.0, 80.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id=f"POS-{intent.id[:8]}")
+        store.mark_closed(intent.id, realized_pnl=pnl, exit_reason=exit_reason)
+        return intent
+
+    def test_get_closed_intents_returns_closed(self, store: DecisionStore) -> None:
+        """get_closed_intents should return all closed intents."""
+        self._open_and_close(store, "EURUSD", pnl=10.0, exit_reason="tp_hit")
+        self._open_and_close(store, "GBPUSD", pnl=-5.0, exit_reason="sl_hit")
+
+        closed = store.get_closed_intents()
+        assert len(closed) == 2
+        symbols = {i.symbol for i in closed}
+        assert symbols == {"EURUSD", "GBPUSD"}
+
+    def test_get_closed_intents_excludes_open(self, store: DecisionStore) -> None:
+        """get_closed_intents should exclude non-closed intents."""
+        closed_intent = self._open_and_close(store, "EURUSD", pnl=10.0)
+
+        # Create another intent but leave it opened
+        open_intent = TradeIntent(trade_date="2026-02-16", symbol="GBPUSD")
+        store.insert_intent(open_intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(open_intent.id, "BUY", 40.0, 80.0, "report", "{}")
+        store.mark_ready_for_exec(open_intent.id)
+        store.mark_executing(open_intent.id)
+        store.mark_opened(open_intent.id, position_id=f"POS-{open_intent.id[:8]}")
+
+        closed = store.get_closed_intents()
+        assert len(closed) == 1
+        assert closed[0].id == closed_intent.id
+
+    def test_get_closed_intents_respects_days(self, store: DecisionStore) -> None:
+        """get_closed_intents should filter by created_at cutoff based on days param."""
+        intent = self._open_and_close(store, "EURUSD", pnl=10.0)
+
+        # Manually set created_at to 30 days ago
+        old_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        store._conn.execute(
+            "UPDATE intents SET created_at = ? WHERE id = ?",
+            (old_date, intent.id),
+        )
+        store._conn.commit()
+
+        # days=7 should NOT include 30-day-old intent
+        recent = store.get_closed_intents(days=7)
+        assert len(recent) == 0
+
+        # days=60 SHOULD include 30-day-old intent
+        older = store.get_closed_intents(days=60)
+        assert len(older) == 1
+        assert older[0].id == intent.id
+
+    def test_get_closed_intents_ordered_desc(self, store: DecisionStore) -> None:
+        """get_closed_intents should return results in created_at DESC order."""
+        intent1 = self._open_and_close(store, "EURUSD", pnl=10.0)
+        intent2 = self._open_and_close(store, "GBPUSD", pnl=20.0)
+
+        closed = store.get_closed_intents()
+        assert len(closed) == 2
+        # intent2 was created later, should be first
+        assert closed[0].id == intent2.id
+        assert closed[1].id == intent1.id

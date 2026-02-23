@@ -92,6 +92,7 @@ class Scheduler:
         )
         self._running = False
         self._daily_summary_sent_date: str = ""  # Track last daily summary date
+        self._best_day_close_positions: set[str] = set()  # Track Best Day forced closes
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -459,9 +460,8 @@ class Scheduler:
 
     async def _handle_position_closed(self, intent: TradeIntent) -> None:
         """Process a detected position closure — update store and send alert.
-
-        Attempts to fetch the closed position details from MatchTrader for
-        PnL information. Falls back gracefully if details are unavailable.
+        Fetches closed position details from MatchTrader for PnL, persists
+        PnL/exit data to the store, calls LLM reflect, and sends alerts.
 
         Args:
             intent: The opened intent whose position is no longer active.
@@ -469,30 +469,17 @@ class Scheduler:
         symbol = intent.symbol
         side = intent.suggested_side or "?"
         position_id = intent.position_id or ""
-
         logger.info(
             "Position monitor: position {} ({}) closed externally",
             position_id,
             symbol,
         )
-
-        # Mark closed in store
-        try:
-            await asyncio.to_thread(self._store.mark_closed, intent.id)
-        except Exception as e:
-            logger.error(
-                "Position monitor: failed to mark intent {} closed: {}",
-                intent.id,
-                e,
-            )
-            return
-
         # Try to fetch closed position details for PnL
         pnl = 0.0
         close_price = 0.0
         open_price = 0.0
         volume = 0.0
-        hit_type = "manual"  # Default — could be SL, TP, or manual
+        exit_reason = "manual_close"  # Default — could be tp_hit, sl_hit, etc.
 
         try:
             # Search last 24h of closed positions
@@ -508,12 +495,11 @@ class Scheduler:
                     close_price = closed.close_price
                     open_price = closed.open_price
                     volume = closed.volume
-                    # Infer hit type from PnL direction vs side
-                    # (crude heuristic — TP if profitable, SL if loss)
+                    # Infer exit reason from PnL direction
                     if pnl > 0:
-                        hit_type = "TP"
+                        exit_reason = "tp_hit"
                     elif pnl < 0:
-                        hit_type = "SL"
+                        exit_reason = "sl_hit"
                     break
         except Exception as e:
             logger.warning(
@@ -522,12 +508,51 @@ class Scheduler:
                 e,
             )
 
+        # Override exit_reason if Best Day Rule triggered this close
+        if position_id in self._best_day_close_positions:
+            exit_reason = "best_day_close"
+            self._best_day_close_positions.discard(position_id)
+
+        # Calculate hold duration
+        hold_duration_seconds: int | None = None
+        if intent.executed_at is not None:
+            delta = self._now_utc() - intent.executed_at
+            hold_duration_seconds = int(delta.total_seconds())
+
+        # Mark closed in store with PnL data
+        try:
+            await asyncio.to_thread(
+                self._store.mark_closed,
+                intent.id,
+                realized_pnl=pnl,
+                exit_price=close_price,
+                exit_reason=exit_reason,
+                hold_duration_seconds=hold_duration_seconds,
+            )
+        except Exception as e:
+            logger.error(
+                "Position monitor: failed to mark intent {} closed: {}",
+                intent.id,
+                e,
+            )
+            return
+        # Call LLM reflect for learning
+        if pnl != 0.0:
+            try:
+                await asyncio.to_thread(
+                    self._agents.reflect,
+                    {symbol: pnl},
+                )
+                logger.info("LLM reflect called for {} PnL={}", symbol, pnl)
+            except Exception as e:
+                logger.warning("LLM reflect failed for {}: {}", symbol, e)
+
+        # Update BestDayTracker with realized PnL
+        self._best_day_tracker.record_trade_pnl(pnl)
         # Convert broker symbol to config symbol for display
         display_symbol = symbol
         if self._registry is not None:
             display_symbol = self._registry.to_config_safe(symbol)
-
-        # Get current equity for alert
         equity: float | None = None
         try:
             balance = await self._matchtrader.get_balance()
@@ -535,6 +560,8 @@ class Scheduler:
         except Exception:
             pass
 
+        # Map exit_reason to alert hit_type for backward compatibility
+        hit_type = {"tp_hit": "TP", "sl_hit": "SL"}.get(exit_reason, "manual")
         # Send appropriate alert
         if self._alert_service is not None:
             try:
@@ -554,7 +581,7 @@ class Scheduler:
                         symbol=display_symbol,
                         side=side,
                         pnl=pnl,
-                        reason="Position closed externally",
+                        reason=f"Position closed ({exit_reason})",
                         volume=volume,
                         open_price=open_price,
                         close_price=close_price,
@@ -562,9 +589,12 @@ class Scheduler:
                         position_id=position_id,
                     )
             except Exception as e:
-                logger.error("Position monitor: alert failed for {}: {}", position_id, e)
+                logger.error(
+                    "Position monitor: alert failed for {}: {}",
+                    position_id, e,
+                )
 
-    async def _close_winning_positions(self, open_positions: list) -> None:
+    async def _close_winning_positions(self, open_positions: list[Any]) -> None:
         """Close all winning (profitable) positions to protect Best Day Rule.
 
         Called when BestDayTracker detects daily PnL is approaching the limit.
@@ -597,7 +627,7 @@ class Scheduler:
                 if result.success:
                     closed_count += 1
                     total_pnl += pos.profit
-                    self._best_day_tracker.record_trade_pnl(pos.profit)
+                    self._best_day_close_positions.add(str(pos.position_id))
                     logger.info(
                         "Position monitor: closed winning position {} ({}) PnL=${:+.2f}",
                         pos.position_id,
