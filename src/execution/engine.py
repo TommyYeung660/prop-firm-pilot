@@ -210,6 +210,7 @@ class ExecutionEngine:
                     broker_symbol=broker_symbol,
                     config_symbol=symbol,
                     side=side,
+                    volume=trade_plan.volume,
                     sl_pips=trade_plan.stop_loss,
                     tp_pips=trade_plan.take_profit,
                     raw_response=order.raw_response,
@@ -378,6 +379,7 @@ class ExecutionEngine:
         broker_symbol: str,
         config_symbol: str,
         side: Literal["BUY", "SELL"],
+        volume: float,
         sl_pips: float,
         tp_pips: float,
         raw_response: dict[str, Any],
@@ -434,6 +436,9 @@ class ExecutionEngine:
         try:
             result = await self._matchtrader.modify_position(
                 position_id=position_id,
+                symbol=broker_symbol,
+                side=side,
+                volume=volume,
                 sl=sl_price,
                 tp=tp_price,
             )

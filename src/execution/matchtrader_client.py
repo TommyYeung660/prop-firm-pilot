@@ -581,24 +581,35 @@ class MatchTraderClient:
     async def modify_position(
         self,
         position_id: str,
+        symbol: str,
+        side: str,
+        volume: float,
         sl: float | None = None,
         tp: float | None = None,
     ) -> OrderResult:
         """Modify stop loss and/or take profit of an existing position.
+        The MatchTrader editPosition endpoint requires the full position context
+        (id, instrument, orderSide, volume) even when only updating SL/TP.
 
         Args:
             position_id: The position ID to modify.
+            symbol: Instrument name (broker symbol, e.g. 'EURUSD.').
+            side: Original order side ('BUY' or 'SELL').
+            volume: Position volume.
             sl: New stop loss price (None = don't change).
             tp: New take profit price (None = don't change).
         """
         await self._ensure_auth()
-
-        body: dict[str, Any] = {"positionId": position_id}
+        body: dict[str, Any] = {
+            "id": position_id,
+            "instrument": symbol,
+            "orderSide": side.upper(),
+            "volume": volume,
+        }
         if sl is not None:
             body["slPrice"] = sl
         if tp is not None:
             body["tpPrice"] = tp
-
         logger.info(
             "MatchTrader: modifying position {} (SL={}, TP={})",
             position_id,

@@ -801,6 +801,7 @@ class TestSLTPPriceConversion:
             broker_symbol="EURUSD",
             config_symbol="EURUSD",
             side="BUY",
+            volume=0.10,
             sl_pips=40.0,
             tp_pips=80.0,
             raw_response=raw_response,
@@ -811,7 +812,7 @@ class TestSLTPPriceConversion:
         assert tp_price == 1.10800
 
         engine._matchtrader.modify_position.assert_called_once_with(
-            position_id="pos_123", sl=1.09600, tp=1.10800
+            position_id="pos_123", symbol="EURUSD", side="BUY", volume=0.10, sl=1.09600, tp=1.10800
         )
 
     async def test_set_sl_tp_on_position_sell(self, engine: ExecutionEngine) -> None:
@@ -826,6 +827,7 @@ class TestSLTPPriceConversion:
             broker_symbol="EURUSD",
             config_symbol="EURUSD",
             side="SELL",
+            volume=0.10,
             sl_pips=40.0,
             tp_pips=80.0,
             raw_response=raw_response,
@@ -836,7 +838,7 @@ class TestSLTPPriceConversion:
         assert tp_price == 1.09200
 
         engine._matchtrader.modify_position.assert_called_once_with(
-            position_id="pos_123", sl=1.10400, tp=1.09200
+            position_id="pos_123", symbol="EURUSD", side="SELL", volume=0.10, sl=1.10400, tp=1.09200
         )
 
     async def test_set_sl_tp_on_position_no_price(self, engine: ExecutionEngine) -> None:
@@ -849,6 +851,7 @@ class TestSLTPPriceConversion:
             broker_symbol="EURUSD",
             config_symbol="EURUSD",
             side="BUY",
+            volume=0.10,
             sl_pips=40.0,
             tp_pips=80.0,
             raw_response=raw_response,
@@ -868,6 +871,7 @@ class TestSLTPPriceConversion:
             config_symbol="EURUSD",
             side="BUY",
             sl_pips=40.0,
+            volume=0.10,
             tp_pips=80.0,
             raw_response=raw_response,
         )
@@ -886,6 +890,7 @@ class TestSLTPPriceConversion:
             config_symbol="UNKNOWN",
             side="BUY",
             sl_pips=40.0,
+            volume=0.10,
             tp_pips=80.0,
             raw_response=raw_response,
         )
@@ -907,6 +912,7 @@ class TestSLTPPriceConversion:
             config_symbol="EURUSD",
             side="BUY",
             sl_pips=40.0,
+            volume=0.10,
             tp_pips=80.0,
             raw_response=raw_response,
         )
@@ -925,6 +931,7 @@ class TestSLTPPriceConversion:
             config_symbol="EURUSD",
             side="BUY",
             sl_pips=40.0,
+            volume=0.10,
             tp_pips=80.0,
             raw_response=raw_response,
         )
@@ -966,6 +973,7 @@ class TestSLTPPriceConversion:
             broker_symbol="EURUSD",
             config_symbol="EURUSD",
             side="BUY",
+            volume=0.10,
             sl_pips=40.0,
             tp_pips=80.0,
             raw_response=raw_response,
@@ -981,7 +989,7 @@ class TestSLTPPriceConversion:
     async def test_set_sl_tp_on_position_fallback_price_no_registry(
         self, engine: ExecutionEngine
     ) -> None:
-        """Uses fallback _fetch_position_open_price when raw_response has no price and no registry."""
+        """Uses fallback _fetch_position_open_price without registry."""
         # First, raw_response has no price
         raw_response = {}
 
@@ -999,6 +1007,7 @@ class TestSLTPPriceConversion:
             broker_symbol="EURUSD",
             config_symbol="EURUSD",
             side="BUY",
+            volume=0.10,
             sl_pips=40.0,
             tp_pips=80.0,
             raw_response=raw_response,
@@ -1022,6 +1031,7 @@ class TestSLTPPriceConversion:
             broker_symbol="EURUSD",
             config_symbol="EURUSD",
             side="BUY",
+            volume=0.10,
             sl_pips=40.0,
             tp_pips=80.0,
             raw_response=raw_response,
@@ -1064,5 +1074,5 @@ class TestSLTPPriceConversion:
 
         # Verify modify_position was called with correct SL/TP
         mock_matchtrader.modify_position.assert_called_once_with(
-            position_id="pos_123", sl=1.09600, tp=1.10800
+            position_id="pos_123", symbol="EURUSD", side="BUY", volume=0.10, sl=1.09600, tp=1.10800
         )
