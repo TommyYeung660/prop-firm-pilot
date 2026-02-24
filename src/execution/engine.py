@@ -281,6 +281,12 @@ class ExecutionEngine:
                     raw_response=order.raw_response,
                 )
 
+                # Extract fill price for alert
+                fill_price = self._extract_open_price(order.raw_response)
+                if fill_price is None:
+                    fill_price = await self._fetch_position_open_price(
+                        order.position_id
+                    )
                 await self._send_alert_opened(
                     symbol,
                     side,
@@ -289,6 +295,7 @@ class ExecutionEngine:
                     order.position_id,
                     sl_price,
                     tp_price,
+                    fill_price,
                 )
                 # Build and persist execution_meta
                 meta_fill_price = self._extract_open_price(order.raw_response)
@@ -639,6 +646,7 @@ class ExecutionEngine:
         position_id: str,
         sl_price: float | None = None,
         tp_price: float | None = None,
+        price: float | None = None,
     ) -> None:
         """Send Telegram notification for a successfully opened trade.
 
@@ -650,6 +658,7 @@ class ExecutionEngine:
             position_id: ID of the opened position.
             sl_price: Stop loss price (optional, for logging).
             tp_price: Take profit price (optional, for logging).
+            price: Actual fill price from broker (optional, defaults to 0.0).
         """
         if self._alert_service is not None:
             try:
@@ -657,7 +666,7 @@ class ExecutionEngine:
                     symbol=symbol,
                     side=side,
                     volume=volume,
-                    price=0.0,  # Filled from position query if needed
+                    price=price if price is not None else 0.0,
                     sl=sl_price,
                     tp=tp_price,
                     equity=equity,

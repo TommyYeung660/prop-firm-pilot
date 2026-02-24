@@ -1229,3 +1229,143 @@ class TestSlippageDetection:
         alert_service.system_error.assert_called_once()
         call_args = alert_service.system_error.call_args[0][0]
         assert "Slippage alert" in call_args
+
+
+
+# ── BUG #1: Trade Opened price=0.0 fix tests ──────────────────────────────
+
+
+class TestTradeOpenedPriceAlert:
+    """Tests that trade_opened alert receives real fill price, not hardcoded 0.0."""
+
+    async def test_alert_receives_fill_price_from_raw_response(
+        self,
+        store: DecisionStore,
+        config: AppConfig,
+        mock_guard: MagicMock,
+        mock_matchtrader: AsyncMock,
+        mock_sizer: MagicMock,
+    ) -> None:
+        """Alert should receive the fill price extracted from raw_response."""
+        mock_matchtrader.open_position.return_value = MagicMock(
+            success=True,
+            position_id="pos_price_1",
+            message="OK",
+            raw_response={"openPrice": "1.08765"},
+        )
+        mock_matchtrader.modify_position = AsyncMock(
+            return_value=MagicMock(success=True, position_id="pos_price_1", message="OK")
+        )
+
+        alert_service = AsyncMock()
+        engine = ExecutionEngine(
+            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
+            sizer=mock_sizer, config=config, alert_service=alert_service,
+        )
+        _make_ready_intent(store, symbol="EURUSD", side="BUY")
+        await engine.execute_ready_intents()
+
+        alert_service.trade_opened.assert_called_once()
+        call_kwargs = alert_service.trade_opened.call_args.kwargs
+        assert call_kwargs["price"] == pytest.approx(1.08765)
+        assert call_kwargs["symbol"] == "EURUSD"
+        assert call_kwargs["side"] == "BUY"
+
+    async def test_alert_falls_back_to_position_query(
+        self,
+        store: DecisionStore,
+        config: AppConfig,
+        mock_guard: MagicMock,
+        mock_matchtrader: AsyncMock,
+        mock_sizer: MagicMock,
+    ) -> None:
+        """When raw_response has no price, should fallback to broker position query."""
+        mock_matchtrader.open_position.return_value = MagicMock(
+            success=True,
+            position_id="pos_fallback_1",
+            message="OK",
+            raw_response={},  # No price keys
+        )
+        mock_matchtrader.modify_position = AsyncMock(
+            return_value=MagicMock(success=True, position_id="pos_fallback_1", message="OK")
+        )
+        # Fallback: get_open_positions returns a position with open_price
+        mock_matchtrader.get_open_positions.return_value = [
+            MagicMock(position_id="pos_fallback_1", open_price=1.09234),
+        ]
+
+        alert_service = AsyncMock()
+        engine = ExecutionEngine(
+            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
+            sizer=mock_sizer, config=config, alert_service=alert_service,
+        )
+        _make_ready_intent(store, symbol="EURUSD", side="SELL")
+        await engine.execute_ready_intents()
+
+        alert_service.trade_opened.assert_called_once()
+        call_kwargs = alert_service.trade_opened.call_args.kwargs
+        assert call_kwargs["price"] == pytest.approx(1.09234)
+
+    async def test_alert_defaults_to_zero_when_no_price_available(
+        self,
+        store: DecisionStore,
+        config: AppConfig,
+        mock_guard: MagicMock,
+        mock_matchtrader: AsyncMock,
+        mock_sizer: MagicMock,
+    ) -> None:
+        """When neither raw_response nor broker has price, should default to 0.0."""
+        mock_matchtrader.open_position.return_value = MagicMock(
+            success=True,
+            position_id="pos_noprice_1",
+            message="OK",
+            raw_response={},  # No price keys
+        )
+        mock_matchtrader.modify_position = AsyncMock(
+            return_value=MagicMock(success=True, position_id="pos_noprice_1", message="OK")
+        )
+        # Fallback also returns no matching position
+        mock_matchtrader.get_open_positions.return_value = []
+
+        alert_service = AsyncMock()
+        engine = ExecutionEngine(
+            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
+            sizer=mock_sizer, config=config, alert_service=alert_service,
+        )
+        _make_ready_intent(store, symbol="EURUSD", side="BUY")
+        await engine.execute_ready_intents()
+
+        alert_service.trade_opened.assert_called_once()
+        call_kwargs = alert_service.trade_opened.call_args.kwargs
+        assert call_kwargs["price"] == 0.0
+
+    async def test_alert_receives_price_with_fill_price_key(
+        self,
+        store: DecisionStore,
+        config: AppConfig,
+        mock_guard: MagicMock,
+        mock_matchtrader: AsyncMock,
+        mock_sizer: MagicMock,
+    ) -> None:
+        """Should extract price from alternative key 'fillPrice' in raw_response."""
+        mock_matchtrader.open_position.return_value = MagicMock(
+            success=True,
+            position_id="pos_alt_key",
+            message="OK",
+            raw_response={"fillPrice": 1.12345},
+        )
+        mock_matchtrader.modify_position = AsyncMock(
+            return_value=MagicMock(success=True, position_id="pos_alt_key", message="OK")
+        )
+
+        alert_service = AsyncMock()
+        engine = ExecutionEngine(
+            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
+            sizer=mock_sizer, config=config, alert_service=alert_service,
+        )
+        _make_ready_intent(store, symbol="GBPUSD", side="BUY")
+        await engine.execute_ready_intents()
+
+        alert_service.trade_opened.assert_called_once()
+        call_kwargs = alert_service.trade_opened.call_args.kwargs
+        assert call_kwargs["price"] == pytest.approx(1.12345)
