@@ -79,6 +79,16 @@ class PropFirmPilot:
                 "deep_think_llm": config.agents.deep_think_llm,
                 "quick_think_llm": config.agents.quick_think_llm,
                 "output_language": config.agents.output_language,
+                # BUG #6: OpenAI Responses API unsupported by Volcengine (404)
+                # BUG #7: Alpha Vantage free tier = 5 req/min; route away to avoid
+                # rate limit errors during FX decisions (10+ concurrent calls).
+                "tool_vendors": {
+                    "get_global_news": "local",
+                    "get_news": "local",
+                    "get_indicators": "yfinance",
+                    "get_insider_sentiment": "local",
+                    "get_insider_transactions": "local",
+                },
             },
         )
         self.journal = TradeJournal(config.monitor.trade_journal_path)
@@ -383,6 +393,16 @@ async def _run_scheduler(config: AppConfig) -> None:
             "deep_think_llm": config.agents.deep_think_llm,
             "quick_think_llm": config.agents.quick_think_llm,
             "output_language": config.agents.output_language,
+            # BUG #6: OpenAI Responses API unsupported by Volcengine (404)
+            # BUG #7: Alpha Vantage free tier = 5 req/min; route away to avoid
+            # rate limit errors during FX decisions (10+ concurrent calls).
+            "tool_vendors": {
+                "get_global_news": "local",
+                "get_news": "local",
+                "get_indicators": "yfinance",
+                "get_insider_sentiment": "local",
+                "get_insider_transactions": "local",
+            },
         },
     )
     alert_service = AlertService(

@@ -97,7 +97,18 @@ def build_agent_config(
         "market_type": "fx",  # newly added for TradingAgents integration
         "data_vendors": {
             "core_stock_apis": "itick",
-            "news_data": "alpha_vantage",
+            "news_data": "local",  # Changed from alpha_vantage (BUG #7)
+        },
+        # Tool-level vendor overrides (takes precedence over category-level)
+        # BUG #6: get_global_news — OpenAI Responses API unsupported by Volcengine (404)
+        # BUG #7: Route all methods away from Alpha Vantage — free tier is 5 req/min
+        # and FX decisions trigger 10+ concurrent calls causing rate limit errors.
+        "tool_vendors": {
+            "get_global_news": "local",
+            "get_news": "local",
+            "get_indicators": "yfinance",
+            "get_insider_sentiment": "local",
+            "get_insider_transactions": "local",
         },
         # FX context injection
         "fx_mode": True,
