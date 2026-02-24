@@ -905,8 +905,12 @@ class TestTradingOperations:
                 client._last_auth_time = __import__("time").monotonic()
 
                 result = await client.modify_position(
-                    position_id="pos-001", symbol="EURUSD.",
-                    side="BUY", volume=0.10, sl=1.080, tp=1.090,
+                    position_id="pos-001",
+                    symbol="EURUSD.",
+                    side="BUY",
+                    volume=0.10,
+                    sl=1.080,
+                    tp=1.090,
                 )
 
                 assert result.success is True
@@ -933,8 +937,11 @@ class TestTradingOperations:
                 client._last_auth_time = __import__("time").monotonic()
 
                 result = await client.modify_position(
-                    position_id="pos-001", symbol="EURUSD.",
-                    side="BUY", volume=0.10, sl=1.080,
+                    position_id="pos-001",
+                    symbol="EURUSD.",
+                    side="BUY",
+                    volume=0.10,
+                    sl=1.080,
                 )
 
                 assert result.success is True
