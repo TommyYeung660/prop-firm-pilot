@@ -18,6 +18,7 @@ from src.config import (
     DecisionStoreConfig,
     MonitorConfig,
     SchedulerConfig,
+    ExecutionConfig,
 )
 from src.decision.agent_bridge import AgentDecision
 from src.decision.schemas import TradeIntent
@@ -367,6 +368,243 @@ class TestScannerLoop:
         symbols = {i.symbol for i in intents}
         # All 3 symbols should get intents, not 3x GBPUSD
         assert symbols == {"GBPUSD", "EURUSD", "USDJPY"}
+
+# ── Scanner Capacity Check Tests ────────────────────────────────────────────
+
+
+class TestScannerCapacityCheck:
+    """Tests for BUG #4 fix: scanner loop respects max_positions capacity."""
+
+    async def test_skips_all_when_positions_at_max(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """When open positions == max_positions, no new intents are created."""
+        # Create a scheduler with max_positions=1
+        config_1 = config.model_copy(
+            update={"execution": ExecutionConfig(max_positions=1)}
+        )
+        sched = Scheduler(
+            config=config_1,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+
+        # Insert an opened position to fill the single slot
+        intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="EURUSD")
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(
+            intent.id, side="BUY", sl_pips=20, tp_pips=40,
+            risk_report="test", state_json="{}",
+        )
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id="POS-001")
+
+        # Scanner returns a new signal
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("GBPUSD")]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        # No new intents should be created (only the old opened one)
+        today = Scheduler._today_str()
+        intents = store.get_intents_by_date(today)
+        assert len(intents) == 1
+        assert intents[0].symbol == "EURUSD"
+
+    async def test_skips_all_when_pipeline_at_max(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """When pipeline intents fill max_positions, no new intents are created."""
+        config_2 = config.model_copy(
+            update={"execution": ExecutionConfig(max_positions=2)}
+        )
+        sched = Scheduler(
+            config=config_2,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+
+        # Insert 2 pending intents (pipeline, not yet opened)
+        store.insert_intent(TradeIntent(
+            trade_date=Scheduler._today_str(), symbol="EURUSD", source="scanner",
+        ))
+        store.insert_intent(TradeIntent(
+            trade_date=Scheduler._today_str(), symbol="GBPUSD", source="scanner",
+        ))
+
+        # Scanner returns another signal
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("USDJPY")]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        today = Scheduler._today_str()
+        intents = store.get_intents_by_date(today)
+        symbols = {i.symbol for i in intents}
+        # Only the 2 original intents, no USDJPY
+        assert len(intents) == 2
+        assert "USDJPY" not in symbols
+
+    async def test_limits_new_intents_to_available_slots(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """When 1 slot is used, only create enough intents to fill remaining."""
+        config_2 = config.model_copy(
+            update={"execution": ExecutionConfig(max_positions=2)}
+        )
+        sched = Scheduler(
+            config=config_2,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+
+        # 1 pending intent already in pipeline
+        store.insert_intent(TradeIntent(
+            trade_date=Scheduler._today_str(), symbol="EURUSD", source="scanner",
+        ))
+
+        # Scanner returns 3 signals — only 1 slot available
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("GBPUSD", score=0.9),
+            _make_mock_signal("USDJPY", score=0.8),
+            _make_mock_signal("AUDUSD", score=0.7),
+        ]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        today = Scheduler._today_str()
+        intents = store.get_intents_by_date(today)
+        # 1 original + 1 new = 2 total (max_positions=2)
+        assert len(intents) == 2
+        symbols = {i.symbol for i in intents}
+        assert "EURUSD" in symbols  # original
+        assert "GBPUSD" in symbols  # highest score new signal
+        assert "USDJPY" not in symbols  # would exceed capacity
+
+    async def test_mixed_open_and_pipeline_capacity(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Open positions + pipeline intents both count toward max_positions."""
+        config_3 = config.model_copy(
+            update={"execution": ExecutionConfig(max_positions=3)}
+        )
+        sched = Scheduler(
+            config=config_3,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+
+        # 1 opened position
+        opened = TradeIntent(trade_date=Scheduler._today_str(), symbol="EURUSD")
+        store.insert_intent(opened)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(
+            opened.id, side="BUY", sl_pips=20, tp_pips=40,
+            risk_report="test", state_json="{}",
+        )
+        store.mark_ready_for_exec(opened.id)
+        store.mark_executing(opened.id)
+        store.mark_opened(opened.id, position_id="POS-001")
+
+        # 1 pending intent in pipeline
+        store.insert_intent(TradeIntent(
+            trade_date=Scheduler._today_str(), symbol="GBPUSD", source="scanner",
+        ))
+
+        # Scanner returns 2 signals — only 1 slot available
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("USDJPY", score=0.9),
+            _make_mock_signal("AUDUSD", score=0.8),
+        ]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        today = Scheduler._today_str()
+        intents = store.get_intents_by_date(today)
+        # 1 opened + 1 pending + 1 new = 3 total (max_positions=3)
+        assert len(intents) == 3
+        symbols = {i.symbol for i in intents}
+        assert "USDJPY" in symbols  # got the 1 available slot
+        assert "AUDUSD" not in symbols  # would exceed capacity
+
+    async def test_idempotency_check_still_works_with_capacity(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Idempotency (intent_exists) check still skips duplicates within capacity."""
+        config_3 = config.model_copy(
+            update={"execution": ExecutionConfig(max_positions=3)}
+        )
+        sched = Scheduler(
+            config=config_3,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+
+        # Insert a pending intent for EURUSD
+        store.insert_intent(TradeIntent(
+            trade_date=Scheduler._today_str(), symbol="EURUSD", source="scanner",
+        ))
+
+        # Scanner returns EURUSD again + a new symbol
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("EURUSD", score=0.9),  # duplicate — should be skipped
+            _make_mock_signal("GBPUSD", score=0.8),  # new — should be created
+        ]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        today = Scheduler._today_str()
+        intents = store.get_intents_by_date(today)
+        # 1 original EURUSD + 1 new GBPUSD (EURUSD not duplicated)
+        assert len(intents) == 2
+        symbols = {i.symbol for i in intents}
+        assert symbols == {"EURUSD", "GBPUSD"}
+
 
 # ── LLM Worker Loop Tests ──────────────────────────────────────────────────
 

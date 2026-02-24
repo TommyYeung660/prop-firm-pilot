@@ -38,6 +38,8 @@ def config(tmp_path: Path) -> AppConfig:
             equity_poll_interval_seconds=0,
             position_monitor_interval_seconds=0,
             daily_summary_hour_utc=22,
+            reeval_min_hold_seconds=0,
+            reeval_interval_seconds=14400,
         ),
         decision_store=DecisionStoreConfig(),
         monitor=MonitorConfig(),
@@ -143,36 +145,27 @@ def _insert_opened_intent(
 class TestReevaluateOpenPositions:
     """Tests for _reevaluate_open_positions() method."""
 
-    async def test_hold_decision_closes_position(
+    async def test_hold_decision_keeps_position_open(
         self,
         scheduler: Scheduler,
         store: DecisionStore,
         mock_matchtrader: AsyncMock,
         mock_agents: MagicMock,
     ) -> None:
-        """HOLD decision from LLM should trigger position close."""
+        """HOLD decision from LLM should keep position open (do nothing)."""
         _insert_opened_intent(store, "INT-1", "EURUSD.", "POS-1")
         pos = _make_position(position_id="POS-1", symbol="EURUSD.", side="BUY")
-
-        # LLM returns HOLD — not actionable
+        # LLM returns HOLD — do nothing
         mock_agents.decide.return_value = AgentDecision(
             symbol="EURUSD.",
             decision="HOLD",
             final_state={},
             risk_report="Market turning sideways",
         )
-
         opened_intents = store.get_active_positions()
         await scheduler._reevaluate_open_positions([pos], opened_intents)
-
-        mock_matchtrader.close_position.assert_called_once_with(
-            position_id="POS-1",
-            symbol="EURUSD.",
-            side="BUY",
-            volume=0.01,
-        )
-        assert "POS-1" in scheduler._reevaluation_close_positions
-
+        mock_matchtrader.close_position.assert_not_called()
+        assert "POS-1" not in scheduler._reevaluation_close_positions
     async def test_buy_decision_keeps_position_open(
         self,
         scheduler: Scheduler,
@@ -294,7 +287,7 @@ class TestReevaluateOpenPositions:
 
         mock_agents.decide.return_value = AgentDecision(
             symbol="EURUSD.",
-            decision="HOLD",
+            decision="SELL",
             final_state={},
             risk_report="",
         )
@@ -399,6 +392,12 @@ class TestReevaluateOpenPositions:
         assert qlib_data["score"] == 0.85
         assert qlib_data["signal_strength"] == "high"
         assert qlib_data["confidence"] == "high"
+        # Verify position context fields are passed
+        assert qlib_data["position_side"] == "BUY"
+        assert qlib_data["unrealized_pnl"] == 2.0
+        assert qlib_data["entry_price"] == 1.10000
+        assert qlib_data["current_price"] == 1.10200
+        assert "hold_duration_seconds" in qlib_data
 
     async def test_exception_during_decide_is_caught(
         self,
@@ -420,6 +419,213 @@ class TestReevaluateOpenPositions:
         mock_matchtrader.close_position.assert_not_called()
 
 
+    async def test_sell_signal_on_buy_position_closes(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+        mock_agents: MagicMock,
+    ) -> None:
+        """SELL signal on BUY position is a reversal — should close."""
+        _insert_opened_intent(store, "INT-1", "EURUSD.", "POS-1")
+        pos = _make_position(position_id="POS-1", symbol="EURUSD.", side="BUY")
+
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD.",
+            decision="SELL",
+            final_state={},
+            risk_report="Bearish reversal",
+        )
+
+        opened_intents = store.get_active_positions()
+        await scheduler._reevaluate_open_positions([pos], opened_intents)
+
+        mock_matchtrader.close_position.assert_called_once_with(
+            position_id="POS-1",
+            symbol="EURUSD.",
+            side="BUY",
+            volume=0.01,
+        )
+        assert "POS-1" in scheduler._reevaluation_close_positions
+
+    async def test_buy_signal_on_sell_position_closes(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+        mock_agents: MagicMock,
+    ) -> None:
+        """BUY signal on SELL position is a reversal — should close."""
+        _insert_opened_intent(store, "INT-1", "EURUSD.", "POS-1")
+        pos = _make_position(position_id="POS-1", symbol="EURUSD.", side="SELL")
+
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD.",
+            decision="BUY",
+            final_state={},
+            risk_report="Bullish reversal",
+        )
+
+        opened_intents = store.get_active_positions()
+        await scheduler._reevaluate_open_positions([pos], opened_intents)
+
+        mock_matchtrader.close_position.assert_called_once_with(
+            position_id="POS-1",
+            symbol="EURUSD.",
+            side="SELL",
+            volume=0.01,
+        )
+        assert "POS-1" in scheduler._reevaluation_close_positions
+
+    async def test_buy_signal_on_buy_position_keeps_open(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+        mock_agents: MagicMock,
+    ) -> None:
+        """BUY signal on BUY position is confirmation — should keep open."""
+        _insert_opened_intent(store, "INT-1", "EURUSD.", "POS-1")
+        pos = _make_position(position_id="POS-1", symbol="EURUSD.", side="BUY")
+
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD.",
+            decision="BUY",
+            final_state={},
+            risk_report="Bullish continuation",
+        )
+
+        opened_intents = store.get_active_positions()
+        await scheduler._reevaluate_open_positions([pos], opened_intents)
+
+        mock_matchtrader.close_position.assert_not_called()
+        assert "POS-1" not in scheduler._reevaluation_close_positions
+
+    async def test_sell_signal_on_sell_position_keeps_open(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+        mock_agents: MagicMock,
+    ) -> None:
+        """SELL signal on SELL position is confirmation — should keep open."""
+        _insert_opened_intent(store, "INT-1", "EURUSD.", "POS-1")
+        pos = _make_position(position_id="POS-1", symbol="EURUSD.", side="SELL")
+
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD.",
+            decision="SELL",
+            final_state={},
+            risk_report="Bearish continuation",
+        )
+
+        opened_intents = store.get_active_positions()
+        await scheduler._reevaluate_open_positions([pos], opened_intents)
+
+        mock_matchtrader.close_position.assert_not_called()
+        assert "POS-1" not in scheduler._reevaluation_close_positions
+
+
+    async def test_min_hold_time_skips_early_reeval(
+        self,
+        tmp_path: Path,
+        mock_matchtrader: AsyncMock,
+        mock_agents: MagicMock,
+    ) -> None:
+        """Position opened recently should skip reeval when min hold time is enforced."""
+        cfg = AppConfig(
+            account=AccountConfig(initial_balance=50000),
+            compliance=ComplianceConfig(),
+            scheduler=SchedulerConfig(
+                scanner_interval_seconds=0,
+                llm_poll_interval_seconds=0,
+                execution_poll_interval_seconds=0,
+                janitor_interval_seconds=0,
+                llm_worker_count=1,
+                equity_poll_interval_seconds=0,
+                position_monitor_interval_seconds=0,
+                daily_summary_hour_utc=22,
+                reeval_min_hold_seconds=3600,
+                reeval_interval_seconds=14400,
+            ),
+            decision_store=DecisionStoreConfig(),
+            monitor=MonitorConfig(),
+        )
+        st = DecisionStore(str(tmp_path / "hold_skip.db"))
+        sched = Scheduler(
+            config=cfg,
+            store=st,
+            scanner=MagicMock(),
+            agents=mock_agents,
+            engine=AsyncMock(),
+            matchtrader=mock_matchtrader,
+        )
+        # Intent created & opened just now → hold duration ≈ 0s < 3600s
+        _insert_opened_intent(st, "INT-1", "EURUSD.", "POS-1")
+        pos = _make_position(position_id="POS-1", symbol="EURUSD.", side="BUY")
+
+        opened_intents = st.get_active_positions()
+        await sched._reevaluate_open_positions([pos], opened_intents)
+
+        mock_agents.decide.assert_not_called()
+
+    async def test_min_hold_time_allows_after_threshold(
+        self,
+        tmp_path: Path,
+        mock_matchtrader: AsyncMock,
+        mock_agents: MagicMock,
+    ) -> None:
+        """Position opened >threshold ago should allow reeval."""
+        cfg = AppConfig(
+            account=AccountConfig(initial_balance=50000),
+            compliance=ComplianceConfig(),
+            scheduler=SchedulerConfig(
+                scanner_interval_seconds=0,
+                llm_poll_interval_seconds=0,
+                execution_poll_interval_seconds=0,
+                janitor_interval_seconds=0,
+                llm_worker_count=1,
+                equity_poll_interval_seconds=0,
+                position_monitor_interval_seconds=0,
+                daily_summary_hour_utc=22,
+                reeval_min_hold_seconds=3600,
+                reeval_interval_seconds=14400,
+            ),
+            decision_store=DecisionStoreConfig(),
+            monitor=MonitorConfig(),
+        )
+        st = DecisionStore(str(tmp_path / "hold_allow.db"))
+        sched = Scheduler(
+            config=cfg,
+            store=st,
+            scanner=MagicMock(),
+            agents=mock_agents,
+            engine=AsyncMock(),
+            matchtrader=mock_matchtrader,
+        )
+        _insert_opened_intent(st, "INT-1", "EURUSD.", "POS-1")
+        # Backdate executed_at to 2 hours ago so hold_seconds > 3600
+        two_hours_ago = datetime.now(timezone.utc) - timedelta(hours=2)
+        st._conn.execute(
+            "UPDATE intents SET executed_at = ? WHERE id = ?",
+            (two_hours_ago.isoformat(), "INT-1"),
+        )
+        st._conn.commit()
+
+        pos = _make_position(position_id="POS-1", symbol="EURUSD.", side="BUY")
+
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD.",
+            decision="BUY",
+            final_state={},
+            risk_report="Confirmed",
+        )
+
+        opened_intents = st.get_active_positions()
+        await sched._reevaluate_open_positions([pos], opened_intents)
+
+        mock_agents.decide.assert_called_once()
+
 # ── Test Class: Re-evaluation Exit Reason Override ──────────────────────
 
 
@@ -437,7 +643,7 @@ class TestReevaluationExitReason:
         intent = store.get_intent("INT-1")
 
         # Pre-populate the reevaluation set
-        scheduler._reevaluation_close_positions.add("POS-1")
+        scheduler._reevaluation_close_positions["POS-1"] = 0.0
 
         # Mock closed positions return empty (PnL defaults to 0)
         mock_matchtrader.get_closed_positions.return_value = []
@@ -487,3 +693,153 @@ class TestReevaluationExitReason:
 
         # Cleanup removes from _last_reevaluation
         assert "POS-1" not in scheduler._last_reevaluation
+
+
+# ── Additional Fixtures for Minimum Hold Time Tests ───────────────────────
+
+
+@pytest.fixture
+def config_with_hold_time(tmp_path: Path) -> AppConfig:
+    """Config with minimum hold time enabled for testing grace period."""
+    return AppConfig(
+        account=AccountConfig(initial_balance=50000),
+        compliance=ComplianceConfig(),
+        scheduler=SchedulerConfig(
+            scanner_interval_seconds=0,
+            llm_poll_interval_seconds=0,
+            execution_poll_interval_seconds=0,
+            janitor_interval_seconds=0,
+            llm_worker_count=1,
+            equity_poll_interval_seconds=0,
+            position_monitor_interval_seconds=0,
+            daily_summary_hour_utc=22,
+            reeval_min_hold_seconds=3600,  # 1 hour minimum hold time
+            reeval_interval_seconds=14400,
+        ),
+        decision_store=DecisionStoreConfig(),
+        monitor=MonitorConfig(),
+    )
+
+
+@pytest.fixture
+def scheduler_with_hold_time(
+    config_with_hold_time: AppConfig,
+    store: DecisionStore,
+    mock_matchtrader: AsyncMock,
+    mock_agents: MagicMock,
+) -> Scheduler:
+    """Scheduler with minimum hold time enabled."""
+    return Scheduler(
+        config=config_with_hold_time,
+        store=store,
+        scanner=MagicMock(),
+        agents=mock_agents,
+        engine=AsyncMock(),
+        matchtrader=mock_matchtrader,
+    )
+
+
+
+
+# ── BUG #3: PnL Fallback Tests ──────────────────────────────────────────
+
+
+class TestPnlFallback:
+    """Tests for unrealized PnL fallback when broker query returns zero."""
+
+    async def test_reeval_close_uses_unrealized_pnl_fallback(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """When broker returns no closed position, reeval close uses recorded unrealized PnL."""
+        _insert_opened_intent(store, "INT-1", "EURUSD.", "POS-1")
+        intent = store.get_intent("INT-1")
+
+        # Record unrealized PnL at close time (simulating reeval close)
+        scheduler._reevaluation_close_positions["POS-1"] = 42.50
+
+        # Broker returns empty — position not yet in closed list
+        mock_matchtrader.get_closed_positions.return_value = []
+
+        await scheduler._handle_position_closed(intent)
+
+        updated = store.get_intent("INT-1")
+        assert updated is not None
+        assert updated.exit_reason == "reeval_close"
+        assert updated.realized_pnl == pytest.approx(42.50)
+
+    async def test_reeval_close_prefers_broker_pnl_over_fallback(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """When broker returns real PnL, use it even if unrealized PnL was recorded."""
+        _insert_opened_intent(store, "INT-1", "EURUSD.", "POS-1")
+        intent = store.get_intent("INT-1")
+
+        # Record unrealized PnL (should be overridden by broker data)
+        scheduler._reevaluation_close_positions["POS-1"] = 42.50
+
+        # Broker returns actual closed position with different PnL
+        mock_matchtrader.get_closed_positions.return_value = [
+            MagicMock(
+                position_id="POS-1",
+                profit=38.75,
+                close_price=1.10500,
+                open_price=1.10000,
+                volume=0.10,
+            ),
+        ]
+
+        await scheduler._handle_position_closed(intent)
+
+        updated = store.get_intent("INT-1")
+        assert updated is not None
+        assert updated.exit_reason == "reeval_close"
+        # Should use broker PnL (38.75), not the recorded unrealized PnL (42.50)
+        assert updated.realized_pnl == pytest.approx(38.75)
+
+    async def test_best_day_close_uses_unrealized_pnl_fallback(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """When broker returns no closed position, best_day close uses recorded unrealized PnL."""
+        _insert_opened_intent(store, "INT-1", "EURUSD.", "POS-1")
+        intent = store.get_intent("INT-1")
+
+        # Record unrealized PnL at close time (simulating best day close)
+        scheduler._best_day_close_positions["POS-1"] = 120.00
+
+        mock_matchtrader.get_closed_positions.return_value = []
+
+        await scheduler._handle_position_closed(intent)
+
+        updated = store.get_intent("INT-1")
+        assert updated is not None
+        assert updated.exit_reason == "best_day_close"
+        assert updated.realized_pnl == pytest.approx(120.00)
+
+    async def test_reeval_close_negative_pnl_fallback(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Negative unrealized PnL should also be used as fallback."""
+        _insert_opened_intent(store, "INT-1", "EURUSD.", "POS-1")
+        intent = store.get_intent("INT-1")
+
+        scheduler._reevaluation_close_positions["POS-1"] = -15.30
+        mock_matchtrader.get_closed_positions.return_value = []
+
+        await scheduler._handle_position_closed(intent)
+
+        updated = store.get_intent("INT-1")
+        assert updated is not None
+        assert updated.exit_reason == "reeval_close"
+        assert updated.realized_pnl == pytest.approx(-15.30)

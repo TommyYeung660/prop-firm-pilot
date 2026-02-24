@@ -614,6 +614,44 @@ class TestDashboardQueries:
         assert status["total_active"] == 0
 
 
+    def test_count_pipeline_intents_empty(self, store: DecisionStore) -> None:
+        """Should return 0 when no pipeline intents exist."""
+        assert store.count_pipeline_intents() == 0
+
+    def test_count_pipeline_intents_counts_pending(self, store: DecisionStore) -> None:
+        """Should count pending intents in pipeline."""
+        store.insert_intent(TradeIntent(trade_date="2026-02-16", symbol="EURUSD"))
+        store.insert_intent(TradeIntent(trade_date="2026-02-16", symbol="GBPUSD"))
+        assert store.count_pipeline_intents() == 2
+
+    def test_count_pipeline_intents_counts_claimed(self, store: DecisionStore) -> None:
+        """Should count claimed intents in pipeline."""
+        store.insert_intent(TradeIntent(trade_date="2026-02-16", symbol="EURUSD"))
+        store.claim_next_pending("llm-0")
+        assert store.count_pipeline_intents() == 1
+
+    def test_count_pipeline_intents_excludes_opened(self, store: DecisionStore) -> None:
+        """Opened intents are NOT in the pipeline (they are active positions)."""
+        intent = TradeIntent(trade_date="2026-02-16", symbol="EURUSD")
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(
+            intent.id, side="BUY", sl_pips=20, tp_pips=40,
+            risk_report="test", state_json="{}",
+        )
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id="POS-001")
+        assert store.count_pipeline_intents() == 0
+
+    def test_count_pipeline_intents_excludes_terminal(self, store: DecisionStore) -> None:
+        """Terminal intents (cancelled, failed, etc.) are NOT in the pipeline."""
+        intent = TradeIntent(trade_date="2026-02-16", symbol="EURUSD")
+        store.insert_intent(intent)
+        store.mark_cancelled(intent.id, reason="test")
+        assert store.count_pipeline_intents() == 0
+
+
 # ── Mark Closed with PnL Tests ──────────────────────────────────────────────
 
 

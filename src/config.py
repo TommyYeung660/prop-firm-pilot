@@ -168,6 +168,10 @@ class SchedulerConfig(BaseModel):
     reeval_interval_seconds: int = Field(
         default=14400, description="Re-evaluate open positions via LLM every N seconds (4h)"
     )
+    reeval_min_hold_seconds: int = Field(
+        default=3600,
+        description="Minimum seconds a position must be held before first re-evaluation (1h)",
+    )
 
 
 class LoggingConfig(BaseModel):

@@ -92,7 +92,7 @@ class Scheduler:
         )
         self._running = False
         self._daily_summary_sent_date: str = ""  # Track last daily summary date
-        self._best_day_close_positions: set[str] = set()  # Track Best Day forced closes
+        self._best_day_close_positions: dict[str, float] = {}  # pos_id -> unrealized PnL
 
 
         # Phase 2.5: Trailing stop / breakeven tracking
@@ -100,7 +100,7 @@ class Scheduler:
 
         # Phase 2.6: Re-evaluation tracking
         self._last_reevaluation: dict[str, datetime] = {}  # position_id -> last eval time
-        self._reevaluation_close_positions: set[str] = set()  # positions closed by reeval
+        self._reevaluation_close_positions: dict[str, float] = {}  # pos_id -> unrealized PnL
     # ── Public API ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -182,39 +182,73 @@ class Scheduler:
                     len(topk_signals),
                 )
 
-                for signal in topk_signals:
-                    # Idempotency: skip if an in-progress intent already exists
-                    exists = await asyncio.to_thread(
-                        self._store.intent_exists,
-                        signal.instrument,
-                        today,
-                        "scanner",
+                # ── Capacity check: avoid creating intents beyond max_positions ──
+                max_pos = self._config.execution.max_positions
+                open_count = len(
+                    await asyncio.to_thread(self._store.get_active_positions)
+                )
+                pipeline_count = await asyncio.to_thread(
+                    self._store.count_pipeline_intents
+                )
+                total_occupied = open_count + pipeline_count
+                available_slots = max_pos - total_occupied
+                if available_slots <= 0:
+                    logger.info(
+                        "Scanner loop: at capacity ({} open + {} pipeline >= {} max), "
+                        "skipping intent creation",
+                        open_count,
+                        pipeline_count,
+                        max_pos,
                     )
-                    if exists:
-                        logger.info(
-                            "Scanner loop: in-progress intent exists for {}, skipping",
+                else:
+                    created_count = 0
+                    for signal in topk_signals:
+                        if created_count >= available_slots:
+                            logger.info(
+                                "Scanner loop: reached available slot limit ({}/{}), "
+                                "stopping intent creation",
+                                created_count,
+                                available_slots,
+                            )
+                            break
+                        # Idempotency: skip if an in-progress intent already exists
+                        exists = await asyncio.to_thread(
+                            self._store.intent_exists,
                             signal.instrument,
+                            today,
+                            "scanner",
                         )
-                        continue
+                        if exists:
+                            logger.info(
+                                "Scanner loop: in-progress intent exists for {}, skipping",
+                                signal.instrument,
+                            )
+                            continue
 
-                    intent = TradeIntent(
-                        trade_date=today,
-                        symbol=signal.instrument,
-                        scanner_score=signal.score,
-                        scanner_confidence=signal.confidence,
-                        scanner_score_gap=signal.score_gap,
-                        scanner_drop_distance=signal.drop_distance,
-                        scanner_topk_spread=signal.topk_spread,
-                        source="scanner",
-                        expires_at=self._now_utc() + timedelta(hours=4),
-                    )
-                    await asyncio.to_thread(self._store.insert_intent, intent)
-                    logger.info("Scanner loop: created intent for {}", signal.instrument)
-                    await self._send_alert(
-                        f"🔍 <b>Intent Created</b>\n"
-                        f"• {signal.instrument} (score={signal.score:.2f}, "
-                        f"conf={signal.confidence})"
-                    )
+                        intent = TradeIntent(
+                            trade_date=today,
+                            symbol=signal.instrument,
+                            scanner_score=signal.score,
+                            scanner_confidence=signal.confidence,
+                            scanner_score_gap=signal.score_gap,
+                            scanner_drop_distance=signal.drop_distance,
+                            scanner_topk_spread=signal.topk_spread,
+                            source="scanner",
+                            expires_at=self._now_utc() + timedelta(hours=4),
+                        )
+                        await asyncio.to_thread(self._store.insert_intent, intent)
+                        created_count += 1
+                        logger.info(
+                            "Scanner loop: created intent for {} ({}/{})",
+                            signal.instrument,
+                            created_count,
+                            available_slots,
+                        )
+                        await self._send_alert(
+                            f"\U0001f50d <b>Intent Created</b>\n"
+                            f"\u2022 {signal.instrument} (score={signal.score:.2f}, "
+                            f"conf={signal.confidence})"
+                        )
 
             except asyncio.CancelledError:
                 logger.info("Scanner loop: cancelled")
@@ -533,8 +567,9 @@ class Scheduler:
         open_price = 0.0
         volume = 0.0
         exit_reason = "manual_close"  # Default — could be tp_hit, sl_hit, etc.
-
         try:
+            # Short delay to let broker update closed positions list
+            await asyncio.sleep(2.0)
             # Search last 24h of closed positions
             now_ms = int(self._now_utc().timestamp() * 1000)
             day_ago_ms = now_ms - 86_400_000
@@ -560,16 +595,30 @@ class Scheduler:
                 position_id,
                 e,
             )
-
         # Override exit_reason if Best Day Rule triggered this close
+        # and use recorded unrealized PnL as fallback when broker query returned 0
         if position_id in self._best_day_close_positions:
             exit_reason = "best_day_close"
-            self._best_day_close_positions.discard(position_id)
-
+            if pnl == 0.0:
+                pnl = self._best_day_close_positions[position_id]
+                logger.info(
+                    "Position monitor: using recorded unrealized PnL ${:+.2f} for {}",
+                    pnl,
+                    position_id,
+                )
+            self._best_day_close_positions.pop(position_id, None)
         # Override exit_reason if re-evaluation triggered this close
+        # and use recorded unrealized PnL as fallback when broker query returned 0
         if position_id in self._reevaluation_close_positions:
             exit_reason = "reeval_close"
-            self._reevaluation_close_positions.discard(position_id)
+            if pnl == 0.0:
+                pnl = self._reevaluation_close_positions[position_id]
+                logger.info(
+                    "Position monitor: using recorded unrealized PnL ${:+.2f} for {}",
+                    pnl,
+                    position_id,
+                )
+            self._reevaluation_close_positions.pop(position_id, None)
 
 
         # Clean up reevaluation tracking
@@ -688,7 +737,7 @@ class Scheduler:
                 if result.success:
                     closed_count += 1
                     total_pnl += pos.profit
-                    self._best_day_close_positions.add(str(pos.position_id))
+                    self._best_day_close_positions[str(pos.position_id)] = pos.profit
                     logger.info(
                         "Position monitor: closed winning position {} ({}) PnL=${:+.2f}",
                         pos.position_id,
@@ -810,10 +859,13 @@ class Scheduler:
         self, open_positions: list[Any], opened_intents: list[TradeIntent]
     ) -> None:
         """Re-evaluate open positions via LLM agents on a configurable interval.
+        Only closes a position when the LLM returns a signal that contradicts
+        the current position direction (e.g. BUY position + LLM SELL → close).
+        HOLD means 'keep the position open, do nothing'. Same-direction signals
+        (e.g. BUY position + LLM BUY) confirm the position and keep it open.
 
-        When the LLM returns HOLD for a currently open position, actively close
-        that position. This allows the system to exit positions that no longer
-        have favorable conditions.
+        A minimum hold time (reeval_min_hold_seconds) is enforced before the
+        first re-evaluation to prevent premature exits.
 
         Args:
             open_positions: Currently open positions from MatchTrader.
@@ -827,30 +879,37 @@ class Scheduler:
         # Build position lookups
         open_position_ids = {str(p.position_id) for p in open_positions}
         position_lookup = {str(p.position_id): p for p in open_positions}
-
         for intent in opened_intents:
             try:
                 if intent.position_id is None:
                     continue
-
                 if intent.position_id not in open_position_ids:
                     continue
-
                 # Skip if already closed by re-evaluation
                 if intent.position_id in self._reevaluation_close_positions:
                     continue
 
-                # Check timing - skip if re-evaluated recently
+                # Check timing — enforce minimum hold time and reeval interval
+                now = self._now_utc()
                 last_eval = self._last_reevaluation.get(intent.position_id)
-                if last_eval is not None:
-                    time_since = (self._now_utc() - last_eval).total_seconds()
+                if last_eval is None:
+                    # First reeval check — enforce minimum hold time from position open
+                    opened_at = intent.executed_at or intent.created_at
+                    hold_seconds = (now - opened_at).total_seconds()
+                    if hold_seconds < self._config.scheduler.reeval_min_hold_seconds:
+                        continue
+                else:
+                    time_since = (now - last_eval).total_seconds()
                     if time_since < self._config.scheduler.reeval_interval_seconds:
                         continue
-
                 # Update last evaluation time
-                self._last_reevaluation[intent.position_id] = self._now_utc()
+                self._last_reevaluation[intent.position_id] = now
 
-                # Build qlib_data for decision
+                # Build qlib_data with position context for LLM
+                pos = position_lookup[intent.position_id]
+                hold_duration = None
+                if intent.executed_at is not None:
+                    hold_duration = int((now - intent.executed_at).total_seconds())
                 qlib_data = {
                     "score": intent.scanner_score,
                     "signal_strength": intent.scanner_confidence,
@@ -858,8 +917,13 @@ class Scheduler:
                     "score_gap": intent.scanner_score_gap,
                     "drop_distance": intent.scanner_drop_distance,
                     "topk_spread": intent.scanner_topk_spread,
+                    # Position context for re-evaluation
+                    "position_side": pos.side,
+                    "unrealized_pnl": pos.profit,
+                    "entry_price": pos.open_price,
+                    "current_price": pos.current_price,
+                    "hold_duration_seconds": hold_duration,
                 }
-
                 # Get LLM decision
                 decision = await asyncio.to_thread(
                     self._agents.decide,
@@ -868,9 +932,14 @@ class Scheduler:
                     qlib_data=qlib_data,
                 )
 
-                if decision.decision == "HOLD":
-                    # Get position and close it
-                    pos = position_lookup[intent.position_id]
+                # Determine if the signal is a reversal of the current position
+                is_reversal = (
+                    (pos.side == "BUY" and decision.decision == "SELL")
+                    or (pos.side == "SELL" and decision.decision == "BUY")
+                )
+
+                if is_reversal:
+                    # Reverse signal — close the position
                     result = await self._matchtrader.close_position(
                         position_id=intent.position_id,
                         symbol=pos.symbol,
@@ -878,17 +947,26 @@ class Scheduler:
                         volume=pos.volume,
                     )
                     if result.success:
-                        self._reevaluation_close_positions.add(intent.position_id)
+                        self._reevaluation_close_positions[intent.position_id] = pos.profit
                         logger.info(
-                            "Re-evaluation closed position {} ({}) - LLM returned HOLD",
+                            "Re-evaluation closed position {} ({}) - reverse signal {} vs {}",
                             intent.position_id,
                             intent.symbol,
+                            decision.decision,
+                            pos.side,
                         )
                         await self._send_alert(
                             f"🔄 <b>Re-evaluation Close</b>\n"
                             f"• Position: {intent.position_id} ({intent.symbol})\n"
-                            f"• Reason: LLM returned HOLD"
+                            f"• Side: {pos.side} → LLM signal: {decision.decision}\n"
+                            f"• Reason: Reverse signal detected"
                         )
+                elif decision.decision == "HOLD":
+                    logger.info(
+                        "Re-evaluation: HOLD for position {} ({}) - keeping position open",
+                        intent.position_id,
+                        intent.symbol,
+                    )
                 else:
                     logger.info(
                         "Re-evaluation confirms position {} ({}) - decision: {}",

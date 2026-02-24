@@ -770,6 +770,23 @@ class DecisionStore:
         ).fetchone()
         return row is not None
 
+
+    def count_pipeline_intents(self) -> int:
+        """Count intents currently in the processing pipeline.
+
+        Pipeline states: pending, claimed, ready_for_exec, executing.
+        These intents are expected to eventually become open positions,
+        so they should be counted toward max_positions to avoid over-creation.
+
+        Returns:
+            Number of intents in pipeline states.
+        """
+        row = self._conn.execute(
+            """SELECT COUNT(*) as cnt FROM intents
+               WHERE status IN ('pending', 'claimed', 'ready_for_exec', 'executing')"""
+        ).fetchone()
+        return row["cnt"] if row else 0
+
     # ── API Call Tracking (Rate Limiter) ────────────────────────────
 
     def record_api_calls(self, count: int = 1, call_type: str = "read") -> int:
@@ -784,27 +801,18 @@ class DecisionStore:
         """
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         now_str = _dt_to_str(datetime.now(timezone.utc))
+        read_inc = count if call_type == "read" else 0
+        write_inc = count if call_type == "write" else 0
         self._conn.execute(
-            """INSERT INTO api_calls (call_date, call_count, updated_at)
-               VALUES (:date, :count, :now)
+            """INSERT INTO api_calls (call_date, call_count, read_count, write_count, updated_at)
+               VALUES (:date, :count, :read, :write, :now)
                ON CONFLICT(call_date) DO UPDATE
                SET call_count = call_count + :count,
+                   read_count = read_count + :read,
+                   write_count = write_count + :write,
                    updated_at = :now""",
-            {"date": today, "count": count, "now": now_str},
+            {"date": today, "count": count, "read": read_inc, "write": write_inc, "now": now_str},
         )
-        # Update read/write breakdown
-        if call_type == "write":
-            self._conn.execute(
-                """UPDATE api_calls SET write_count = write_count + :count
-                   WHERE call_date = :date""",
-                {"count": count, "date": today},
-            )
-        else:
-            self._conn.execute(
-                """UPDATE api_calls SET read_count = read_count + :count
-                   WHERE call_date = :date""",
-                {"count": count, "date": today},
-            )
         self._conn.commit()
         row = self._conn.execute(
             "SELECT call_count FROM api_calls WHERE call_date = :date",
