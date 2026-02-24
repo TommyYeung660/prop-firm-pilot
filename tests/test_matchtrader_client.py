@@ -539,6 +539,46 @@ class TestTokenRefresh:
                 with pytest.raises(RuntimeError, match="Cannot refresh"):
                     await client.refresh_token()
 
+    async def test_refresh_login_uses_debug_log_level(self, client_config: dict) -> None:
+        """Token refresh should log at DEBUG, not INFO (BUG #10)."""
+        login_resp = {
+            "token": "refresh_token",
+            "accounts": [
+                {
+                    "tradingAccountId": "950552",
+                    "offer": {"system": {"uuid": "sys-uuid"}},
+                    "tradingApiToken": "jwt-token",
+                }
+            ],
+        }
+
+        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+            mock_session = AsyncMock()
+            mock_session.close = AsyncMock()
+            resp = AsyncMock()
+            resp.status_code = 200
+            resp.json = MagicMock(return_value=login_resp)
+            mock_session.request = AsyncMock(return_value=resp)
+            MockSession.return_value = mock_session
+
+            async with MatchTraderClient(**client_config) as client:
+                # Initial login should use INFO
+                with patch("src.execution.matchtrader_client.logger") as mock_logger:
+                    await client.login()
+                    mock_logger.info.assert_any_call(
+                        "MatchTrader: logging in as {}", "test@example.com"
+                    )
+
+                # Refresh uses login(_quiet=True) which should use DEBUG
+                with patch("src.execution.matchtrader_client.logger") as mock_logger:
+                    await client.login(_quiet=True)
+                    mock_logger.debug.assert_any_call(
+                        "MatchTrader: logging in as {}", "test@example.com"
+                    )
+                    # Ensure INFO was NOT called for the login message
+                    for call in mock_logger.info.call_args_list:
+                        assert "logging in as" not in str(call)
+
 
 # ── Error Handling Tests ────────────────────────────────────────────────────
 

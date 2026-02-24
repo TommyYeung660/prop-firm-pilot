@@ -366,13 +366,14 @@ class MatchTraderClient:
 
     # ── Auth ────────────────────────────────────────────────────────────
 
-    async def login(self) -> AuthTokens:
+    async def login(self, *, _quiet: bool = False) -> AuthTokens:
         """Authenticate with MatchTrader and obtain JWT tokens.
 
         If account_id was provided at construction, selects that specific
         trading account. Otherwise falls back to the first account returned.
         """
-        logger.info("MatchTrader: logging in as {}", self._email)
+        _log = logger.debug if _quiet else logger.info
+        _log("MatchTrader: logging in as {}", self._email)
 
         response = await self._raw_request(
             "POST",
@@ -423,7 +424,7 @@ class MatchTraderClient:
         self._last_auth_time = time.monotonic()
 
         selected_id = account.get("tradingAccountId", "?")
-        logger.info(
+        _log(
             "MatchTrader: login successful. account={}, systemUUID={}, total_accounts={}",
             selected_id,
             system_uuid,
@@ -442,7 +443,7 @@ class MatchTraderClient:
             raise RuntimeError("Cannot refresh: not authenticated.")
 
         logger.debug("MatchTrader: refreshing JWT token via re-login")
-        await self.login()
+        await self.login(_quiet=True)
         logger.debug("MatchTrader: token refreshed successfully")
 
     async def _ensure_auth(self) -> None:
