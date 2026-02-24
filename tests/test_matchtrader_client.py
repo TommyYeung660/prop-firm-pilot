@@ -887,7 +887,8 @@ class TestTradingOperations:
     async def test_modify_position_returns_success(
         self, client_config: dict, mock_response: AsyncMock
     ) -> None:
-        mock_response.json = MagicMock(return_value={"result": "modified"})
+        modify_ok = {"status": "OK", "errorMessage": "", "result": "modified"}
+        mock_response.json = MagicMock(return_value=modify_ok)
 
         with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
             mock_session = AsyncMock()
@@ -903,7 +904,10 @@ class TestTradingOperations:
                 )
                 client._last_auth_time = __import__("time").monotonic()
 
-                result = await client.modify_position(position_id="pos-001", symbol="EURUSD.", side="BUY", volume=0.10, sl=1.080, tp=1.090)
+                result = await client.modify_position(
+                    position_id="pos-001", symbol="EURUSD.",
+                    side="BUY", volume=0.10, sl=1.080, tp=1.090,
+                )
 
                 assert result.success is True
                 assert result.position_id == "pos-001"
@@ -911,7 +915,8 @@ class TestTradingOperations:
     async def test_modify_position_only_sl(
         self, client_config: dict, mock_response: AsyncMock
     ) -> None:
-        mock_response.json = MagicMock(return_value={"result": "modified"})
+        modify_ok = {"status": "OK", "errorMessage": "", "result": "modified"}
+        mock_response.json = MagicMock(return_value=modify_ok)
 
         with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
             mock_session = AsyncMock()
@@ -927,7 +932,10 @@ class TestTradingOperations:
                 )
                 client._last_auth_time = __import__("time").monotonic()
 
-                result = await client.modify_position(position_id="pos-001", symbol="EURUSD.", side="BUY", volume=0.10, sl=1.080)
+                result = await client.modify_position(
+                    position_id="pos-001", symbol="EURUSD.",
+                    side="BUY", volume=0.10, sl=1.080,
+                )
 
                 assert result.success is True
 

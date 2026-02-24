@@ -57,8 +57,16 @@ class PositionInfo(BaseModel):
     open_price: float = Field(default=0.0, alias="openPrice")
     current_price: float = Field(default=0.0, alias="currentPrice")
     profit: float = 0.0
-    sl_price: float | None = Field(default=None, alias="slPrice")
-    tp_price: float | None = Field(default=None, alias="tpPrice")
+    sl_price: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("stopLoss", "slPrice"),
+        serialization_alias="slPrice",
+    )
+    tp_price: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("takeProfit", "tpPrice"),
+        serialization_alias="tpPrice",
+    )
     open_time: str = Field(default="", alias="openTime")
 
     model_config = {"populate_by_name": True}
@@ -698,6 +706,32 @@ class MatchTraderClient:
                 json=body,
             )
             data = response.json()
+            logger.debug("MatchTrader: modify_position raw response: {}", data)
+
+            # Validate API response — status must be "OK"
+            api_status = data.get("status", "")
+            error_msg = data.get("errorMessage", "")
+            if api_status != "OK":
+                logger.error(
+                    "MatchTrader: modify_position API returned non-OK status: "
+                    "status={}, errorMessage={}, raw={}",
+                    api_status,
+                    error_msg,
+                    data,
+                )
+                return OrderResult(
+                    success=False,
+                    position_id=position_id,
+                    message=f"API returned status={api_status}: {error_msg}",
+                    raw_response=data,
+                )
+
+            logger.info(
+                "MatchTrader: position {} modified successfully (SL={}, TP={})",
+                position_id,
+                sl,
+                tp,
+            )
             return OrderResult(
                 success=True,
                 position_id=position_id,
