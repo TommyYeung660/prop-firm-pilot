@@ -483,7 +483,28 @@ class Scheduler:
                 await self._send_alert(f"⚠️ <b>Position Monitor Error</b>\n<code>{e}</code>")
 
             try:
-                await asyncio.sleep(self._config.scheduler.position_monitor_interval_seconds)
+                # Auto-throttle: increase sleep when API budget is low
+                base_interval = self._config.scheduler.position_monitor_interval_seconds
+                limiter = self._matchtrader._rate_limiter
+                remaining = limiter.remaining
+                daily_limit = limiter._daily_limit
+                if remaining < daily_limit * 0.15:
+                    sleep_interval = base_interval * 4
+                    logger.warning(
+                        "Position monitor: API budget critical ({}/{} remaining)"
+                        " — throttling to {}s interval",
+                        remaining, daily_limit, sleep_interval,
+                    )
+                elif remaining < daily_limit * 0.30:
+                    sleep_interval = base_interval * 2
+                    logger.info(
+                        "Position monitor: API budget low ({}/{} remaining)"
+                        " — throttling to {}s interval",
+                        remaining, daily_limit, sleep_interval,
+                    )
+                else:
+                    sleep_interval = base_interval
+                await asyncio.sleep(sleep_interval)
             except asyncio.CancelledError:
                 logger.info("Position monitor loop: cancelled during sleep")
                 return

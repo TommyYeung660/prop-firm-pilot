@@ -247,6 +247,8 @@ class DecisionStore:
             ("intents", "hold_duration_seconds", "INTEGER"),
             ("decisions", "realized_pnl", "REAL"),
             ("decisions", "exit_reason", "TEXT"),
+            ("api_calls", "read_count", "INTEGER DEFAULT 0"),
+            ("api_calls", "write_count", "INTEGER DEFAULT 0"),
         ]
         for table, col, col_type in migrations:
             try:
@@ -770,14 +772,13 @@ class DecisionStore:
 
     # ── API Call Tracking (Rate Limiter) ────────────────────────────
 
-    def record_api_calls(self, count: int = 1) -> int:
+    def record_api_calls(self, count: int = 1, call_type: str = "read") -> int:
         """Record API calls for today and return the new total.
-
         Persists API call counts in SQLite so they survive restarts.
 
         Args:
             count: Number of API calls to record (default 1).
-
+            call_type: "read" or "write" for tracking breakdown.
         Returns:
             Updated total API call count for today.
         """
@@ -791,6 +792,19 @@ class DecisionStore:
                    updated_at = :now""",
             {"date": today, "count": count, "now": now_str},
         )
+        # Update read/write breakdown
+        if call_type == "write":
+            self._conn.execute(
+                """UPDATE api_calls SET write_count = write_count + :count
+                   WHERE call_date = :date""",
+                {"count": count, "date": today},
+            )
+        else:
+            self._conn.execute(
+                """UPDATE api_calls SET read_count = read_count + :count
+                   WHERE call_date = :date""",
+                {"count": count, "date": today},
+            )
         self._conn.commit()
         row = self._conn.execute(
             "SELECT call_count FROM api_calls WHERE call_date = :date",
@@ -814,6 +828,30 @@ class DecisionStore:
             {"date": date},
         ).fetchone()
         return row["call_count"] if row else 0
+
+
+    def get_api_call_breakdown(self, date: str | None = None) -> dict[str, int]:
+        """Get API call breakdown (total/read/write) for a date.
+
+        Args:
+            date: Date string YYYY-MM-DD. Defaults to today UTC.
+
+        Returns:
+            Dictionary with total, read, and write counts.
+        """
+        if date is None:
+            date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        row = self._conn.execute(
+            "SELECT call_count, read_count, write_count FROM api_calls WHERE call_date = :date",
+            {"date": date},
+        ).fetchone()
+        if row is None:
+            return {"total": 0, "read": 0, "write": 0}
+        return {
+            "total": row["call_count"],
+            "read": row["read_count"] or 0,
+            "write": row["write_count"] or 0,
+        }
 
     # ── Equity Snapshots ────────────────────────────────────────────
 

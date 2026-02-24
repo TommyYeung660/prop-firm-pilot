@@ -156,7 +156,7 @@ class SchedulerConfig(BaseModel):
         default=60, description="Equity monitor poll interval"
     )
     position_monitor_interval_seconds: int = Field(
-        default=30, description="Position close detection poll interval"
+        default=120, description="Position close detection poll interval"
     )
     daily_summary_hour_utc: int = Field(
         default=22, description="UTC hour to send daily summary (0-23)"

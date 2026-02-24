@@ -97,8 +97,6 @@ class ClosedPosition(BaseModel):
     model_config = {"populate_by_name": True}
 
 
-
-
 class QuoteInfo(BaseModel):
     """Real-time bid/ask quote from MatchTrader Market Watch.
 
@@ -117,6 +115,7 @@ class QuoteInfo(BaseModel):
     timestamp_ms: int = Field(default=0, alias="timestampMs")
 
     model_config = {"populate_by_name": True}
+
 
 class TradingHours(BaseModel):
     """Single trading session window for an instrument."""
@@ -199,22 +198,67 @@ class InstrumentInfo(BaseModel):
 
 
 class RateLimiter:
-    """Simple daily rate limiter for MatchTrader API (2000 req/day)."""
+    """Daily rate limiter for MatchTrader API (2000 req/day).
 
-    def __init__(self, daily_limit: int = 2000):
+    Supports optional persistent storage via DecisionStore, so counts
+    survive process restarts. Tracks read/write breakdown for analysis.
+
+    Usage:
+        limiter = RateLimiter(daily_limit=2000, store=decision_store)
+        limiter.record(call_type="read")
+        if limiter.can_proceed():
+            # make request
+    """
+
+    def __init__(self, daily_limit: int = 2000, store: Any = None):
         self._daily_limit = daily_limit
+        self._store = store
         self._count = 0
+        self._read_count = 0
+        self._write_count = 0
         self._reset_date = datetime.now(timezone.utc).date()
+        # Load existing counts from store if available
+        if store is not None:
+            try:
+                breakdown = store.get_api_call_breakdown()
+                self._count = breakdown["total"]
+                self._read_count = breakdown["read"]
+                self._write_count = breakdown["write"]
+                logger.info(
+                    "RateLimiter: loaded {} existing API calls from store (read={}, write={})",
+                    self._count,
+                    self._read_count,
+                    self._write_count,
+                )
+            except Exception as e:
+                logger.warning("RateLimiter: failed to load counts from store: {}", e)
 
     def _maybe_reset(self) -> None:
         today = datetime.now(timezone.utc).date()
         if today != self._reset_date:
             self._count = 0
+            self._read_count = 0
+            self._write_count = 0
             self._reset_date = today
 
-    def record(self) -> None:
+    def record(self, call_type: str = "read") -> None:
+        """Record an API call with optional type classification.
+
+        Args:
+            call_type: "read" for GET/query calls, "write" for POST/mutating calls.
+        """
         self._maybe_reset()
         self._count += 1
+        if call_type == "write":
+            self._write_count += 1
+        else:
+            self._read_count += 1
+        # Persist to store if available
+        if self._store is not None:
+            try:
+                self._store.record_api_calls(count=1, call_type=call_type)
+            except Exception as e:
+                logger.warning("RateLimiter: failed to persist to store: {}", e)
 
     @property
     def remaining(self) -> int:
@@ -225,6 +269,18 @@ class RateLimiter:
     def count(self) -> int:
         self._maybe_reset()
         return self._count
+
+    @property
+    def read_count(self) -> int:
+        """Number of read (GET) API calls today."""
+        self._maybe_reset()
+        return self._read_count
+
+    @property
+    def write_count(self) -> int:
+        """Number of write (POST) API calls today."""
+        self._maybe_reset()
+        return self._write_count
 
     def can_proceed(self, reserve: int = 50) -> bool:
         """Check if we can make a request, keeping a reserve for emergencies."""
@@ -263,6 +319,7 @@ class MatchTraderClient:
         account_id: str | None = None,
         daily_request_limit: int = 2000,
         max_retries: int = 3,
+        store: Any = None,
     ):
         self._base_url = base_url.rstrip("/")
         self._email = email
@@ -273,7 +330,7 @@ class MatchTraderClient:
 
         self._tokens: AuthTokens | None = None
         self._last_auth_time: float = 0.0
-        self._rate_limiter = RateLimiter(daily_request_limit)
+        self._rate_limiter = RateLimiter(daily_request_limit, store=store)
         self._session: AsyncSession[Any] | None = None
 
     # ── Context Manager ─────────────────────────────────────────────────
@@ -431,7 +488,6 @@ class MatchTraderClient:
         instruments = [InstrumentInfo(**item) for item in instruments_raw]
         logger.info("MatchTrader: loaded {} effective instruments", len(instruments))
         return instruments
-
 
     # ── Market Watch ────────────────────────────────────────────────────
 
@@ -781,7 +837,12 @@ class MatchTraderClient:
 
         # curl_cffi uses 'data' for raw body and 'json' kwarg for JSON serialization
         response = await self._session.request(method, url, json=json, headers=headers)
-        self._rate_limiter.record()
+        # Classify call type: write for mutating operations, read for everything else
+        _write_paths = ("/position/open", "/position/close", "/position/edit")
+        call_type = (
+            "write" if method == "POST" and any(wp in path for wp in _write_paths) else "read"
+        )
+        self._rate_limiter.record(call_type=call_type)
 
         if response.status_code == 401 and authenticated:
             raise MatchTraderAuthError("Authentication failed (401). Token may have expired.")

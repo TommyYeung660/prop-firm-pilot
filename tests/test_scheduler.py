@@ -97,6 +97,11 @@ def mock_matchtrader() -> AsyncMock:
         margin=0.0,
         free_margin=50000.0,
     )
+    # Mock rate limiter for auto-throttle code in _position_monitor_loop
+    rate_limiter = MagicMock()
+    rate_limiter.remaining = 1800
+    rate_limiter._daily_limit = 2000
+    client._rate_limiter = rate_limiter
     return client
 
 

@@ -402,6 +402,7 @@ async def _run_scheduler(config: AppConfig) -> None:
         broker_id=os.getenv("MATCHTRADER_BROKER_ID", "2"),
         account_id=os.getenv("MATCHTRADER_ACCOUNT_ID"),
         daily_request_limit=config.compliance.daily_api_request_limit,
+        store=store,
     ) as client:
         await client.login()
 
