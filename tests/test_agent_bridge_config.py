@@ -1,7 +1,8 @@
 """
-Tests for BUG #6 and BUG #7 fixes — verify tool_vendors config routes:
-- get_global_news away from OpenAI (404 via Volcengine) to local (BUG #6)
-- get_news, get_indicators, get_insider_* away from Alpha Vantage (BUG #7)
+Tests for vendor routing config — verify tool_vendors and data_vendors config.
+
+Phase 1 (BUG #6): get_global_news away from OpenAI (404 via Volcengine) to local.
+Phase 2: Route ALL data sources to Alpha Vantage (premium, 75 req/min).
 """
 from src.decision.agent_bridge import AgentBridge
 from src.decision.fx_analyst_config import build_agent_config
@@ -10,7 +11,7 @@ from src.decision.fx_analyst_config import build_agent_config
 
 
 class TestBuildAgentConfig:
-    """Verify build_agent_config() produces correct tool_vendors for BUG #6 and #7."""
+    """Verify build_agent_config() produces correct vendor routing."""
 
     def test_tool_vendors_includes_get_global_news(self) -> None:
         """tool_vendors must route get_global_news to 'local'."""
@@ -18,31 +19,26 @@ class TestBuildAgentConfig:
         assert "tool_vendors" in config
         assert config["tool_vendors"]["get_global_news"] == "local"
 
-    def test_data_vendors_still_present(self) -> None:
-        """data_vendors category config should still be present."""
+    def test_data_vendors_route_to_alpha_vantage(self) -> None:
+        """data_vendors should route to alpha_vantage (premium tier)."""
         config = build_agent_config()
         assert "data_vendors" in config
-        assert config["data_vendors"]["news_data"] == "local"
+        assert config["data_vendors"]["news_data"] == "alpha_vantage"
+        assert config["data_vendors"]["core_stock_apis"] == "alpha_vantage"
 
-    def test_tool_vendors_takes_precedence_comment(self) -> None:
-        """tool_vendors should override category-level data_vendors for specific tools.
-        interface.py), so get_global_news='local' in tool_vendors overrides
-        news_data in data_vendors.
+    def test_tool_vendors_takes_precedence(self) -> None:
+        """tool_vendors overrides data_vendors for specific tools.
+        get_global_news='local' overrides news_data='alpha_vantage'.
         """
         config = build_agent_config()
-        # Both should coexist — tool_vendors overrides data_vendors for specific tools
-        assert config["data_vendors"]["news_data"] == "local"
+        assert config["data_vendors"]["news_data"] == "alpha_vantage"
         assert config["tool_vendors"]["get_global_news"] == "local"
-    def test_tool_vendors_routes_away_from_alpha_vantage(self) -> None:
-        """BUG #7: All high-frequency methods must be routed away from Alpha Vantage.
-
-        Alpha Vantage free tier = 5 req/min. FX decisions trigger 10+
-        concurrent calls, causing rate limit errors.
-        """
+    def test_tool_vendors_routes_to_alpha_vantage(self) -> None:
+        """Alpha Vantage premium (75 req/min) for news and indicators."""
         config = build_agent_config()
         tv = config["tool_vendors"]
-        assert tv["get_news"] == "local"
-        assert tv["get_indicators"] == "yfinance"
+        assert tv["get_news"] == "alpha_vantage"
+        assert tv["get_indicators"] == "alpha_vantage"
         assert tv["get_insider_sentiment"] == "local"
         assert tv["get_insider_transactions"] == "local"
 

@@ -22,7 +22,7 @@ compliance:
   best_day_stop: 0.85
 
 execution:
-  max_positions: 1
+  max_positions: 3
   default_risk_per_trade: 0.005  
   max_slippage_pips: 2.0
   random_delay_min: 0.5

@@ -84,6 +84,7 @@ class ScannerBridge:
         self,
         date: str | None = None,
         tickers: list[str] | None = None,
+        force_retrain: bool = True,
     ) -> list[ScannerSignal]:
         """Run the scanner pipeline and return parsed signals.
 
@@ -111,6 +112,12 @@ class ScannerBridge:
             "--profile",
             self._profile,
         ]
+
+        # Force retrain to avoid stale cached models producing identical scores
+        # across days. Without this, the model cache hash only changes when
+        # train/valid segment boundaries shift (rarely with daily additions).
+        if force_retrain:
+            cmd.append("--retrain")
 
         if date:
             # Check if scanner supports --date (main.py typically infers from date range)
@@ -178,8 +185,10 @@ class ScannerBridge:
                 reader = csv.DictReader(f)
                 for i, row in enumerate(reader):
                     try:
-                        # CSV columns: datetime,instrument,score,rank,confidence,score_gap,drop_distance,topk_spread,weight
-                        # But scanner output might vary slightly. Let's be robust.
+                        # CSV: datetime, instrument, score, rank,
+                        # confidence, score_gap, drop_distance,
+                        # topk_spread, weight.
+                        # Scanner output might vary. Let's be robust.
 
                         inst = row.get("instrument", row.get("ticker", ""))
                         if not inst:
