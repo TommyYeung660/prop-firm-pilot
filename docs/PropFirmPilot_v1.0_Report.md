@@ -190,7 +190,110 @@ PropFirmPilot 是一套**完全自動化**的外匯交易系統，設計用於 E
    │  TradeJournal: 追加交易記錄到 JSONL
 ```
 
-### 2.4 合規引擎（安全關鍵）
+### 2.4 Re-evaluation 決策機制
+
+Re-evaluation 是系統對**已開倉持倉**進行週期性 LLM 重新審視的機制，確保持倉方向持續符合最新市場狀況。此機制運行在 Position Monitor Loop 內（`_reevaluate_open_positions()`），是系統主動風控的核心組件。
+
+#### 觸發時機與節流控制
+
+| 參數 | 預設值 | 說明 |
+|------|:---:|------|
+| `reeval_min_hold_seconds` | 3,600s（1 小時） | 開倉後的最短持有時間，在此之前不會進行首次 re-evaluation |
+| `reeval_interval_seconds` | 14,400s（4 小時） | 兩次 re-evaluation 之間的最短間隔 |
+| `position_monitor_interval_seconds` | 120s | Position Monitor Loop 的輪詢頻率 |
+
+**節流邏輯**：
+1. **首次評估**：檢查持倉時長是否 ≥ `reeval_min_hold_seconds`。若持倉不足 1 小時，跳過評估（防止剛開倉就被 LLM 翻盤）。
+2. **後續評估**：檢查距離上次評估是否 ≥ `reeval_interval_seconds`。若未滿 4 小時，跳過評估（避免 LLM API 成本過高）。
+3. **已平倉跳過**：若持倉已被 re-evaluation 平倉（存在於 `_reevaluation_close_positions` 集合中），跳過。
+4. **Mock 代理跳過**：若 `AgentBridge` 使用的是 Mock 代理（測試環境），跳過所有 re-evaluation。
+
+#### LLM 決策輸入
+
+Re-evaluation 調用與新開倉決策使用**同一套 TradingAgents 多智能體辯論引擎**，但額外注入持倉上下文：
+
+```python
+qlib_data = {
+    # 原始 Scanner 信號數據
+    "score": intent.scanner_score,
+    "confidence": intent.scanner_confidence,
+    "score_gap": intent.scanner_score_gap,
+    # Re-evaluation 專用持倉上下文
+    "position_side": pos.side,           # 當前持倉方向 (BUY/SELL)
+    "unrealized_pnl": pos.profit,        # 當前未實現盈虧
+    "entry_price": pos.open_price,       # 開倉價格
+    "current_price": pos.current_price,  # 當前市場價格
+    "hold_duration_seconds": hold_duration,  # 已持有秒數
+}
+```
+
+LLM 基於這些數據經過 Market Analyst → News Analyst → Social Analyst → Investment Debate → Risk Debate 的完整辯論流程，產出最終決策。
+
+#### 決策矩陣
+
+```
+┌──────────────────┬──────────────────┬──────────────────────────────┐
+│  當前持倉方向      │  LLM 決策        │  系統動作                     │
+├──────────────────┼──────────────────┼──────────────────────────────┤
+│  BUY             │  BUY             │  ✅ 確認 — 繼續持有           │
+│  BUY             │  HOLD            │  ✅ 觀望 — 繼續持有           │
+│  BUY             │  SELL            │  🔄 反轉信號 — 自動平倉       │
+│  SELL            │  SELL            │  ✅ 確認 — 繼續持有           │
+│  SELL            │  HOLD            │  ✅ 觀望 — 繼續持有           │
+│  SELL            │  BUY             │  🔄 反轉信號 — 自動平倉       │
+└──────────────────┴──────────────────┴──────────────────────────────┘
+```
+
+**核心原則**：只有當 LLM 決策與持倉方向**完全相反**時才會觸發平倉。同方向信號視為「確認」，HOLD 視為「觀望」，兩者都保持持倉不動。
+
+#### 平倉流程
+
+```
+1. 檢測到反轉信號 (is_reversal = True)
+   ▼
+2. 調用 MatchTraderClient.close_position(position_id, symbol, side, volume)
+   ▼
+3. 若平倉成功：
+   │  • 記錄 position_id 到 _reevaluation_close_positions（含未實現 PnL）
+   │  • 發送 Telegram 通知：🔄 Re-evaluation Close
+   │  • Position Monitor 下一輪偵測到倉位消失 → _handle_position_closed()
+   │  • exit_reason 設為 "reeval_close"
+   ▼
+4. 若平倉失敗：
+   │  • 不記錄到 _reevaluation_close_positions
+   │  • 下一個 reeval 週期重試
+```
+
+#### 實際運行範例（2026-02-25 生產日誌）
+
+```
+GBPUSD 持倉 (BUY 0.09 lots)
+  ↓ 4 小時後觸發 Re-evaluation
+  ↓ TradingAgents 多智能體辯論：技術面轉弱、新聞偏空
+  ↓ LLM 決策：SELL
+  ↓ is_reversal = (BUY position + SELL signal) = True
+  ↓ 自動平倉 → exit_reason = "reeval_close"
+  ↓ Telegram 通知：🔄 Re-evaluation Close GBPUSD
+```
+
+#### 測試覆蓋（16 個測試用例）
+
+| 場景 | 測試 |
+|------|------|
+| HOLD 保持持倉 | `test_hold_decision_keeps_position_open` |
+| 同方向確認 | `test_buy_decision_keeps_position_open`, `test_sell_signal_on_sell_position_keeps_open` |
+| 反轉平倉 (BUY→SELL) | `test_sell_signal_on_buy_position_closes` |
+| 反轉平倉 (SELL→BUY) | `test_buy_signal_on_sell_position_closes` |
+| 節流：最近評估過 | `test_throttle_skips_recently_evaluated` |
+| 節流：間隔到期允許 | `test_throttle_allows_after_interval` |
+| 最短持有時間 | `test_min_hold_time_skips_early_reeval`, `test_min_hold_time_allows_after_threshold` |
+| Mock 代理跳過 | `test_mock_llm_skips_evaluation` |
+| 平倉失敗不記錄 | `test_close_failure_does_not_add_to_set` |
+| PnL Fallback | `test_reeval_close_uses_unrealized_pnl_fallback`, `test_reeval_close_prefers_broker_pnl_over_fallback` |
+| exit_reason 覆蓋 | `test_exit_reason_set_to_reevaluation_hold`, `test_normal_close_not_overridden` |
+
+
+### 2.5 合規引擎（安全關鍵）
 
 PropFirmGuard 是系統的**最後防線**，所有交易必須通過以下 5 項檢查：
 
@@ -202,7 +305,7 @@ PropFirmGuard 是系統的**最後防線**，所有交易必須通過以下 5 �
 | 持倉數量 | 3 倉位 | — | 最多同時持有 3 個方向 |
 | API 額度 | 2,000/日 | — | MatchTrader 日請求上限 |
 
-### 2.5 外部數據源配置
+### 2.6 外部數據源配置
 
 所有數據源統一由 `fx_analyst_config.py` 集中管理：
 
