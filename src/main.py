@@ -39,6 +39,7 @@ from loguru import logger
 from src.compliance.prop_firm_guard import AccountSnapshot, PropFirmGuard, TradePlan
 from src.config import AppConfig, load_config
 from src.decision.agent_bridge import AgentBridge
+from src.decision.fx_analyst_config import build_agent_config
 from src.execution.matchtrader_client import MatchTraderClient
 from src.execution.order_manager import OrderManager, TradeSignal
 from src.execution.position_sizer import PositionSizer
@@ -75,21 +76,11 @@ class PropFirmPilot:
         self.agents = AgentBridge(
             agents_path=config.agents.project_path,
             selected_analysts=config.agents.selected_analysts,
-            config={
-                "deep_think_llm": config.agents.deep_think_llm,
-                "quick_think_llm": config.agents.quick_think_llm,
-                "output_language": config.agents.output_language,
-                # BUG #6: OpenAI Responses API unsupported by Volcengine (404)
-                # BUG #7: Alpha Vantage free tier = 5 req/min; route away to avoid
-                # rate limit errors during FX decisions (10+ concurrent calls).
-                "tool_vendors": {
-                    "get_global_news": "local",
-                    "get_news": "local",
-                    "get_indicators": "yfinance",
-                    "get_insider_sentiment": "local",
-                    "get_insider_transactions": "local",
-                },
-            },
+            config=build_agent_config(
+                deep_think_llm=config.agents.deep_think_llm,
+                quick_think_llm=config.agents.quick_think_llm,
+                output_language=config.agents.output_language,
+            ),
         )
         self.journal = TradeJournal(config.monitor.trade_journal_path)
         self.memory_journal = MemoryJournal(config.monitor.memory_dir)
@@ -389,21 +380,11 @@ async def _run_scheduler(config: AppConfig) -> None:
     agents = AgentBridge(
         agents_path=config.agents.project_path,
         selected_analysts=config.agents.selected_analysts,
-        config={
-            "deep_think_llm": config.agents.deep_think_llm,
-            "quick_think_llm": config.agents.quick_think_llm,
-            "output_language": config.agents.output_language,
-            # BUG #6: OpenAI Responses API unsupported by Volcengine (404)
-            # BUG #7: Alpha Vantage free tier = 5 req/min; route away to avoid
-            # rate limit errors during FX decisions (10+ concurrent calls).
-            "tool_vendors": {
-                "get_global_news": "local",
-                "get_news": "local",
-                "get_indicators": "yfinance",
-                "get_insider_sentiment": "local",
-                "get_insider_transactions": "local",
-            },
-        },
+        config=build_agent_config(
+            deep_think_llm=config.agents.deep_think_llm,
+            quick_think_llm=config.agents.quick_think_llm,
+            output_language=config.agents.output_language,
+        ),
     )
     alert_service = AlertService(
         bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),

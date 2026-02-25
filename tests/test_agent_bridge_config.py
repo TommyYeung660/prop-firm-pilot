@@ -100,3 +100,44 @@ class TestAgentBridgeToolVendors:
         # Config should still have tool_vendors
         assert bridge._config["tool_vendors"]["get_global_news"] == "alpha_vantage"
 
+
+# ── main.py integration tests ──────────────────────────────────────────────
+
+
+
+class TestMainUsesBuiltConfig:
+    """Verify main.py no longer hard-codes vendor routing."""
+
+    def test_main_py_has_no_hardcoded_tool_vendors(self) -> None:
+        """main.py must use build_agent_config(), not inline tool_vendors dicts.
+
+        This prevents regressions where someone edits main.py directly
+        instead of updating fx_analyst_config.py.
+        """
+        import inspect
+
+        import src.main as main_module
+
+        source = inspect.getsource(main_module)
+        # Should NOT contain the old hard-coded vendor values
+        assert '"get_global_news": "local"' not in source, (
+            "main.py still hard-codes get_global_news='local' — use build_agent_config()"
+        )
+        assert '"get_news": "local"' not in source, (
+            "main.py still hard-codes get_news='local' — use build_agent_config()"
+        )
+        assert '"get_indicators": "yfinance"' not in source, (
+            "main.py still hard-codes get_indicators='yfinance' — use build_agent_config()"
+        )
+
+    def test_main_py_imports_build_agent_config(self) -> None:
+        """main.py must import build_agent_config from fx_analyst_config."""
+        import inspect
+
+        import src.main as main_module
+
+        source = inspect.getsource(main_module)
+        assert "build_agent_config" in source, (
+            "main.py does not reference build_agent_config — vendor routing may be wrong"
+        )
+
