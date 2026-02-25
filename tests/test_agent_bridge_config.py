@@ -3,6 +3,7 @@ Tests for vendor routing config — verify tool_vendors and data_vendors config.
 
 Phase 1 (BUG #6): get_global_news away from OpenAI (404 via Volcengine) to local.
 Phase 2: Route ALL data sources to Alpha Vantage (premium, 75 req/min).
+Phase 3: Route get_global_news to Alpha Vantage (topic-based macro news).
 """
 from src.decision.agent_bridge import AgentBridge
 from src.decision.fx_analyst_config import build_agent_config
@@ -14,10 +15,10 @@ class TestBuildAgentConfig:
     """Verify build_agent_config() produces correct vendor routing."""
 
     def test_tool_vendors_includes_get_global_news(self) -> None:
-        """tool_vendors must route get_global_news to 'local'."""
+        """tool_vendors must route get_global_news to 'alpha_vantage'."""
         config = build_agent_config()
         assert "tool_vendors" in config
-        assert config["tool_vendors"]["get_global_news"] == "local"
+        assert config["tool_vendors"]["get_global_news"] == "alpha_vantage"
 
     def test_data_vendors_route_to_alpha_vantage(self) -> None:
         """data_vendors should route to alpha_vantage (premium tier)."""
@@ -28,16 +29,17 @@ class TestBuildAgentConfig:
 
     def test_tool_vendors_takes_precedence(self) -> None:
         """tool_vendors overrides data_vendors for specific tools.
-        get_global_news='local' overrides news_data='alpha_vantage'.
+        get_global_news='alpha_vantage' as explicit tool override.
         """
         config = build_agent_config()
         assert config["data_vendors"]["news_data"] == "alpha_vantage"
-        assert config["tool_vendors"]["get_global_news"] == "local"
+        assert config["tool_vendors"]["get_global_news"] == "alpha_vantage"
     def test_tool_vendors_routes_to_alpha_vantage(self) -> None:
-        """Alpha Vantage premium (75 req/min) for news and indicators."""
+        """Alpha Vantage premium (75 req/min) for news, global_news, and indicators."""
         config = build_agent_config()
         tv = config["tool_vendors"]
         assert tv["get_news"] == "alpha_vantage"
+        assert tv["get_global_news"] == "alpha_vantage"
         assert tv["get_indicators"] == "alpha_vantage"
         assert tv["get_insider_sentiment"] == "local"
         assert tv["get_insider_transactions"] == "local"
@@ -58,12 +60,12 @@ class TestAgentBridgeToolVendors:
                 "quick_think_llm": "volcengine/glm-4.7",
                 "output_language": "繁體中文",
                 "tool_vendors": {
-                    "get_global_news": "local",
+                    "get_global_news": "alpha_vantage",
                 },
             },
         )
         # The config should be stored for later merge with DEFAULT_CONFIG
-        assert bridge._config["tool_vendors"]["get_global_news"] == "local"
+        assert bridge._config["tool_vendors"]["get_global_news"] == "alpha_vantage"
 
     def test_mock_fallback_preserves_config(self, tmp_path) -> None:
         """When TradingAgents import fails, config should still be stored."""
@@ -71,11 +73,11 @@ class TestAgentBridgeToolVendors:
             agents_path=tmp_path / "nonexistent",
             config={
                 "tool_vendors": {
-                    "get_global_news": "local",
+                    "get_global_news": "alpha_vantage",
                 },
             },
         )
-        assert bridge._config["tool_vendors"]["get_global_news"] == "local"
+        assert bridge._config["tool_vendors"]["get_global_news"] == "alpha_vantage"
 
     def test_ensure_loaded_merges_tool_vendors(self, tmp_path) -> None:
         """_ensure_loaded() merges config including tool_vendors into DEFAULT_CONFIG.
@@ -88,7 +90,7 @@ class TestAgentBridgeToolVendors:
             config={
                 "deep_think_llm": "volcengine/glm-4.7",
                 "tool_vendors": {
-                    "get_global_news": "local",
+                    "get_global_news": "alpha_vantage",
                 },
             },
         )
@@ -96,5 +98,5 @@ class TestAgentBridgeToolVendors:
         bridge._ensure_loaded()
         assert bridge._using_mock is True
         # Config should still have tool_vendors
-        assert bridge._config["tool_vendors"]["get_global_news"] == "local"
+        assert bridge._config["tool_vendors"]["get_global_news"] == "alpha_vantage"
 

@@ -100,13 +100,13 @@ def build_agent_config(
             "news_data": "alpha_vantage",
         },
         # Tool-level vendor overrides (takes precedence over category-level)
-        # - get_news: Alpha Vantage NEWS_SENTIMENT API (user has premium 75 req/min)
-        # - get_global_news: local (reddit) — Alpha Vantage has no global news impl
-        #   in TradingAgents VENDOR_METHODS; fallback verified via check script
+        # - get_news: Alpha Vantage NEWS_SENTIMENT API with ticker filter (premium 75 req/min)
+        # - get_global_news: Alpha Vantage NEWS_SENTIMENT API with topic filter
+        #   (economy_monetary, economy_macro, financial_markets — no ticker, macro-only)
         # - get_indicators: Alpha Vantage technical indicator APIs (SMA, EMA, RSI etc.)
         #   support FX symbols natively (e.g. symbol=GBPUSD)
         "tool_vendors": {
-            "get_global_news": "local",
+            "get_global_news": "alpha_vantage",
             "get_news": "alpha_vantage",
             "get_indicators": "alpha_vantage",
             "get_insider_sentiment": "local",
