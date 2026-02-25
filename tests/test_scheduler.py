@@ -2195,3 +2195,249 @@ class TestBestDayIntegration:
         # Verify it has correct config values
         assert sched._best_day_tracker._best_day_limit == config.compliance.best_day_limit
         assert sched._best_day_tracker._stop_ratio == config.compliance.best_day_stop
+
+
+
+# ── Manual Close PnL Fallback Tests ────────────────────────────────────────
+
+
+
+class TestManualClosePnlFallback:
+    """Tests for manual_close PnL fallback via _last_known_profit."""
+
+    async def test_manual_close_uses_last_known_profit_when_broker_returns_zero(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """When broker get_closed_positions returns pnl=0.0 for a manual close,
+        the scheduler should fall back to the last-known polled profit."""
+        mock_alert = AsyncMock()
+        mock_alert.trade_closed = AsyncMock()
+        mock_alert.sl_tp_hit = AsyncMock()
+        mock_alert.send = AsyncMock()
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            alert_service=mock_alert,
+        )
+
+        opened = _advance_intent_to_opened(store, "GBPUSD")
+
+        # Simulate: position was previously polled with profit=12.50
+        sched._last_known_profit["pos_123"] = 12.50
+
+        # Broker returns no open positions → position was closed
+        mock_matchtrader.get_open_positions.return_value = []
+        # Closed positions endpoint returns pnl=0.0 (broker hasn't updated yet)
+        closed_pos = MagicMock()
+        closed_pos.position_id = "pos_123"
+        closed_pos.profit = 0.0
+        closed_pos.close_price = 0.0
+        closed_pos.open_price = 0.0
+        closed_pos.volume = 0.09
+        mock_matchtrader.get_closed_positions.return_value = [closed_pos]
+        mock_matchtrader.get_balance.return_value = MagicMock(equity=5012.50)
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # trade_closed should be called with the fallback PnL, not 0.0
+        mock_alert.trade_closed.assert_called_once()
+        call_kwargs = mock_alert.trade_closed.call_args[1]
+        assert call_kwargs["pnl"] == 12.50
+        assert call_kwargs["reason"] == "Position closed (manual_close)"
+
+        # Intent should be stored with correct realized PnL
+        updated = store.get_intent(opened.id)
+        assert updated.status == "closed"
+        assert updated.realized_pnl == 12.50
+
+    async def test_manual_close_no_fallback_when_broker_has_pnl(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """When broker returns real PnL, last_known_profit should NOT override it."""
+        mock_alert = AsyncMock()
+        mock_alert.trade_closed = AsyncMock()
+        mock_alert.sl_tp_hit = AsyncMock()
+        mock_alert.send = AsyncMock()
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            alert_service=mock_alert,
+        )
+
+        opened = _advance_intent_to_opened(store, "EURUSD")
+
+        # Stale fallback value (should NOT be used)
+        sched._last_known_profit["pos_123"] = 5.00
+
+        mock_matchtrader.get_open_positions.return_value = []
+        # Broker returns actual PnL this time
+        closed_pos = MagicMock()
+        closed_pos.position_id = "pos_123"
+        closed_pos.profit = -15.30  # Real loss
+        closed_pos.close_price = 1.0985
+        closed_pos.open_price = 1.1000
+        closed_pos.volume = 0.01
+        mock_matchtrader.get_closed_positions.return_value = [closed_pos]
+        mock_matchtrader.get_balance.return_value = MagicMock(equity=49984.70)
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # SL hit alert with real PnL, not fallback
+        mock_alert.sl_tp_hit.assert_called_once()
+        call_kwargs = mock_alert.sl_tp_hit.call_args[1]
+        assert call_kwargs["pnl"] == -15.30
+
+        updated = store.get_intent(opened.id)
+        assert updated.realized_pnl == -15.30
+
+    async def test_manual_close_cleans_up_last_known_profit(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """After handling a closed position, _last_known_profit entry should be removed."""
+        mock_alert = AsyncMock()
+        mock_alert.trade_closed = AsyncMock()
+        mock_alert.sl_tp_hit = AsyncMock()
+        mock_alert.send = AsyncMock()
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            alert_service=mock_alert,
+        )
+
+        _advance_intent_to_opened(store, "USDJPY")
+
+        sched._last_known_profit["pos_123"] = 8.75
+        sched._last_known_profit["pos_other"] = 3.00  # Another position, should remain
+
+        mock_matchtrader.get_open_positions.return_value = []
+        closed_pos = MagicMock()
+        closed_pos.position_id = "pos_123"
+        closed_pos.profit = 0.0
+        closed_pos.close_price = 0.0
+        closed_pos.open_price = 0.0
+        closed_pos.volume = 0.01
+        mock_matchtrader.get_closed_positions.return_value = [closed_pos]
+        mock_matchtrader.get_balance.return_value = MagicMock(equity=50008.75)
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # pos_123 should be cleaned up
+        assert "pos_123" not in sched._last_known_profit
+        # pos_other should still be there
+        assert sched._last_known_profit["pos_other"] == 3.00
+
+    async def test_position_monitor_records_last_known_profit(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Position monitor loop should record profit for each open position."""
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+
+        _advance_intent_to_opened(store, "GBPUSD")
+
+        # Broker shows position still open with profit
+        pos = MagicMock()
+        pos.position_id = "pos_123"
+        pos.profit = 7.25
+        pos.symbol = "GBPUSD.pro"
+        pos.side = "BUY"
+        pos.volume = 0.09
+        pos.open_price = 1.34900
+        pos.current_price = 1.34980
+        mock_matchtrader.get_open_positions.return_value = [pos]
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # Should have recorded the profit
+        assert sched._last_known_profit["pos_123"] == 7.25
+
+    async def test_manual_close_fallback_not_found_in_closed_positions(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """When position not found in closed positions AND last_known_profit exists,
+        should use fallback PnL."""
+        mock_alert = AsyncMock()
+        mock_alert.trade_closed = AsyncMock()
+        mock_alert.sl_tp_hit = AsyncMock()
+        mock_alert.send = AsyncMock()
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            alert_service=mock_alert,
+        )
+
+        opened = _advance_intent_to_opened(store, "GBPUSD")
+
+        # Position was tracked with profit
+        sched._last_known_profit["pos_123"] = 22.10
+
+        mock_matchtrader.get_open_positions.return_value = []
+        # Broker returns empty closed positions (position not found in 24h window)
+        mock_matchtrader.get_closed_positions.return_value = []
+        mock_matchtrader.get_balance.return_value = MagicMock(equity=5022.10)
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        # Should use fallback PnL from last_known_profit
+        mock_alert.trade_closed.assert_called_once()
+        call_kwargs = mock_alert.trade_closed.call_args[1]
+        assert call_kwargs["pnl"] == 22.10
+
+        updated = store.get_intent(opened.id)
+        assert updated.realized_pnl == 22.10

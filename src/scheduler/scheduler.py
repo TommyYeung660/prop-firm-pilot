@@ -101,6 +101,7 @@ class Scheduler:
         # Phase 2.6: Re-evaluation tracking
         self._last_reevaluation: dict[str, datetime] = {}  # position_id -> last eval time
         self._reevaluation_close_positions: dict[str, float] = {}  # pos_id -> unrealized PnL
+        self._last_known_profit: dict[str, float] = {}  # pos_id -> last polled profit
     # ── Public API ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -491,6 +492,10 @@ class Scheduler:
                     total_unrealized = sum(p.profit for p in open_positions)
                     self._best_day_tracker.update_unrealized(total_unrealized)
 
+                    # Record last-known profit for each open position (manual_close fallback)
+                    for p in open_positions:
+                        self._last_known_profit[str(p.position_id)] = p.profit
+
                     # Check for closed positions (SL/TP/manual)
                     for intent in opened_intents:
                         if intent.position_id and intent.position_id not in open_position_ids:
@@ -619,10 +624,19 @@ class Scheduler:
                     position_id,
                 )
             self._reevaluation_close_positions.pop(position_id, None)
+        # Fallback for manual_close: use last-known unrealized PnL from position monitor
+        if pnl == 0.0 and position_id in self._last_known_profit:
+            pnl = self._last_known_profit[position_id]
+            logger.info(
+                "Position monitor: using last-known polled PnL ${:+.2f} for {} (manual_close)",
+                pnl,
+                position_id,
+            )
 
 
         # Clean up reevaluation tracking
         self._last_reevaluation.pop(position_id, None)
+        self._last_known_profit.pop(position_id, None)
         # Calculate hold duration
         hold_duration_seconds: int | None = None
         if intent.executed_at is not None:
