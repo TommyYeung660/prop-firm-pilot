@@ -387,22 +387,36 @@ class Scheduler:
                 scanner_confidence=intent.scanner_confidence,
                 agent_state=decision.final_state,
             )
-            await asyncio.to_thread(
-                self._store.update_intent_decision,
-                intent.id,
-                decision.decision,
-                sl_pips=formatted.suggested_sl_pips,
-                tp_pips=formatted.suggested_tp_pips,
-                risk_report=decision.risk_report,
-                state_json=json.dumps(decision.final_state, default=str),
-            )
-            await asyncio.to_thread(self._store.mark_ready_for_exec, intent.id)
-            logger.info(
-                "LLM worker {}: intent {} → {} (ready for execution)",
-                worker_id,
-                intent.id,
-                decision.decision,
-            )
+            try:
+                await asyncio.to_thread(
+                    self._store.update_intent_decision,
+                    intent.id,
+                    decision.decision,
+                    sl_pips=formatted.suggested_sl_pips,
+                    tp_pips=formatted.suggested_tp_pips,
+                    risk_report=decision.risk_report,
+                    state_json=json.dumps(decision.final_state, default=str),
+                )
+                await asyncio.to_thread(self._store.mark_ready_for_exec, intent.id)
+                logger.info(
+                    "LLM worker {}: intent {} → {} (ready for execution)",
+                    worker_id,
+                    intent.id,
+                    decision.decision,
+                )
+            except InvalidTransitionError as e:
+                latest = await asyncio.to_thread(self._store.get_intent, intent.id)
+                latest_status = latest.status if latest is not None else "missing"
+                if latest_status != "claimed":
+                    logger.warning(
+                        "LLM worker {}: stale claim for intent {} (status={}, reason={})",
+                        worker_id,
+                        intent.id,
+                        latest_status,
+                        e,
+                    )
+                    return
+                raise
         else:
             cancelled = await self._cancel_intent_safe(
                 worker_id=worker_id,

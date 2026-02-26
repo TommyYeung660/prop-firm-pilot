@@ -412,28 +412,36 @@ class DecisionStore:
         """
         now = datetime.now(timezone.utc)
         with self._write_lock:
-            self._conn.execute(
-                """UPDATE intents
-                   SET suggested_side = :side,
-                       suggested_sl_pips = :sl_pips,
-                       suggested_tp_pips = :tp_pips,
-                       agent_risk_report = :risk_report,
-                       agent_state_json = :state_json
-                   WHERE id = :id AND status = 'claimed'""",
-                {
-                    "side": side,
-                    "sl_pips": sl_pips,
-                    "tp_pips": tp_pips,
-                    "risk_report": risk_report,
-                    "state_json": state_json,
-                    "id": intent_id,
-                },
-            )
-            self._conn.execute(
-                """UPDATE decisions SET decided_at = :decided_at WHERE intent_id = :intent_id""",
-                {"decided_at": _dt_to_str(now), "intent_id": intent_id},
-            )
-            self._conn.commit()
+            try:
+                updated = self._conn.execute(
+                    """UPDATE intents
+                       SET suggested_side = :side,
+                           suggested_sl_pips = :sl_pips,
+                           suggested_tp_pips = :tp_pips,
+                           agent_risk_report = :risk_report,
+                           agent_state_json = :state_json
+                       WHERE id = :id AND status = 'claimed'""",
+                    {
+                        "side": side,
+                        "sl_pips": sl_pips,
+                        "tp_pips": tp_pips,
+                        "risk_report": risk_report,
+                        "state_json": state_json,
+                        "id": intent_id,
+                    },
+                ).rowcount
+                if not updated:
+                    raise InvalidTransitionError(
+                        f"Cannot update decision {intent_id}: not in 'claimed' state"
+                    )
+                self._conn.execute(
+                    """UPDATE decisions SET decided_at = :decided_at WHERE intent_id = :intent_id""",
+                    {"decided_at": _dt_to_str(now), "intent_id": intent_id},
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
         logger.info("Updated intent {} with decision: {}", intent_id, side)
 
     def mark_ready_for_exec(self, intent_id: str) -> None:

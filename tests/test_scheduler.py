@@ -887,6 +887,38 @@ class TestProcessClaimedIntent:
         ):
             await scheduler._process_claimed_intent("llm-0", claimed)
 
+    async def test_actionable_stale_claim_race_is_tolerated(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """Actionable path should not raise when claim expires before mark_ready."""
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="GBPUSD",
+            decision="SELL",
+            final_state={},
+            risk_report="",
+        )
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="GBPUSD",
+            scanner_score=0.80,
+            scanner_confidence="medium",
+            claim_ttl_minutes=0,
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+        store.recycle_expired_claims()
+
+        await scheduler._process_claimed_intent("llm-0", claimed)
+
+        latest = store.get_intent(intent.id)
+        assert latest is not None
+        assert latest.status == "timed_out"
+        assert latest.suggested_side is None
+
 
 # ── Execution Loop Tests ────────────────────────────────────────────────────
 

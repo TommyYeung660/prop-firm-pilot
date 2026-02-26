@@ -4,6 +4,7 @@ Tests for src/decision_store/sqlite_store.py — DecisionStore CRUD operations.
 Uses in-memory SQLite (`:memory:`) via tmp_path for isolation between tests.
 """
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from threading import Barrier, Thread
 
@@ -327,6 +328,43 @@ class TestStateTransitions:
         claimed = store.claim_next_pending("llm-0")
         assert claimed is not None
         assert claimed.id == pending.id
+
+    def test_update_decision_error_does_not_poison_next_claim(self, store: DecisionStore) -> None:
+        """Failures in update_intent_decision should rollback and not poison next claim."""
+        claimed = self._create_and_claim(store)
+        pending = TradeIntent(trade_date="2026-02-16", symbol="GBPUSD")
+        store.insert_intent(pending)
+
+        class _ConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+                self._count = 0
+
+            def execute(self, *args, **kwargs):
+                self._count += 1
+                if self._count == 2:
+                    raise sqlite3.OperationalError("simulated update failure")
+                return self._conn.execute(*args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        store._conn = _ConnProxy(store._conn)
+        with pytest.raises(sqlite3.OperationalError):
+            store.update_intent_decision(
+                claimed.id,
+                "BUY",
+                40.0,
+                80.0,
+                "report",
+                "{}",
+            )
+
+        # If rollback is missing, this call raises:
+        # OperationalError("cannot start a transaction within a transaction")
+        claimed_next = store.claim_next_pending("llm-0")
+        assert claimed_next is not None
+        assert claimed_next.id == pending.id
 
 
 # ── Query Tests ─────────────────────────────────────────────────────────────
