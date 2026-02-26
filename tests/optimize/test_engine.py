@@ -10,7 +10,7 @@ from src.monitor.trade_journal import TradeJournal
 from src.optimize.optimization_engine import OptimizationEngine
 
 
-# ── Fixtures ─────────────────────────────────────────────────────────────--
+# ── Fixtures ───────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
@@ -29,7 +29,7 @@ def journal(tmp_path: Path) -> TradeJournal:
     return TradeJournal(path)
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────---
+# ── Helpers ────────────────────────────────────────────────────────────────
 
 
 def _create_closed_intent(store: DecisionStore, symbol: str, pnl: float) -> None:
@@ -42,7 +42,7 @@ def _create_closed_intent(store: DecisionStore, symbol: str, pnl: float) -> None
     store.mark_closed(intent.id, realized_pnl=pnl, exit_reason="tp_hit")
 
 
-# ── Tests ─────────────────────────────────────────────────────────────────--
+# ── Tests ───────────────────────────────────────────────────────────────────
 
 
 def test_engine_refresh_creates_state(
