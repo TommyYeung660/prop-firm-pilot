@@ -460,6 +460,7 @@ class DecisionStore:
             },
         ).rowcount
         if not updated:
+            self._conn.rollback()
             raise InvalidTransitionError(
                 f"Cannot mark {intent_id} as opened: not in 'executing' state"
             )
@@ -494,6 +495,7 @@ class DecisionStore:
             },
         ).rowcount
         if not updated:
+            self._conn.rollback()
             raise InvalidTransitionError(
                 f"Cannot mark {intent_id} as rejected: not in 'executing' state"
             )
@@ -528,6 +530,7 @@ class DecisionStore:
             },
         ).rowcount
         if not updated:
+            self._conn.rollback()
             raise InvalidTransitionError(
                 f"Cannot mark {intent_id} as failed: not in 'executing' state"
             )
@@ -563,6 +566,7 @@ class DecisionStore:
                 },
             ).rowcount
             if not updated:
+                self._conn.rollback()
                 raise InvalidTransitionError(
                     f"Cannot cancel {intent_id}: not in 'pending' or 'claimed' state"
                 )
@@ -603,6 +607,7 @@ class DecisionStore:
             },
         ).rowcount
         if not updated:
+            self._conn.rollback()
             raise InvalidTransitionError(f"Cannot close {intent_id}: not in 'opened' state")
         self._conn.execute(
             """UPDATE decisions
@@ -1054,6 +1059,7 @@ class DecisionStore:
                 {"to": to_status, "id": intent_id, "from_s": from_status},
             ).rowcount
             if not updated:
+                self._conn.rollback()
                 raise InvalidTransitionError(
                     f"Cannot transition {intent_id}: not in '{from_status}' state"
                 )

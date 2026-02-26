@@ -34,7 +34,7 @@ from src.decision.agent_bridge import AgentBridge
 from src.decision.decision_formatter import format_decision
 from src.decision.schemas import TradeIntent
 from src.decision_store.janitor import Janitor
-from src.decision_store.sqlite_store import DecisionStore
+from src.decision_store.sqlite_store import DecisionStore, InvalidTransitionError
 from src.execution.engine import ExecutionEngine
 from src.execution.instrument_registry import InstrumentRegistry
 from src.execution.matchtrader_client import MatchTraderClient
@@ -308,18 +308,12 @@ class Scheduler:
                 # Intent is in "claimed" state — valid transitions are:
                 # ready_for_exec, cancelled, timed_out (NOT failed)
                 if intent is not None:
-                    try:
-                        await asyncio.to_thread(
-                            self._store.mark_cancelled,
-                            intent.id,
-                            f"LLM error: {e}",
-                        )
-                    except Exception:
-                        logger.error(
-                            "LLM worker {}: failed to cancel intent {}",
-                            worker_id,
-                            intent.id,
-                        )
+                    await self._cancel_intent_safe(
+                        worker_id=worker_id,
+                        intent_id=intent.id,
+                        reason=f"LLM error: {e}",
+                        context="worker_error_recovery",
+                    )
                 await self._send_alert(
                     f"⚠️ <b>LLM Worker Error</b>\n"
                     f"• Worker: {worker_id}\n"
@@ -339,10 +333,11 @@ class Scheduler:
                 worker_id,
                 intent.id,
             )
-            await asyncio.to_thread(
-                self._store.mark_cancelled,
-                intent.id,
-                "Mock LLM fallback active — refusing to trade with random decisions",
+            await self._cancel_intent_safe(
+                worker_id=worker_id,
+                intent_id=intent.id,
+                reason="Mock LLM fallback active — refusing to trade with random decisions",
+                context="mock_llm_guard",
             )
             await self._send_alert(
                 f"🚫 <b>Trade BLOCKED</b>\n"
@@ -370,10 +365,11 @@ class Scheduler:
 
         if decision.is_actionable:
             if self._should_pause_new_entries():
-                await asyncio.to_thread(
-                    self._store.mark_cancelled,
-                    intent.id,
-                    "Best Day protection active — pausing new entries",
+                await self._cancel_intent_safe(
+                    worker_id=worker_id,
+                    intent_id=intent.id,
+                    reason="Best Day protection active — pausing new entries",
+                    context="best_day_pause",
                 )
                 logger.warning(
                     "LLM worker {}: cancelled intent {} ({}) due to Best Day protection",
@@ -408,16 +404,56 @@ class Scheduler:
                 decision.decision,
             )
         else:
-            await asyncio.to_thread(
-                self._store.mark_cancelled,
-                intent.id,
-                f"LLM decided {decision.decision}",
+            cancelled = await self._cancel_intent_safe(
+                worker_id=worker_id,
+                intent_id=intent.id,
+                reason=f"LLM decided {decision.decision}",
+                context="hold_decision",
             )
-            logger.info(
-                "LLM worker {}: intent {} → HOLD (cancelled)",
+            if cancelled:
+                logger.info(
+                    "LLM worker {}: intent {} → HOLD (cancelled)",
+                    worker_id,
+                    intent.id,
+                )
+
+    async def _cancel_intent_safe(
+        self,
+        *,
+        worker_id: str,
+        intent_id: str,
+        reason: str,
+        context: str,
+    ) -> bool:
+        """Attempt intent cancellation and tolerate state races.
+
+        Returns:
+            True when cancellation succeeded, False when it was skipped/failed.
+        """
+        try:
+            await asyncio.to_thread(self._store.mark_cancelled, intent_id, reason)
+            return True
+        except InvalidTransitionError as e:
+            latest = await asyncio.to_thread(self._store.get_intent, intent_id)
+            latest_status = latest.status if latest is not None else "missing"
+            logger.warning(
+                "LLM worker {}: skip cancel for intent {} during {} (status={}, reason={})",
                 worker_id,
-                intent.id,
+                intent_id,
+                context,
+                latest_status,
+                e,
             )
+            return False
+        except Exception as e:
+            logger.error(
+                "LLM worker {}: failed to cancel intent {} during {}: {}",
+                worker_id,
+                intent_id,
+                context,
+                e,
+            )
+            return False
 
     async def _execution_loop(self) -> None:
         """Periodically process ready_for_exec intents through execution."""

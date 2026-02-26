@@ -299,6 +299,35 @@ class TestStateTransitions:
         with pytest.raises(InvalidTransitionError):
             store.mark_cancelled(claimed.id, "Too late to cancel")
 
+    def test_invalid_cancel_does_not_poison_next_claim(self, store: DecisionStore) -> None:
+        """Invalid cancel should not leave an open transaction behind."""
+        claimed = self._create_and_claim(store)
+        pending = TradeIntent(trade_date="2026-02-16", symbol="GBPUSD")
+        store.insert_intent(pending)
+        store.update_intent_decision(claimed.id, "BUY", 40.0, 80.0, "report", "{}")
+        store.mark_ready_for_exec(claimed.id)
+
+        with pytest.raises(InvalidTransitionError):
+            store.mark_cancelled(claimed.id, "Too late to cancel")
+
+        # If rollback is missing, this call raises:
+        # OperationalError("cannot start a transaction within a transaction")
+        claimed_next = store.claim_next_pending("llm-0")
+        assert claimed_next is not None
+        assert claimed_next.id == pending.id
+
+    def test_invalid_mark_executing_does_not_poison_next_claim(self, store: DecisionStore) -> None:
+        """Invalid _transition path should not leak an open transaction."""
+        pending = TradeIntent(trade_date="2026-02-16", symbol="EURUSD")
+        store.insert_intent(pending)
+
+        with pytest.raises(InvalidTransitionError):
+            store.mark_executing(pending.id)  # pending -> executing is invalid
+
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+        assert claimed.id == pending.id
+
 
 # ── Query Tests ─────────────────────────────────────────────────────────────
 

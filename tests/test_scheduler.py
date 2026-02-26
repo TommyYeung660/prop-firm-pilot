@@ -22,7 +22,7 @@ from src.config import (
 )
 from src.decision.agent_bridge import AgentDecision
 from src.decision.schemas import TradeIntent
-from src.decision_store.sqlite_store import DecisionStore
+from src.decision_store.sqlite_store import DecisionStore, InvalidTransitionError
 from src.scheduler.scheduler import Scheduler
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -854,6 +854,38 @@ class TestProcessClaimedIntent:
         assert updated.status == "cancelled"
         assert updated.execution_error is not None
         assert "Best Day protection active" in updated.execution_error
+
+    async def test_hold_cancel_state_race_is_tolerated(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """HOLD path should not raise if cancellation loses a state race."""
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD",
+            decision="HOLD",
+            final_state={},
+            risk_report="",
+        )
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.60,
+            scanner_confidence="low",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        with patch.object(
+            store,
+            "mark_cancelled",
+            side_effect=InvalidTransitionError(
+                f"Cannot cancel {claimed.id}: not in 'pending' or 'claimed' state"
+            ),
+        ):
+            await scheduler._process_claimed_intent("llm-0", claimed)
 
 
 # ── Execution Loop Tests ────────────────────────────────────────────────────
