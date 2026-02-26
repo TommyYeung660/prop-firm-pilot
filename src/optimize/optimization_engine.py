@@ -26,7 +26,7 @@ class OptimizationEngineError(Exception):
     """Base exception for OptimizationEngine operations."""
 
 
-# ── Engine ─────────────────────────────────────────────────────────────────-
+# ── Engine ──────────────────────────────────────────────────────────────────
 
 
 class OptimizationEngine:
