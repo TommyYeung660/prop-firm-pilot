@@ -1,0 +1,70 @@
+"""
+Dynamic confidence thresholds for LLM gating.
+
+Computes stepwise thresholds based on win rates and
+applies per-symbol adjustments around the global baseline.
+
+Usage:
+    thresholds = compute_thresholds(global_win_rate=0.5, symbol_win_rates={})
+"""
+
+from loguru import logger
+
+from src.optimize.optimization_state import Thresholds
+
+# ── Exceptions ──────────────────────────────────────────────────────────────
+
+
+class ThresholdsError(Exception):
+    """Base exception for threshold calculation."""
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+
+def _stepwise_threshold(win_rate: float) -> Thresholds:
+    if win_rate < 0.45:
+        return Thresholds(min_confidence="high", min_blended_confidence=0.65)
+    if win_rate > 0.55:
+        return Thresholds(min_confidence="low", min_blended_confidence=0.45)
+    return Thresholds(min_confidence="medium", min_blended_confidence=0.55)
+
+
+def _adjust_blended(base: float, delta: float) -> float:
+    return round(max(0.30, min(0.80, base - delta)), 2)
+
+
+# ── Public API ──────────────────────────────────────────────────────────────
+
+
+def compute_thresholds(
+    *,
+    global_win_rate: float,
+    symbol_win_rates: dict[str, float],
+) -> dict[str, Thresholds]:
+    """Compute global and per-symbol thresholds.
+
+    Args:
+        global_win_rate: Overall win rate (0.0-1.0).
+        symbol_win_rates: Per-symbol win rates.
+
+    Returns:
+        Dict containing "global" and per-symbol Thresholds.
+    """
+    global_threshold = _stepwise_threshold(global_win_rate)
+    result: dict[str, Thresholds] = {"global": global_threshold}
+
+    for symbol, win_rate in symbol_win_rates.items():
+        delta = win_rate - global_win_rate
+        adj = 0.05 if delta >= 0.05 else -0.05 if delta <= -0.05 else 0.0
+        result[symbol] = Thresholds(
+            min_confidence=global_threshold.min_confidence,
+            min_blended_confidence=_adjust_blended(global_threshold.min_blended_confidence, adj),
+        )
+
+    logger.debug(
+        "Thresholds: computed global={} with {} symbol overrides",
+        global_threshold.min_confidence,
+        len(result) - 1,
+    )
+    return result
