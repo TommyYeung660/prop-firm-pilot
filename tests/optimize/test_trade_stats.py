@@ -30,7 +30,7 @@ def journal(tmp_path: Path) -> TradeJournal:
     return TradeJournal(path)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────-
+# ── Helpers ────────────────────────────────────────────────────────────────
 
 
 def _create_closed_intent(store: DecisionStore, symbol: str, pnl: float) -> TradeIntent:
@@ -44,7 +44,7 @@ def _create_closed_intent(store: DecisionStore, symbol: str, pnl: float) -> Trad
     return intent
 
 
-# ── Tests ─────────────────────────────────────────────────────────────────--
+# ── Tests ───────────────────────────────────────────────────────────────────
 
 
 def test_compute_win_rates_empty(store: DecisionStore) -> None:
