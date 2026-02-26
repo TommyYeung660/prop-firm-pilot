@@ -420,6 +420,18 @@ class TestClaimManagement:
         assert recycled is not None
         assert recycled.status == "timed_out"
 
+    def test_recycle_zero_rows_does_not_block_next_claim(self, store: DecisionStore) -> None:
+        """A zero-row recycle should not leave an open transaction."""
+        intent = TradeIntent(trade_date="2026-02-16", symbol="EURUSD")
+        store.insert_intent(intent)
+
+        count = store.recycle_expired_claims()
+        assert count == 0
+
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+        assert claimed.id == intent.id
+
     def test_cleanup_old_intents(self, store: DecisionStore) -> None:
         """cleanup_old_intents should delete terminal intents older than retention."""
         intent = TradeIntent(trade_date="2026-01-01", symbol="EURUSD")
@@ -454,6 +466,18 @@ class TestClaimManagement:
         count = store.cleanup_old_intents(retention_days=7)
         assert count == 0
         assert store.get_intent(intent.id) is not None
+
+    def test_cleanup_zero_rows_does_not_block_next_claim(self, store: DecisionStore) -> None:
+        """A zero-row cleanup should not leave an open transaction."""
+        intent = TradeIntent(trade_date="2026-02-16", symbol="GBPUSD")
+        store.insert_intent(intent)
+
+        count = store.cleanup_old_intents(retention_days=7)
+        assert count == 0
+
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+        assert claimed.id == intent.id
 
 
 # ── Decision Record Sync Tests ──────────────────────────────────────────────

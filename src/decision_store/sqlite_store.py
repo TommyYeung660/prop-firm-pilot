@@ -707,26 +707,28 @@ class DecisionStore:
         """
         now = datetime.now(timezone.utc)
         now_str = _dt_to_str(now)
-        cursor = self._conn.execute(
-            """UPDATE intents
-               SET status = 'timed_out'
-               WHERE status = 'claimed'
-                 AND expires_at IS NOT NULL
-                 AND expires_at < :now""",
-            {"now": now_str},
-        )
-        count = cursor.rowcount
-        if count > 0:
-            # Also update decision records
-            self._conn.execute(
-                """UPDATE decisions
-                   SET status = 'timed_out',
-                       failure_reason = 'Claim TTL expired'
-                   WHERE intent_id IN (
-                       SELECT id FROM intents WHERE status = 'timed_out'
-                   ) AND status = 'claimed'"""
+        with self._write_lock:
+            cursor = self._conn.execute(
+                """UPDATE intents
+                   SET status = 'timed_out'
+                   WHERE status = 'claimed'
+                     AND expires_at IS NOT NULL
+                     AND expires_at < :now""",
+                {"now": now_str},
             )
+            count = cursor.rowcount
+            if count > 0:
+                # Also update decision records
+                self._conn.execute(
+                    """UPDATE decisions
+                       SET status = 'timed_out',
+                           failure_reason = 'Claim TTL expired'
+                       WHERE intent_id IN (
+                           SELECT id FROM intents WHERE status = 'timed_out'
+                       ) AND status = 'claimed'"""
+                )
             self._conn.commit()
+        if count > 0:
             logger.warning("Recycled {} expired claims", count)
         return count
 
@@ -744,25 +746,26 @@ class DecisionStore:
         terminal_states = ("closed", "rejected", "failed", "cancelled", "timed_out")
         placeholders = ",".join(f"'{s}'" for s in terminal_states)
 
-        # Delete decisions first (FK constraint)
-        self._conn.execute(
-            f"""DELETE FROM decisions
-                WHERE intent_id IN (
-                    SELECT id FROM intents
+        with self._write_lock:
+            # Delete decisions first (FK constraint)
+            self._conn.execute(
+                f"""DELETE FROM decisions
+                    WHERE intent_id IN (
+                        SELECT id FROM intents
+                        WHERE status IN ({placeholders})
+                          AND created_at < :cutoff
+                    )""",
+                {"cutoff": cutoff_str},
+            )
+            cursor = self._conn.execute(
+                f"""DELETE FROM intents
                     WHERE status IN ({placeholders})
-                      AND created_at < :cutoff
-                )""",
-            {"cutoff": cutoff_str},
-        )
-        cursor = self._conn.execute(
-            f"""DELETE FROM intents
-                WHERE status IN ({placeholders})
-                  AND created_at < :cutoff""",
-            {"cutoff": cutoff_str},
-        )
-        count = cursor.rowcount
-        if count > 0:
+                      AND created_at < :cutoff""",
+                {"cutoff": cutoff_str},
+            )
+            count = cursor.rowcount
             self._conn.commit()
+        if count > 0:
             logger.info("Cleaned up {} old intents (retention={}d)", count, retention_days)
         return count
 
