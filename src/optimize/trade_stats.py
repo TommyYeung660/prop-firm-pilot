@@ -9,8 +9,6 @@ Usage:
 """
 
 from collections import defaultdict
-from typing import Any
-
 from loguru import logger
 
 from src.decision_store.sqlite_store import DecisionStore
