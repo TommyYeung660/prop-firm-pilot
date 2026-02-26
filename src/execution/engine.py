@@ -16,6 +16,7 @@ Usage:
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from loguru import logger
@@ -146,9 +147,43 @@ class ExecutionEngine:
             logger.error("ExecutionEngine: cannot mark {} executing: {}", intent_id, e)
             return
 
-        # Step 2: Build TradePlan
+        # Step 2: Build account snapshot
         try:
             account_snapshot = await self._get_account_snapshot()
+        except Exception as e:
+            logger.error(
+                "ExecutionEngine: failed to build account snapshot for {}: {}",
+                intent_id,
+                e,
+            )
+            await asyncio.to_thread(
+                self._store.mark_failed, intent_id, f"Account snapshot error: {e}"
+            )
+            return
+
+        # Step 2.5: Execution-side Best Day hard gate (race-condition guard)
+        best_day_block_reason = self._get_best_day_entry_block_reason(account_snapshot)
+        if best_day_block_reason is not None:
+            compliance_result = ComplianceResult(
+                passed=False,
+                rule_name="BEST_DAY_ENTRY_GATE",
+                reason=best_day_block_reason,
+            )
+            compliance_snapshot = self._serialize_compliance(compliance_result, account_snapshot)
+            await asyncio.to_thread(
+                self._update_compliance_snapshot, intent_id, compliance_snapshot
+            )
+            await asyncio.to_thread(self._store.mark_rejected, intent_id, best_day_block_reason)
+            await self._send_alert_rejection(symbol, side, best_day_block_reason)
+            logger.warning(
+                "ExecutionEngine: intent {} rejected by execution hard gate: {}",
+                intent_id,
+                best_day_block_reason,
+            )
+            return
+
+        # Step 3: Build TradePlan
+        try:
             trade_plan = self._build_trade_plan(intent, side, account_snapshot.equity)
         except Exception as e:
             logger.error("ExecutionEngine: failed to build trade plan for {}: {}", intent_id, e)
@@ -157,7 +192,7 @@ class ExecutionEngine:
             )
             return
 
-        # Step 3: Compliance gate
+        # Step 4: Compliance gate
         compliance_result = self._guard.check_all(trade_plan, account_snapshot)
         compliance_snapshot = self._serialize_compliance(compliance_result, account_snapshot)
 
@@ -175,7 +210,7 @@ class ExecutionEngine:
             await self._send_alert_rejection(symbol, side, compliance_result.reason)
             return
 
-        # Step 3.5: Pre-trade quote validation (slippage protection)
+        # Step 4.5: Pre-trade quote validation (slippage protection)
         relevant_price = None
         pre_trade_bid: float | None = None
         pre_trade_ask: float | None = None
@@ -201,12 +236,12 @@ class ExecutionEngine:
                 e,
             )
 
-        # Step 4: Random delay (anti-duplicate-strategy detection by E8)
+        # Step 5: Random delay (anti-duplicate-strategy detection by E8)
         delay = self._guard.add_random_delay()
         logger.debug("ExecutionEngine: applying {:.2f}s random delay for {}", delay, intent_id)
         await asyncio.sleep(delay)
 
-        # Step 5: Execute trade (use broker symbol for API call)
+        # Step 6: Execute trade (use broker symbol for API call)
         exec_start_time = asyncio.get_event_loop().time()
         try:
             order = await self._matchtrader.open_position(
@@ -401,19 +436,37 @@ class ExecutionEngine:
         balance_info = await self._matchtrader.get_balance()
         positions = await self._matchtrader.get_open_positions()
 
-        # Calculate daily PnL from open positions
-        daily_pnl = sum(p.profit for p in positions)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_intents = self._store.get_intents_by_date(today)
+        realized_pnl = sum(
+            (intent.realized_pnl or 0.0) for intent in today_intents if intent.status == "closed"
+        )
+        unrealized_pnl = sum(p.profit for p in positions)
+        daily_pnl = realized_pnl + unrealized_pnl
 
         return AccountSnapshot(
             balance=balance_info.balance,
             equity=balance_info.equity,
             margin=balance_info.margin,
             free_margin=balance_info.free_margin,
-            day_start_balance=balance_info.balance - daily_pnl,
+            # balance already includes realized results, not floating PnL
+            day_start_balance=balance_info.balance - realized_pnl,
             initial_balance=self._config.account.initial_balance,
             open_positions=len(positions),
             daily_pnl=daily_pnl,
             total_pnl=balance_info.balance - self._config.account.initial_balance,
+        )
+
+    def _get_best_day_entry_block_reason(self, snapshot: AccountSnapshot) -> str | None:
+        """Return rejection reason when Best Day protection says no new entries."""
+        safe_limit = self._config.compliance.best_day_limit * self._config.compliance.best_day_stop
+        pause_threshold = safe_limit * 0.90
+        if snapshot.daily_pnl < pause_threshold:
+            return None
+        return (
+            "Best Day entry gate active: "
+            f"daily PnL ${snapshot.daily_pnl:.2f} >= pause threshold ${pause_threshold:.2f} "
+            f"(safe limit ${safe_limit:.2f})"
         )
 
     def _update_compliance_snapshot(self, intent_id: str, snapshot_json: str) -> None:

@@ -16,9 +16,9 @@ from src.config import (
     AppConfig,
     ComplianceConfig,
     DecisionStoreConfig,
+    ExecutionConfig,
     MonitorConfig,
     SchedulerConfig,
-    ExecutionConfig,
 )
 from src.decision.agent_bridge import AgentDecision
 from src.decision.schemas import TradeIntent
@@ -823,6 +823,38 @@ class TestProcessClaimedIntent:
         updated = store.get_intent(intent.id)
         assert updated.status == "cancelled"
 
+    async def test_actionable_decision_cancelled_when_best_day_pause_active(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """Actionable decision should be cancelled if Best Day pause is active."""
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD",
+            decision="BUY",
+            final_state={"risk_report": "pause active"},
+            risk_report="pause active",
+        )
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.88,
+            scanner_confidence="high",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        with patch.object(scheduler, "_should_pause_new_entries", return_value=True):
+            await scheduler._process_claimed_intent("llm-0", claimed)
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+        assert updated.execution_error is not None
+        assert "Best Day protection active" in updated.execution_error
+
 
 # ── Execution Loop Tests ────────────────────────────────────────────────────
 
@@ -1358,6 +1390,38 @@ def _advance_intent_to_opened(store: DecisionStore, symbol: str = "EURUSD") -> T
     return store.get_intent(intent.id)
 
 
+def _advance_intent_to_closed(
+    store: DecisionStore,
+    trade_date: str,
+    symbol: str = "EURUSD",
+    realized_pnl: float = 0.0,
+) -> TradeIntent:
+    """Insert and fully close an intent with realized PnL."""
+    intent = TradeIntent(
+        trade_date=trade_date,
+        symbol=symbol,
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    store.claim_next_pending("test-worker")
+    store.update_intent_decision(
+        intent.id,
+        side="BUY",
+        sl_pips=30.0,
+        tp_pips=50.0,
+        risk_report="test risk",
+        state_json="{}",
+    )
+    store.mark_ready_for_exec(intent.id)
+    store.mark_executing(intent.id)
+    store.mark_opened(intent.id, position_id=f"closed-{symbol}")
+    store.mark_closed(intent.id, realized_pnl=realized_pnl, exit_reason="tp_hit")
+    closed = store.get_intent(intent.id)
+    assert closed is not None
+    return closed
+
+
 class TestPositionMonitorLoop:
     """Tests for Scheduler._position_monitor_loop()."""
 
@@ -1755,6 +1819,48 @@ class TestDailySummaryLoop:
             await _run_loop_once(sched, sched._daily_summary_loop())
 
         # Loop should complete without raising
+
+    async def test_summary_pnl_uses_realized_when_no_open_positions(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Daily summary PnL should match realized PnL when no positions remain open."""
+        mock_alert = AsyncMock()
+        mock_alert.daily_summary = AsyncMock()
+        mock_alert.send = AsyncMock()
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            alert_service=mock_alert,
+        )
+
+        date_str = "2026-02-16"
+        _advance_intent_to_closed(store, trade_date=date_str, symbol="EURUSD", realized_pnl=163.68)
+        mock_matchtrader.get_balance.return_value = MagicMock(
+            balance=50163.68,
+            equity=50163.68,
+            margin=0.0,
+            free_margin=50163.68,
+        )
+        mock_matchtrader.get_open_positions.return_value = []
+
+        await sched._send_daily_summary(date_str)
+
+        mock_alert.daily_summary.assert_called_once()
+        kwargs = mock_alert.daily_summary.call_args.kwargs
+        assert kwargs["pnl"] == pytest.approx(163.68)
+        assert kwargs["open_positions"] == 0
+        assert kwargs["day_start_balance"] == pytest.approx(50000.0)
 
 
 # ── Mock LLM Blocking Tests ──────────────────────────────────────────────────────

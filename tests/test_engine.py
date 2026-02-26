@@ -7,6 +7,7 @@ checking, position sizing, trade execution, and state transitions.
 """
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -144,6 +145,39 @@ def _make_ready_intent(
     # Mark ready for execution
     store.mark_ready_for_exec(intent.id)
     return intent
+
+
+def _make_closed_intent_today(
+    store: DecisionStore,
+    symbol: str,
+    realized_pnl: float,
+) -> TradeIntent:
+    """Create an intent closed today with realized PnL."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    intent = TradeIntent(
+        trade_date=today,
+        symbol=symbol,
+        scanner_score=0.80,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-closed")
+    assert claimed is not None
+    store.update_intent_decision(
+        intent.id,
+        side="BUY",
+        sl_pips=30.0,
+        tp_pips=60.0,
+        risk_report="closed test",
+        state_json="{}",
+    )
+    store.mark_ready_for_exec(intent.id)
+    store.mark_executing(intent.id)
+    store.mark_opened(intent.id, position_id=f"closed-{symbol}")
+    store.mark_closed(intent.id, realized_pnl=realized_pnl, exit_reason="tp_hit")
+    closed = store.get_intent(intent.id)
+    assert closed is not None
+    return closed
 
 
 # ── Execution Pipeline Tests ───────────────────────────────────────────────
@@ -501,7 +535,7 @@ class TestAccountSnapshot:
         mock_matchtrader: AsyncMock,
         mock_guard: MagicMock,
     ) -> None:
-        """Should estimate day_start_balance from balance minus daily PnL."""
+        """Should estimate day_start_balance from balance minus realized PnL only."""
         mock_matchtrader.get_balance.return_value = MagicMock(
             balance=50100.0,
             equity=50100.0,
@@ -516,7 +550,68 @@ class TestAccountSnapshot:
         await engine.execute_ready_intents()
 
         snapshot = mock_guard.check_all.call_args[0][1]
-        assert snapshot.day_start_balance == 50000.0  # 50100 - 100
+        assert snapshot.day_start_balance == 50100.0  # no realized trades yet
+
+    async def test_snapshot_uses_realized_plus_unrealized_pnl(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+        mock_guard: MagicMock,
+    ) -> None:
+        """daily_pnl should include realized closed trades + current unrealized PnL."""
+        _make_closed_intent_today(store, symbol="GBPUSD", realized_pnl=150.0)
+        _make_ready_intent(store)
+
+        mock_matchtrader.get_balance.return_value = MagicMock(
+            balance=50150.0,
+            equity=50130.0,
+            margin=0.0,
+            free_margin=50130.0,
+        )
+        mock_matchtrader.get_open_positions.return_value = [MagicMock(profit=-20.0)]
+
+        await engine.execute_ready_intents()
+
+        snapshot = mock_guard.check_all.call_args[0][1]
+        assert snapshot.daily_pnl == 130.0
+        assert snapshot.day_start_balance == 50000.0
+
+
+class TestBestDayExecutionGate:
+    """Tests for execution-layer hard gate when Best Day protection is active."""
+
+    async def test_rejects_ready_intent_when_best_day_gate_active(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        config: AppConfig,
+        mock_matchtrader: AsyncMock,
+        mock_guard: MagicMock,
+    ) -> None:
+        """Execution should reject new entry before compliance check if gate is active."""
+        pause_threshold = config.compliance.best_day_limit * config.compliance.best_day_stop * 0.90
+        realized_pnl = pause_threshold + 5.0
+        _make_closed_intent_today(store, symbol="GBPUSD", realized_pnl=realized_pnl)
+        ready = _make_ready_intent(store)
+
+        mock_matchtrader.get_balance.return_value = MagicMock(
+            balance=50000.0 + realized_pnl,
+            equity=50000.0 + realized_pnl,
+            margin=0.0,
+            free_margin=50000.0 + realized_pnl,
+        )
+        mock_matchtrader.get_open_positions.return_value = []
+
+        await engine.execute_ready_intents()
+
+        updated = store.get_intent(ready.id)
+        assert updated is not None
+        assert updated.status == "rejected"
+        assert updated.execution_error is not None
+        assert "Best Day entry gate" in updated.execution_error
+        mock_guard.check_all.assert_not_called()
+        mock_matchtrader.open_position.assert_not_called()
 
 
 # ── Random Delay Tests ──────────────────────────────────────────────────────
@@ -711,7 +806,7 @@ class TestInstrumentRegistry:
 class TestSLTPPriceConversion:
     """Tests for SL/TP price conversion functionality."""
 
-    def test_extract_open_price_from_openPrice(self) -> None:
+    def test_extract_open_price_from_open_price_key(self) -> None:
         """Should return float from from openPrice key."""
         raw = {"openPrice": "1.10000"}
         result = ExecutionEngine._extract_open_price(raw)
@@ -729,7 +824,7 @@ class TestSLTPPriceConversion:
         result = ExecutionEngine._extract_open_price(raw)
         assert result == 1.10000
 
-    def test_extract_open_price_from_fillPrice(self) -> None:
+    def test_extract_open_price_from_fill_price_key(self) -> None:
         """Should return float from fillPrice key."""
         raw = {"fillPrice": 1.10000}
         result = ExecutionEngine._extract_open_price(raw)

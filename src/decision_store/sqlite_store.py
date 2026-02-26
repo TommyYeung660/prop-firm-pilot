@@ -14,6 +14,7 @@ Usage:
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from loguru import logger
@@ -212,6 +213,7 @@ class DecisionStore:
 
     def __init__(self, db_path: str = "data/decisions.db") -> None:
         self._db_path = db_path
+        self._write_lock = RLock()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = self._create_connection()
         self._ensure_tables()
@@ -336,37 +338,50 @@ class DecisionStore:
             The claimed TradeIntent, or None if no pending intents exist.
         """
         now = datetime.now(timezone.utc)
-        row = self._conn.execute(
-            "SELECT * FROM intents WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1"
-        ).fetchone()
-        if row is None:
-            return None
+        with self._write_lock:
+            try:
+                # Acquire a write lock so claim is truly atomic across workers.
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    "SELECT * FROM intents WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    self._conn.commit()
+                    return None
 
-        intent = _row_to_intent(row)
-        ttl = intent.claim_ttl_minutes
-        expires_at = now + timedelta(minutes=ttl)
+                intent = _row_to_intent(row)
+                ttl = intent.claim_ttl_minutes
+                expires_at = now + timedelta(minutes=ttl)
 
-        self._conn.execute(
-            """UPDATE intents
-               SET status = 'claimed',
-                   claim_worker_id = :worker_id,
-                   claim_ts = :claim_ts,
-                   expires_at = :expires_at
-               WHERE id = :id AND status = 'pending'""",
-            {
-                "worker_id": worker_id,
-                "claim_ts": _dt_to_str(now),
-                "expires_at": _dt_to_str(expires_at),
-                "id": intent.id,
-            },
-        )
-        self._conn.execute(
-            """UPDATE decisions
-               SET status = 'claimed', claimed_at = :claimed_at
-               WHERE intent_id = :intent_id""",
-            {"claimed_at": _dt_to_str(now), "intent_id": intent.id},
-        )
-        self._conn.commit()
+                updated = self._conn.execute(
+                    """UPDATE intents
+                       SET status = 'claimed',
+                           claim_worker_id = :worker_id,
+                           claim_ts = :claim_ts,
+                           expires_at = :expires_at
+                       WHERE id = :id AND status = 'pending'""",
+                    {
+                        "worker_id": worker_id,
+                        "claim_ts": _dt_to_str(now),
+                        "expires_at": _dt_to_str(expires_at),
+                        "id": intent.id,
+                    },
+                ).rowcount
+                if not updated:
+                    # Another worker won the race.
+                    self._conn.rollback()
+                    return None
+
+                self._conn.execute(
+                    """UPDATE decisions
+                       SET status = 'claimed', claimed_at = :claimed_at
+                       WHERE intent_id = :intent_id""",
+                    {"claimed_at": _dt_to_str(now), "intent_id": intent.id},
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
         # Return the updated intent
         intent.status = "claimed"
@@ -396,28 +411,29 @@ class DecisionStore:
             state_json: JSON-serialized final_state from TradingAgents.
         """
         now = datetime.now(timezone.utc)
-        self._conn.execute(
-            """UPDATE intents
-               SET suggested_side = :side,
-                   suggested_sl_pips = :sl_pips,
-                   suggested_tp_pips = :tp_pips,
-                   agent_risk_report = :risk_report,
-                   agent_state_json = :state_json
-               WHERE id = :id AND status = 'claimed'""",
-            {
-                "side": side,
-                "sl_pips": sl_pips,
-                "tp_pips": tp_pips,
-                "risk_report": risk_report,
-                "state_json": state_json,
-                "id": intent_id,
-            },
-        )
-        self._conn.execute(
-            """UPDATE decisions SET decided_at = :decided_at WHERE intent_id = :intent_id""",
-            {"decided_at": _dt_to_str(now), "intent_id": intent_id},
-        )
-        self._conn.commit()
+        with self._write_lock:
+            self._conn.execute(
+                """UPDATE intents
+                   SET suggested_side = :side,
+                       suggested_sl_pips = :sl_pips,
+                       suggested_tp_pips = :tp_pips,
+                       agent_risk_report = :risk_report,
+                       agent_state_json = :state_json
+                   WHERE id = :id AND status = 'claimed'""",
+                {
+                    "side": side,
+                    "sl_pips": sl_pips,
+                    "tp_pips": tp_pips,
+                    "risk_report": risk_report,
+                    "state_json": state_json,
+                    "id": intent_id,
+                },
+            )
+            self._conn.execute(
+                """UPDATE decisions SET decided_at = :decided_at WHERE intent_id = :intent_id""",
+                {"decided_at": _dt_to_str(now), "intent_id": intent_id},
+            )
+            self._conn.commit()
         logger.info("Updated intent {} with decision: {}", intent_id, side)
 
     def mark_ready_for_exec(self, intent_id: str) -> None:
@@ -533,29 +549,30 @@ class DecisionStore:
     def mark_cancelled(self, intent_id: str, reason: str) -> None:
         """Cancel an intent from pending or claimed state."""
         now = datetime.now(timezone.utc)
-        updated = self._conn.execute(
-            """UPDATE intents
-               SET status = 'cancelled',
-                   execution_error = :reason,
-                   executed_at = :executed_at
-               WHERE id = :id AND status IN ('pending', 'claimed')""",
-            {
-                "reason": reason,
-                "executed_at": _dt_to_str(now),
-                "id": intent_id,
-            },
-        ).rowcount
-        if not updated:
-            raise InvalidTransitionError(
-                f"Cannot cancel {intent_id}: not in 'pending' or 'claimed' state"
+        with self._write_lock:
+            updated = self._conn.execute(
+                """UPDATE intents
+                   SET status = 'cancelled',
+                       execution_error = :reason,
+                       executed_at = :executed_at
+                   WHERE id = :id AND status IN ('pending', 'claimed')""",
+                {
+                    "reason": reason,
+                    "executed_at": _dt_to_str(now),
+                    "id": intent_id,
+                },
+            ).rowcount
+            if not updated:
+                raise InvalidTransitionError(
+                    f"Cannot cancel {intent_id}: not in 'pending' or 'claimed' state"
+                )
+            self._conn.execute(
+                """UPDATE decisions
+                   SET status = 'cancelled', failure_reason = :reason
+                   WHERE intent_id = :intent_id""",
+                {"reason": reason, "intent_id": intent_id},
             )
-        self._conn.execute(
-            """UPDATE decisions
-               SET status = 'cancelled', failure_reason = :reason
-               WHERE intent_id = :intent_id""",
-            {"reason": reason, "intent_id": intent_id},
-        )
-        self._conn.commit()
+            self._conn.commit()
         logger.info("Intent {} cancelled: {}", intent_id, reason)
 
     def mark_closed(
@@ -1028,17 +1045,18 @@ class DecisionStore:
         """Generic single-status transition with validation."""
         if to_status not in VALID_TRANSITIONS.get(from_status, []):
             raise InvalidTransitionError(f"Invalid transition: {from_status} → {to_status}")
-        updated = self._conn.execute(
-            "UPDATE intents SET status = :to WHERE id = :id AND status = :from_s",
-            {"to": to_status, "id": intent_id, "from_s": from_status},
-        ).rowcount
-        if not updated:
-            raise InvalidTransitionError(
-                f"Cannot transition {intent_id}: not in '{from_status}' state"
+        with self._write_lock:
+            updated = self._conn.execute(
+                "UPDATE intents SET status = :to WHERE id = :id AND status = :from_s",
+                {"to": to_status, "id": intent_id, "from_s": from_status},
+            ).rowcount
+            if not updated:
+                raise InvalidTransitionError(
+                    f"Cannot transition {intent_id}: not in '{from_status}' state"
+                )
+            self._conn.execute(
+                "UPDATE decisions SET status = :to WHERE intent_id = :id",
+                {"to": to_status, "id": intent_id},
             )
-        self._conn.execute(
-            "UPDATE decisions SET status = :to WHERE intent_id = :id",
-            {"to": to_status, "id": intent_id},
-        )
-        self._conn.commit()
+            self._conn.commit()
         logger.debug("Intent {} transitioned: {} → {}", intent_id, from_status, to_status)

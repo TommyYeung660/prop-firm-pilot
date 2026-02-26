@@ -266,6 +266,17 @@ class RateLimiter:
         return max(0, self._daily_limit - self._count)
 
     @property
+    def write_remaining(self) -> int:
+        """Remaining write-budget for mutating endpoints (open/close/edit)."""
+        self._maybe_reset()
+        return max(0, self._daily_limit - self._write_count)
+
+    @property
+    def daily_write_limit(self) -> int:
+        """Configured daily budget for write operations."""
+        return self._daily_limit
+
+    @property
     def count(self) -> int:
         self._maybe_reset()
         return self._count
@@ -283,8 +294,8 @@ class RateLimiter:
         return self._write_count
 
     def can_proceed(self, reserve: int = 50) -> bool:
-        """Check if we can make a request, keeping a reserve for emergencies."""
-        return self.remaining > reserve
+        """Check if we can make another mutating request, keeping emergency reserve."""
+        return self.write_remaining > reserve
 
 
 # ── MatchTrader Client ──────────────────────────────────────────────────────
@@ -818,6 +829,18 @@ class MatchTraderClient:
             headers["Auth-trading-api"] = self._tokens.trading_api_token
         return headers
 
+    @staticmethod
+    def _classify_call_type(method: HttpMethod, path: str) -> Literal["read", "write"]:
+        """Classify API request as read/write for budget controls.
+
+        MatchTrader budget enforcement in production should focus on mutating
+        order endpoints; query endpoints remain unrestricted.
+        """
+        write_paths = ("/position/open", "/position/close", "/position/edit")
+        if method == "POST" and any(wp in path for wp in write_paths):
+            return "write"
+        return "read"
+
     async def _raw_request(
         self,
         method: HttpMethod,
@@ -838,11 +861,8 @@ class MatchTraderClient:
 
         # curl_cffi uses 'data' for raw body and 'json' kwarg for JSON serialization
         response = await self._session.request(method, url, json=json, headers=headers)
-        # Classify call type: write for mutating operations, read for everything else
-        _write_paths = ("/position/open", "/position/close", "/position/edit")
-        call_type = (
-            "write" if method == "POST" and any(wp in path for wp in _write_paths) else "read"
-        )
+        # Track call volume for observability (read/write split).
+        call_type = self._classify_call_type(method, path)
         self._rate_limiter.record(call_type=call_type)
 
         if response.status_code == 401 and authenticated:
@@ -863,10 +883,12 @@ class MatchTraderClient:
         json: dict[str, Any] | None = None,
     ) -> Any:
         """Make an authenticated API request with retry + auto-refresh logic."""
-        if not self._rate_limiter.can_proceed():
+        call_type = self._classify_call_type(method, path)
+        if call_type == "write" and not self._rate_limiter.can_proceed():
             raise MatchTraderRateLimitError(
-                f"Daily API request budget exhausted ({self._rate_limiter.count} used). "
-                "Remaining requests reserved for emergencies."
+                "Daily WRITE request budget exhausted "
+                f"({self._rate_limiter.write_count}/{self._rate_limiter.daily_write_limit} used). "
+                "Remaining write requests are reserved for emergencies."
             )
 
         last_error: Exception | None = None

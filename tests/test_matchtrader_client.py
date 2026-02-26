@@ -89,21 +89,21 @@ class TestRateLimiter:
         limiter = RateLimiter(daily_limit=100)
         # Reserve default 50
         for _ in range(49):
-            limiter.record()
+            limiter.record(call_type="write")
         assert limiter.can_proceed() is True
         assert limiter.can_proceed(reserve=50) is True
 
     def test_can_proceed_at_reserve_boundary(self) -> None:
         limiter = RateLimiter(daily_limit=100)
         for _ in range(50):
-            limiter.record()
+            limiter.record(call_type="write")
         # 50 used, 50 remaining, reserve=50 -> exactly at boundary
         assert limiter.can_proceed(reserve=50) is False
 
     def test_can_proceed_custom_reserve(self) -> None:
         limiter = RateLimiter(daily_limit=100)
         for _ in range(90):
-            limiter.record()
+            limiter.record(call_type="write")
         assert limiter.can_proceed(reserve=5) is True
         assert limiter.can_proceed(reserve=15) is False
 
@@ -708,13 +708,13 @@ class TestRateLimitingIntegration:
 
                 # Exhaust rate limit (minus reserve)
                 for _ in range(1949):
-                    client._rate_limiter.record()
+                    client._rate_limiter.record(call_type="write")
 
                 # 1949 used, 51 remaining (above reserve of 50)
                 assert client._rate_limiter.can_proceed() is True
 
                 # Make one more to hit reserve boundary
-                client._rate_limiter.record()
+                client._rate_limiter.record(call_type="write")
 
                 # 1950 used, 50 remaining (exactly at reserve - can't proceed)
                 assert client._rate_limiter.can_proceed() is False
@@ -735,10 +735,38 @@ class TestRateLimitingIntegration:
 
                 # Exhaust all requests
                 for _ in range(100):
-                    client._rate_limiter.record()
+                    client._rate_limiter.record(call_type="write")
 
                 with pytest.raises(MatchTraderRateLimitError, match="budget exhausted"):
-                    await client._api_request("GET", "/test")
+                    await client._api_request("POST", "/mtr-api/sys-123/position/open")
+
+    async def test_read_request_not_blocked_when_write_budget_exhausted(
+        self, client_config: dict, mock_response: AsyncMock
+    ) -> None:
+        """Read/query endpoints should remain available even when write budget is exhausted."""
+        mock_response.json = MagicMock(return_value={"ok": True})
+
+        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+            mock_session = AsyncMock()
+            mock_session.request = AsyncMock(return_value=mock_response)
+            mock_session.close = AsyncMock()
+            MockSession.return_value = mock_session
+
+            async with MatchTraderClient(daily_request_limit=100, **client_config) as client:
+                client._tokens = AuthTokens(
+                    trading_api_token="jwt",
+                    refresh_token="rt",
+                    system_uuid="sys-123",
+                )
+                client._last_auth_time = __import__("time").monotonic()
+
+                # Exhaust write budget
+                for _ in range(100):
+                    client._rate_limiter.record(call_type="write")
+
+                # Should still allow read endpoint
+                response = await client._api_request("GET", "/mtr-api/sys-123/balance")
+                assert response is not None
 
 
 # ── Trading Operations Tests ───────────────────────────────────────────────

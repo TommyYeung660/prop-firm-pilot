@@ -5,6 +5,9 @@ Phase 1 (BUG #6): get_global_news away from OpenAI (404 via Volcengine) to local
 Phase 2: Route ALL data sources to Alpha Vantage (premium, 75 req/min).
 Phase 3: Route get_global_news to Alpha Vantage (topic-based macro news).
 """
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
 from src.decision.agent_bridge import AgentBridge
 from src.decision.fx_analyst_config import build_agent_config
 
@@ -100,6 +103,89 @@ class TestAgentBridgeToolVendors:
         # Config should still have tool_vendors
         assert bridge._config["tool_vendors"]["get_global_news"] == "alpha_vantage"
 
+    def test_ensure_loaded_overrides_portable_paths(self, tmp_path, monkeypatch) -> None:
+        """AgentBridge should override bad default project/workspace/data paths."""
+        captured_config: dict[str, object] = {}
+
+        class DummyGraph:
+            def __init__(self, selected_analysts, config):
+                del selected_analysts
+                captured_config.update(config)
+
+        fake_graph_module = SimpleNamespace(TradingAgentsGraph=DummyGraph)
+        fake_default_module = SimpleNamespace(
+            DEFAULT_CONFIG={
+                "project_dir": "/Users/admin/legacy/project",
+                "workspace_dir": "/Users/admin/legacy/workspace",
+                "data_dir": "/Users/admin/legacy/data",
+            }
+        )
+
+        def fake_import(name: str):
+            if name == "tradingagents.graph.trading_graph":
+                return fake_graph_module
+            if name == "tradingagents.default_config":
+                return fake_default_module
+            raise ModuleNotFoundError(name)
+
+        monkeypatch.setattr("src.decision.agent_bridge.importlib.import_module", fake_import)
+
+        bridge = AgentBridge(agents_path=tmp_path, config={})
+        bridge._ensure_loaded()
+
+        expected_root = str(tmp_path.resolve())
+        assert captured_config["project_dir"] == expected_root
+        assert captured_config["workspace_dir"] == expected_root
+        assert captured_config["data_dir"] == str(tmp_path.resolve() / "data")
+
+    def test_ensure_loaded_respects_explicit_path_overrides(self, tmp_path, monkeypatch) -> None:
+        """Explicit config paths should not be overridden by portability defaults."""
+        captured_config: dict[str, object] = {}
+
+        class DummyGraph:
+            def __init__(self, selected_analysts, config):
+                del selected_analysts
+                captured_config.update(config)
+
+        fake_graph_module = SimpleNamespace(TradingAgentsGraph=DummyGraph)
+        fake_default_module = SimpleNamespace(DEFAULT_CONFIG={})
+
+        def fake_import(name: str):
+            if name == "tradingagents.graph.trading_graph":
+                return fake_graph_module
+            if name == "tradingagents.default_config":
+                return fake_default_module
+            raise ModuleNotFoundError(name)
+
+        monkeypatch.setattr("src.decision.agent_bridge.importlib.import_module", fake_import)
+
+        bridge = AgentBridge(
+            agents_path=tmp_path,
+            config={
+                "project_dir": "/custom/project",
+                "workspace_dir": "/custom/workspace",
+                "data_dir": "/custom/data",
+            },
+        )
+        bridge._ensure_loaded()
+
+        assert captured_config["project_dir"] == "/custom/project"
+        assert captured_config["workspace_dir"] == "/custom/workspace"
+        assert captured_config["data_dir"] == "/custom/data"
+
+
+class TestAgentBridgeDateNormalize:
+    """Verify trade_date normalization safeguards."""
+
+    def test_normalize_trade_date_trims_invalid_suffix(self) -> None:
+        """Invalid suffix should be trimmed to strict YYYY-MM-DD."""
+        assert AgentBridge._normalize_trade_date("2026-02-2626") == "2026-02-26"
+
+    def test_normalize_trade_date_invalid_input_falls_back_to_today(self) -> None:
+        """Malformed date should fallback to today's UTC date."""
+        expected_today = datetime.now(timezone.utc).date().isoformat()
+        assert AgentBridge._normalize_trade_date("not-a-date") == expected_today
+
 
 # ── main.py integration tests ──────────────────────────────────────────────
 
@@ -140,4 +226,3 @@ class TestMainUsesBuiltConfig:
         assert "build_agent_config" in source, (
             "main.py does not reference build_agent_config — vendor routing may be wrong"
         )
-

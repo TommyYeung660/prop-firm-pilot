@@ -23,6 +23,7 @@ import asyncio
 import json
 from collections.abc import Coroutine
 from datetime import datetime, timedelta, timezone
+from numbers import Real
 from typing import Any
 
 from loguru import logger
@@ -93,6 +94,7 @@ class Scheduler:
         self._running = False
         self._daily_summary_sent_date: str = ""  # Track last daily summary date
         self._best_day_close_positions: dict[str, float] = {}  # pos_id -> unrealized PnL
+        self._best_day_tracker_date: str = self._today_str()  # UTC date for daily reset
 
 
         # Phase 2.5: Trailing stop / breakeven tracking
@@ -158,6 +160,13 @@ class Scheduler:
         while self._running:
             try:
                 today = self._today_str()
+                if self._should_pause_new_entries():
+                    logger.warning(
+                        "Scanner loop: Best Day protection active ({}), pausing new intents",
+                        self._best_day_tracker.summary(),
+                    )
+                    await asyncio.sleep(self._config.scheduler.scanner_interval_seconds)
+                    continue
                 logger.info("Scanner loop: starting scan for {}", today)
 
                 signals = await asyncio.to_thread(
@@ -360,6 +369,20 @@ class Scheduler:
         )
 
         if decision.is_actionable:
+            if self._should_pause_new_entries():
+                await asyncio.to_thread(
+                    self._store.mark_cancelled,
+                    intent.id,
+                    "Best Day protection active — pausing new entries",
+                )
+                logger.warning(
+                    "LLM worker {}: cancelled intent {} ({}) due to Best Day protection",
+                    worker_id,
+                    intent.id,
+                    intent.symbol,
+                )
+                return
+
             # Use format_decision for proper SL/TP calculation
             formatted = format_decision(
                 symbol=intent.symbol,
@@ -481,6 +504,7 @@ class Scheduler:
         logger.info("Position monitor loop: started")
         while self._running:
             try:
+                self._maybe_rollover_best_day_tracker()
                 # Get intents that are in "opened" state
                 opened_intents = await asyncio.to_thread(self._store.get_active_positions)
                 if opened_intents:
@@ -525,8 +549,16 @@ class Scheduler:
                 # Auto-throttle: increase sleep when API budget is low
                 base_interval = self._config.scheduler.position_monitor_interval_seconds
                 limiter = self._matchtrader._rate_limiter
-                remaining = limiter.remaining
-                daily_limit = limiter._daily_limit
+                remaining = self._coerce_numeric(
+                    getattr(limiter, "write_remaining", getattr(limiter, "remaining", 0)),
+                    fallback=0.0,
+                )
+                daily_limit = self._coerce_numeric(
+                    getattr(limiter, "daily_write_limit", getattr(limiter, "_daily_limit", 1)),
+                    fallback=1.0,
+                )
+                if daily_limit <= 0:
+                    daily_limit = 1.0
                 if remaining < daily_limit * 0.15:
                     sleep_interval = base_interval * 4
                     logger.warning(
@@ -1042,10 +1074,15 @@ class Scheduler:
             # Get today's intents to count trades
             today_intents = await asyncio.to_thread(self._store.get_intents_by_date, date_str)
             trades_today = sum(1 for i in today_intents if i.status in ("opened", "closed"))
-            daily_pnl = sum(p.profit for p in open_positions)
+            realized_pnl = sum(
+                (i.realized_pnl or 0.0) for i in today_intents if i.status == "closed"
+            )
+            unrealized_pnl = sum(p.profit for p in open_positions)
+            daily_pnl = realized_pnl + unrealized_pnl
 
-            # Estimate day-start balance
-            day_start_balance = balance_info.balance - daily_pnl
+            # Estimate day-start balance from realized PnL only.
+            # balance already includes realized results, not floating PnL.
+            day_start_balance = balance_info.balance - realized_pnl
             daily_dd_pct = (
                 abs(daily_pnl) / day_start_balance
                 if daily_pnl < 0 and day_start_balance > 0
@@ -1085,3 +1122,33 @@ class Scheduler:
     def _now_utc() -> datetime:
         """Return current UTC datetime."""
         return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _coerce_numeric(value: Any, fallback: float) -> float:
+        """Convert optional numeric-like values to float; fallback on mocks/invalid."""
+        if isinstance(value, bool):
+            return fallback
+        if isinstance(value, Real):
+            return float(value)
+        return fallback
+
+    def _should_pause_new_entries(self) -> bool:
+        """Return True when Best Day protection says we should avoid new entries."""
+        try:
+            return self._best_day_tracker.should_close_winners()
+        except Exception as e:
+            logger.warning("Best Day protection check failed, defaulting to allow entries: {}", e)
+            return False
+
+    def _maybe_rollover_best_day_tracker(self) -> None:
+        """Reset BestDayTracker at UTC day rollover to avoid cross-day carryover."""
+        today = self._today_str()
+        if today == self._best_day_tracker_date:
+            return
+        logger.info(
+            "Scheduler: new UTC day {} detected, resetting BestDayTracker (prev={})",
+            today,
+            self._best_day_tracker_date,
+        )
+        self._best_day_tracker.reset()
+        self._best_day_tracker_date = today

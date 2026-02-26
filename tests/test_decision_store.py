@@ -5,6 +5,7 @@ Uses in-memory SQLite (`:memory:`) via tmp_path for isolation between tests.
 """
 
 from datetime import datetime, timedelta, timezone
+from threading import Barrier, Thread
 
 import pytest
 
@@ -131,6 +132,38 @@ class TestClaimNextPending:
         # expires_at should be ~15 minutes after claim_ts
         delta = claimed.expires_at - claimed.claim_ts
         assert abs(delta.total_seconds() - 15 * 60) < 2  # within 2 seconds tolerance
+
+    def test_claim_is_atomic_across_two_connections(self, tmp_path: object) -> None:
+        """Only one worker should claim the same pending intent across DB connections."""
+        db_path = f"{tmp_path}/claim_race.db"
+        store_a = DecisionStore(db_path=db_path)
+        store_b = DecisionStore(db_path=db_path)
+
+        try:
+            intent = TradeIntent(trade_date="2026-02-16", symbol="EURUSD")
+            store_a.insert_intent(intent)
+
+            barrier = Barrier(2)
+            results: list[TradeIntent | None] = [None, None]
+
+            def _claim(idx: int, store: DecisionStore, worker_id: str) -> None:
+                barrier.wait()
+                results[idx] = store.claim_next_pending(worker_id)
+
+            t1 = Thread(target=_claim, args=(0, store_a, "llm-a"))
+            t2 = Thread(target=_claim, args=(1, store_b, "llm-b"))
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+
+            claimed = [result for result in results if result is not None]
+            assert len(claimed) == 1
+            assert claimed[0].id == intent.id
+            assert claimed[0].claim_worker_id in {"llm-a", "llm-b"}
+        finally:
+            store_a.close()
+            store_b.close()
 
 
 # ── Update Decision Tests ───────────────────────────────────────────────────

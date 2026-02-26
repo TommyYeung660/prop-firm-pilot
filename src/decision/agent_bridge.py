@@ -7,6 +7,7 @@ import asyncio
 import importlib
 import random
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -123,6 +124,14 @@ class AgentBridge:
             # Merge provided config into DEFAULT_CONFIG so keys like project_dir are present
             merged_config = default_config.copy()
             merged_config.update(self._config)
+            # Keep vendor paths portable across environments (Windows/Mac/Linux).
+            # Only preserve explicit user overrides from self._config.
+            if "project_dir" not in self._config:
+                merged_config["project_dir"] = agents_str
+            if "workspace_dir" not in self._config:
+                merged_config["workspace_dir"] = agents_str
+            if "data_dir" not in self._config:
+                merged_config["data_dir"] = str(self._agents_path / "data")
 
             self._graph = graph_cls(
                 selected_analysts=self._selected_analysts,
@@ -158,14 +167,21 @@ class AgentBridge:
             AgentDecision with BUY/SELL/HOLD and full state.
         """
         self._ensure_loaded()
+        normalized_trade_date = self._normalize_trade_date(trade_date)
+        if normalized_trade_date != trade_date:
+            logger.warning(
+                "AgentBridge: normalized trade_date '{}' -> '{}'",
+                trade_date,
+                normalized_trade_date,
+            )
 
-        logger.info("AgentBridge: deciding on {} for {}", symbol, trade_date)
+        logger.info("AgentBridge: deciding on {} for {}", symbol, normalized_trade_date)
 
         try:
             # We don't pass market_type to propagate anymore as it's handled via __init__ config
             final_state, decision = self._graph.propagate(
                 company_name=symbol,
-                trade_date=trade_date,
+                trade_date=normalized_trade_date,
                 qlib_data=qlib_data,
             )
 
@@ -300,3 +316,17 @@ class AgentBridge:
             logger.info("AgentBridge: reflected on {} results", len(returns_losses))
         except Exception as e:
             logger.error("AgentBridge: reflect failed: {}", e)
+
+    @staticmethod
+    def _normalize_trade_date(trade_date: str) -> str:
+        """Normalize trade date into strict YYYY-MM-DD format."""
+        try:
+            return datetime.fromisoformat(trade_date[:10]).date().isoformat()
+        except Exception:
+            fallback = datetime.now(timezone.utc).date().isoformat()
+            logger.warning(
+                "AgentBridge: invalid trade_date '{}', fallback to {}",
+                trade_date,
+                fallback,
+            )
+            return fallback
