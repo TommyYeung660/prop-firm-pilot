@@ -99,8 +99,6 @@ class AgentsConfig(BaseModel):
 
     project_path: str = "../../TradingAgents"
     selected_analysts: list[str] = ["market", "news", "social"]
-    deep_think_llm: str = "volcengine/glm-4.7"
-    quick_think_llm: str = "volcengine/glm-4.7"
     output_language: str = "繁體中文"
 
 

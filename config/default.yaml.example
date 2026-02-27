@@ -32,8 +32,6 @@ agents:
     - market
     - news
     - social
-  deep_think_llm: "volcengine/glm-4.7"
-  quick_think_llm: "volcengine/glm-4.7"
   output_language: "繁體中文"
 
 # 交易執行
