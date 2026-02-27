@@ -14,7 +14,7 @@ compliance:
   profit_target: 0.09            # 9% 利潤目標 ($450)
   best_day_ratio: 0.40           # 40% Best Day Rule (單日獲利不可超過總獲利的40%)
   best_day_limit: 180            # $450 × 40% = $180/天 (安全閥)
-  daily_api_request_limit: 2000  # 每日 API 請求上限 (官網規定 2000)
+  daily_api_request_limit: 4000  # 每日 API 請求上限 (官網規定 2000)
   drawdown_type: "dynamic"       # 動態回撤 (Trailing High-Water Mark)
 
   # 安全裕度 (提前停止交易，避免觸碰紅線)
@@ -23,7 +23,7 @@ compliance:
   best_day_stop: 0.85            # 達到最佳日限額 85% 時停止
 
 execution:
-  max_positions: 1               # E8 One 建議謹慎交易，設定為 1
+  max_positions: 3
   default_risk_per_trade: 0.005  # 每筆交易風險 0.5% ($25)
   max_slippage_pips: 2.0
   random_delay_min: 0.5
@@ -35,8 +35,26 @@ instruments:
     pip_value: 10.0
     min_lot: 0.01
     max_lot: 5.0
+  GBPUSD:
+    pip_size: 0.0001
+    pip_value: 10.0
+    min_lot: 0.01
+    max_lot: 5.0
+  USDJPY:
+    pip_size: 0.01
+    pip_value: 10.0
+    min_lot: 0.01
+    max_lot: 5.0
+  AUDUSD:
+    pip_size: 0.0001
+    pip_value: 10.0
+    min_lot: 0.01
+    max_lot: 5.0
   XAUUSD:
     pip_size: 0.01
     pip_value: 1.0
     min_lot: 0.01
     max_lot: 5.0
+
+monitor:
+  memory_dir: "MEMORY"
