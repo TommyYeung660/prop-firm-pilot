@@ -126,6 +126,17 @@ class MonitorConfig(BaseModel):
     memory_dir: str = "MEMORY"
 
 
+class OptimizationConfig(BaseModel):
+    """Optimization and feedback loop settings."""
+
+    state_path: str = "data/optimization_state.json"
+    pnl_lookback_days: int = 7
+    winrate_lookback_days: int = 14
+    ab_model_a: str = "volcengine/glm-4.7"
+    ab_model_b: str = "gpt-5.2"
+    ab_ratio: float = 0.5
+
+
 class ScheduleConfig(BaseModel):
     """Daily cycle scheduling (UTC)."""
 
@@ -197,6 +208,7 @@ class AppConfig(BaseModel):
     agents: AgentsConfig = AgentsConfig()
     execution: ExecutionConfig = ExecutionConfig()
     monitor: MonitorConfig = MonitorConfig()
+    optimization: OptimizationConfig = OptimizationConfig()
     schedule: ScheduleConfig = ScheduleConfig()
     logging: LoggingConfig = LoggingConfig()
     instruments: dict[str, InstrumentConfig] = {}

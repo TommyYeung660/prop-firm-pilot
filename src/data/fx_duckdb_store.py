@@ -196,7 +196,9 @@ class FxDuckDbStore:
         """
         # Get all dates we have
         existing = self._conn.execute(
-            "SELECT DISTINCT date FROM fx_daily WHERE symbol = ? AND date BETWEEN ? AND ? ORDER BY date",
+            "SELECT DISTINCT date FROM fx_daily "
+            "WHERE symbol = ? AND date BETWEEN ? AND ? "
+            "ORDER BY date",
             [symbol, start_date, end_date],
         ).fetchdf()
 

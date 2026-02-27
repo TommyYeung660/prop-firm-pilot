@@ -435,7 +435,8 @@ class DecisionStore:
                         f"Cannot update decision {intent_id}: not in 'claimed' state"
                     )
                 self._conn.execute(
-                    """UPDATE decisions SET decided_at = :decided_at WHERE intent_id = :intent_id""",
+                    "UPDATE decisions SET decided_at = :decided_at "
+                    "WHERE intent_id = :intent_id",
                     {"decided_at": _dt_to_str(now), "intent_id": intent_id},
                 )
                 self._conn.commit()

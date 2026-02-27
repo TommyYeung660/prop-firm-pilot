@@ -40,7 +40,15 @@ from src.execution.instrument_registry import InstrumentRegistry
 from src.execution.matchtrader_client import MatchTraderClient
 from src.monitor.alert_service import AlertService
 from src.monitor.equity_monitor import EquityMonitor
+from src.monitor.memory_journal import MemoryJournal
+from src.monitor.trade_journal import TradeJournal
+from src.optimize.optimization_engine import OptimizationEngine
+from src.optimize.optimization_state import OptimizationState, Thresholds
 from src.signal.scanner_bridge import ScannerBridge
+
+# ── Constants ──────────────────────────────────────────────────────────────
+
+CONFIDENCE_MAP: dict[str, float] = {"high": 0.9, "medium": 0.6, "low": 0.3}
 
 
 class Scheduler:
@@ -70,6 +78,9 @@ class Scheduler:
         alert_service: AlertService | None = None,
         instrument_registry: InstrumentRegistry | None = None,
         best_day_tracker: BestDayTracker | None = None,
+        optimization_engine: OptimizationEngine | None = None,
+        memory_journal: MemoryJournal | None = None,
+        trade_journal: TradeJournal | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -95,6 +106,10 @@ class Scheduler:
         self._daily_summary_sent_date: str = ""  # Track last daily summary date
         self._best_day_close_positions: dict[str, float] = {}  # pos_id -> unrealized PnL
         self._best_day_tracker_date: str = self._today_str()  # UTC date for daily reset
+        self._optimization_engine = optimization_engine
+        self._optimization_state: OptimizationState | None = None
+        self._memory_journal = memory_journal
+        self._trade_journal = trade_journal
 
 
         # Phase 2.5: Trailing stop / breakeven tracking
@@ -248,6 +263,16 @@ class Scheduler:
                         )
                         await asyncio.to_thread(self._store.insert_intent, intent)
                         created_count += 1
+                        self._log_trade_event(
+                            "INTENT_CREATED",
+                            {
+                                "intent_id": intent.id,
+                                "symbol": intent.symbol,
+                                "trade_date": intent.trade_date,
+                                "scanner_score": intent.scanner_score,
+                                "scanner_confidence": intent.scanner_confidence,
+                            },
+                        )
                         logger.info(
                             "Scanner loop: created intent for {} ({}/{})",
                             signal.instrument,
@@ -356,12 +381,74 @@ class Scheduler:
             "topk_spread": intent.scanner_topk_spread,
         }
 
+        thresholds = self._get_thresholds_for_symbol(intent.symbol)
+        pre_blended = self._blend_confidence(intent.scanner_confidence, intent.scanner_score)
+        if not self._passes_threshold(intent.scanner_confidence, pre_blended, thresholds):
+            cancelled = await self._cancel_intent_safe(
+                worker_id=worker_id,
+                intent_id=intent.id,
+                reason="LLM pre-filter: low confidence",
+                context="llm_pre_filter",
+            )
+            if cancelled:
+                self._log_trade_event(
+                    "INTENT_CANCELLED",
+                    {
+                        "intent_id": intent.id,
+                        "symbol": intent.symbol,
+                        "reason": "LLM pre-filter: low confidence",
+                    },
+                )
+                logger.info(
+                    "LLM worker {}: intent {} pre-filtered (conf={}, blended={:.2f})",
+                    worker_id,
+                    intent.id,
+                    intent.scanner_confidence,
+                    pre_blended,
+                )
+            return
+
         decision = await asyncio.to_thread(
             self._agents.decide,
             symbol=intent.symbol,
             trade_date=intent.trade_date,
             qlib_data=qlib_data,
         )
+        self._log_trade_event(
+            "LLM_DECISION",
+            {
+                "intent_id": intent.id,
+                "symbol": intent.symbol,
+                "decision": decision.decision,
+                "risk_report": decision.risk_report,
+            },
+        )
+        if self._memory_journal is not None:
+            try:
+                context = {
+                    "intent_id": intent.id,
+                    "scanner_score": intent.scanner_score,
+                    "scanner_confidence": intent.scanner_confidence,
+                    "score_gap": intent.scanner_score_gap,
+                    "drop_distance": intent.scanner_drop_distance,
+                    "topk_spread": intent.scanner_topk_spread,
+                }
+                if decision.risk_report:
+                    context["risk_report"] = decision.risk_report
+                if decision.final_state:
+                    context["final_state"] = decision.final_state
+                self._memory_journal.log_decision(
+                    symbol=intent.symbol,
+                    side=decision.decision,
+                    decision=decision.decision,
+                    context=context,
+                )
+            except Exception as e:
+                logger.warning(
+                    "MemoryJournal: failed to log decision for {}: {}",
+                    intent.symbol,
+                    e,
+                )
 
         if decision.is_actionable:
             if self._should_pause_new_entries():
@@ -370,6 +457,14 @@ class Scheduler:
                     intent_id=intent.id,
                     reason="Best Day protection active — pausing new entries",
                     context="best_day_pause",
+                )
+                self._log_trade_event(
+                    "INTENT_CANCELLED",
+                    {
+                        "intent_id": intent.id,
+                        "symbol": intent.symbol,
+                        "reason": "Best Day protection active — pausing new entries",
+                    },
                 )
                 logger.warning(
                     "LLM worker {}: cancelled intent {} ({}) due to Best Day protection",
@@ -387,6 +482,34 @@ class Scheduler:
                 scanner_confidence=intent.scanner_confidence,
                 agent_state=decision.final_state,
             )
+            if not self._passes_threshold(
+                intent.scanner_confidence,
+                formatted.confidence_score,
+                thresholds,
+            ):
+                cancelled = await self._cancel_intent_safe(
+                    worker_id=worker_id,
+                    intent_id=intent.id,
+                    reason="LLM post-filter: low confidence",
+                    context="llm_post_filter",
+                )
+                if cancelled:
+                    self._log_trade_event(
+                        "INTENT_CANCELLED",
+                        {
+                            "intent_id": intent.id,
+                            "symbol": intent.symbol,
+                            "reason": "LLM post-filter: low confidence",
+                        },
+                    )
+                    logger.info(
+                        "LLM worker {}: intent {} post-filtered (conf={}, blended={:.2f})",
+                        worker_id,
+                        intent.id,
+                        intent.scanner_confidence,
+                        formatted.confidence_score,
+                    )
+                return
             try:
                 await asyncio.to_thread(
                     self._store.update_intent_decision,
@@ -425,6 +548,14 @@ class Scheduler:
                 context="hold_decision",
             )
             if cancelled:
+                self._log_trade_event(
+                    "INTENT_CANCELLED",
+                    {
+                        "intent_id": intent.id,
+                        "symbol": intent.symbol,
+                        "reason": f"LLM decided {decision.decision}",
+                    },
+                )
                 logger.info(
                     "LLM worker {}: intent {} → HOLD (cancelled)",
                     worker_id,
@@ -742,6 +873,29 @@ class Scheduler:
                 e,
             )
             return
+        if self._memory_journal is not None:
+            try:
+                self._memory_journal.append_trade_result(
+                    symbol=symbol,
+                    pnl=pnl,
+                    reason=exit_reason,
+                )
+            except Exception as e:
+                logger.warning(
+                    "MemoryJournal: failed to append trade result for {}: {}",
+                    symbol,
+                    e,
+                )
+        self._log_trade_event(
+            "TRADE_CLOSED",
+            {
+                "intent_id": intent.id,
+                "symbol": symbol,
+                "position_id": position_id,
+                "pnl": pnl,
+                "reason": exit_reason,
+            },
+        )
         # Call LLM reflect for learning
         if pnl != 0.0:
             try:
@@ -1114,6 +1268,14 @@ class Scheduler:
         Args:
             date_str: Today's date in YYYY-MM-DD format.
         """
+        if self._optimization_engine is not None:
+            try:
+                self._optimization_state = await asyncio.to_thread(
+                    self._optimization_engine.refresh_state
+                )
+            except Exception as e:
+                logger.warning("Optimization refresh failed: {}", e)
+
         if self._alert_service is None:
             return
 
@@ -1189,6 +1351,44 @@ class Scheduler:
         except Exception as e:
             logger.warning("Best Day protection check failed, defaulting to allow entries: {}", e)
             return False
+
+    def _log_trade_event(self, event_type: str, details: dict[str, Any]) -> None:
+        """Safely append an event to TradeJournal if configured."""
+        if self._trade_journal is None:
+            return
+        try:
+            self._trade_journal.log_event(event_type, details)
+        except Exception as e:
+            logger.warning("TradeJournal: failed to log {}: {}", event_type, e)
+
+    def _get_thresholds_for_symbol(self, symbol: str) -> Thresholds:
+        """Return thresholds for a symbol, falling back to global defaults."""
+        if self._optimization_state is None:
+            return Thresholds()
+        if symbol in self._optimization_state.symbol_thresholds:
+            return self._optimization_state.symbol_thresholds[symbol]
+        return self._optimization_state.global_thresholds
+
+    @staticmethod
+    def _confidence_score(confidence: str) -> float:
+        """Map confidence label to numeric score."""
+        return CONFIDENCE_MAP.get(confidence, 0.5)
+
+    @classmethod
+    def _blend_confidence(cls, confidence: str, score: float) -> float:
+        """Blend confidence label score with scanner score."""
+        return 0.6 * cls._confidence_score(confidence) + 0.4 * score
+
+    @classmethod
+    def _passes_threshold(
+        cls, confidence: str, blended: float, thresholds: Thresholds
+    ) -> bool:
+        """Check whether confidence meets configured thresholds."""
+        current = cls._confidence_score(confidence)
+        required = cls._confidence_score(thresholds.min_confidence)
+        if current < required:
+            return False
+        return blended >= thresholds.min_blended_confidence
 
     def _maybe_rollover_best_day_tracker(self) -> None:
         """Reset BestDayTracker at UTC day rollover to avoid cross-day carryover."""

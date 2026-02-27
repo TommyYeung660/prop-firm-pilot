@@ -35,6 +35,7 @@ from src.execution.instrument_registry import InstrumentRegistry
 from src.execution.matchtrader_client import MatchTraderClient
 from src.execution.position_sizer import PositionSizer
 from src.monitor.alert_service import AlertService
+from src.monitor.trade_journal import TradeJournal
 
 # ── Exceptions ──────────────────────────────────────────────────────────────
 
@@ -74,6 +75,7 @@ class ExecutionEngine:
         config: AppConfig,
         alert_service: AlertService | None = None,
         instrument_registry: InstrumentRegistry | None = None,
+        trade_journal: TradeJournal | None = None,
     ) -> None:
         self._store = store
         self._guard = guard
@@ -82,6 +84,7 @@ class ExecutionEngine:
         self._config = config
         self._alert_service = alert_service
         self._registry = instrument_registry
+        self._trade_journal = trade_journal
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -175,6 +178,15 @@ class ExecutionEngine:
             )
             await asyncio.to_thread(self._store.mark_rejected, intent_id, best_day_block_reason)
             await self._send_alert_rejection(symbol, side, best_day_block_reason)
+            self._log_trade_event(
+                "TRADE_REJECTED",
+                {
+                    "intent_id": intent_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "reason": best_day_block_reason,
+                },
+            )
             logger.warning(
                 "ExecutionEngine: intent {} rejected by execution hard gate: {}",
                 intent_id,
@@ -208,6 +220,15 @@ class ExecutionEngine:
             )
             await asyncio.to_thread(self._store.mark_rejected, intent_id, compliance_result.reason)
             await self._send_alert_rejection(symbol, side, compliance_result.reason)
+            self._log_trade_event(
+                "TRADE_REJECTED",
+                {
+                    "intent_id": intent_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "reason": compliance_result.reason,
+                },
+            )
             return
 
         # Step 4.5: Pre-trade quote validation (slippage protection)
@@ -258,6 +279,16 @@ class ExecutionEngine:
 
             if order.success:
                 await asyncio.to_thread(self._store.mark_opened, intent_id, order.position_id)
+                self._log_trade_event(
+                    "TRADE_OPENED",
+                    {
+                        "intent_id": intent_id,
+                        "symbol": symbol,
+                        "side": side,
+                        "position_id": order.position_id,
+                        "volume": trade_plan.volume,
+                    },
+                )
                 logger.info(
                     "ExecutionEngine: intent {} opened as position {} ({} {} {:.2f} lots)",
                     intent_id,
@@ -364,6 +395,15 @@ class ExecutionEngine:
                 )
             else:
                 await asyncio.to_thread(self._store.mark_failed, intent_id, order.message)
+                self._log_trade_event(
+                    "TRADE_FAILED",
+                    {
+                        "intent_id": intent_id,
+                        "symbol": symbol,
+                        "side": side,
+                        "reason": order.message,
+                    },
+                )
                 logger.warning(
                     "ExecutionEngine: intent {} execution failed: {}",
                     intent_id,
@@ -373,6 +413,15 @@ class ExecutionEngine:
         except Exception as e:
             logger.error("ExecutionEngine: API error on intent {}: {}", intent_id, e)
             await asyncio.to_thread(self._store.mark_failed, intent_id, str(e))
+            self._log_trade_event(
+                "TRADE_FAILED",
+                {
+                    "intent_id": intent_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "reason": str(e),
+                },
+            )
             await self._send_alert_failed(symbol, side, str(e))
 
     # ── Helpers ─────────────────────────────────────────────────────────
@@ -687,6 +736,15 @@ class ExecutionEngine:
                     config_symbol,
                 )
         return config_symbol
+
+    def _log_trade_event(self, event_type: str, details: dict[str, Any]) -> None:
+        """Safely append an event to TradeJournal if configured."""
+        if self._trade_journal is None:
+            return
+        try:
+            self._trade_journal.log_event(event_type, details)
+        except Exception as e:
+            logger.warning("TradeJournal: failed to log {}: {}", event_type, e)
 
     # ── Alert Helpers ───────────────────────────────────────────────────
 

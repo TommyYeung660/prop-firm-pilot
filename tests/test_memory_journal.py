@@ -235,3 +235,28 @@ def test_agent_decision_empty_fields(tmp_path, mock_datetime, trade_plan, signal
     # Empty risk report and state should NOT show sections (skip empty)
     assert "**Risk Report**:" not in content
     assert "**Final State**:" not in content
+
+
+def test_log_decision_and_append_result(tmp_path, mock_datetime):
+    """Log a decision and append trade result to the same daily file."""
+    memory_dir = tmp_path / "MEMORY"
+    journal = MemoryJournal(memory_dir)
+
+    journal.log_decision(
+        symbol="EURUSD",
+        side="HOLD",
+        decision="HOLD",
+        context={"reason": "low_confidence"},
+    )
+    journal.append_trade_result(symbol="EURUSD", pnl=12.3, reason="tp_hit")
+
+    file_path = memory_dir / "2026-02-20.md"
+    content = file_path.read_text(encoding="utf-8")
+
+    assert "## 14:30:45 UTC - EURUSD HOLD" in content
+    assert "### Decision Context" in content
+    assert "**Decision**: HOLD" in content
+    assert "**reason**: low_confidence" in content
+    assert "### Trade Result" in content
+    assert "**PnL**: 12.3" in content
+    assert "**Reason**: tp_hit" in content

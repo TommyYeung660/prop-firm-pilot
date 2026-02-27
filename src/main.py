@@ -366,6 +366,7 @@ async def _run_scheduler(config: AppConfig) -> None:
     from src.execution.engine import ExecutionEngine
     from src.execution.instrument_registry import InstrumentRegistry
     from src.execution.position_sizer import PositionSizer
+    from src.optimize.optimization_engine import OptimizationEngine
     from src.scheduler.scheduler import Scheduler
 
     logger.info("PropFirmPilot: starting in SCHEDULER mode (24/7 async pipeline)")
@@ -394,6 +395,19 @@ async def _run_scheduler(config: AppConfig) -> None:
         profit_target_pct=config.compliance.profit_target,
         daily_loss_pct=config.compliance.daily_drawdown_limit,
         max_drawdown_pct=config.compliance.max_drawdown_limit,
+    )
+
+    journal = TradeJournal(config.monitor.trade_journal_path)
+    memory_journal = MemoryJournal(config.monitor.memory_dir)
+    optimization_engine = OptimizationEngine(
+        store=store,
+        journal=journal,
+        state_path=config.optimization.state_path,
+        pnl_days=config.optimization.pnl_lookback_days,
+        win_days=config.optimization.winrate_lookback_days,
+        ab_model_a=config.optimization.ab_model_a,
+        ab_model_b=config.optimization.ab_model_b,
+        ab_ratio=config.optimization.ab_ratio,
     )
 
     async with MatchTraderClient(
@@ -430,6 +444,7 @@ async def _run_scheduler(config: AppConfig) -> None:
             config=config,
             alert_service=alert_service,
             instrument_registry=registry,
+            trade_journal=journal,
         )
 
         scheduler = Scheduler(
@@ -441,10 +456,12 @@ async def _run_scheduler(config: AppConfig) -> None:
             matchtrader=client,
             alert_service=alert_service,
             instrument_registry=registry,
+            optimization_engine=optimization_engine,
+            memory_journal=memory_journal,
+            trade_journal=journal,
         )
 
         # ── Telegram bot command handler ───────────────────────────────
-        journal = TradeJournal(config.monitor.trade_journal_path)
         bot_handler = TelegramBotHandler(
             bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),

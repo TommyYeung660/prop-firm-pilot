@@ -6,6 +6,7 @@ compliance audit trails, and TradingAgents' reflect_and_remember() feedback.
 """
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,8 @@ class TradeJournal:
             "type": event_type,
             **(details or {}),
         }
+        if "timestamp" not in entry:
+            entry["timestamp"] = datetime.now(timezone.utc).isoformat()
         self._append(entry)
 
     def log_equity_snapshot(
@@ -116,6 +119,38 @@ class TradeJournal:
                 except json.JSONDecodeError:
                     continue
                 if entry.get("type") == "TRADE":
+                    results.append(entry)
+
+        return results
+
+    def get_closed_trades(self, days: int = 7) -> list[dict[str, Any]]:
+        """Read closed trade records from the last N days."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        results = []
+        if not self._path.exists():
+            return results
+
+        with open(self._path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("type") != "TRADE":
+                    continue
+                if entry.get("status") != "CLOSED":
+                    continue
+                timestamp = entry.get("timestamp")
+                if not timestamp:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(timestamp)
+                except ValueError:
+                    continue
+                if ts >= cutoff:
                     results.append(entry)
 
         return results

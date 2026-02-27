@@ -130,20 +130,20 @@ class TestClientLifecycle:
         assert client.is_authenticated is False
 
     async def test_context_manager_enters(self, client_config: dict) -> None:
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 assert client._session is not None
-                MockSession.assert_called_once()
+                mock_session_cls.assert_called_once()
 
     async def test_context_manager_exits(self, client_config: dict) -> None:
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             client = MatchTraderClient(**client_config)
             await client.__aenter__()
@@ -184,11 +184,11 @@ class TestLoginFlow:
             }
         )
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 tokens = await client.login()
@@ -231,11 +231,11 @@ class TestLoginFlow:
             }
         )
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 tokens = await client.login()
@@ -268,11 +268,11 @@ class TestLoginFlow:
             }
         )
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             config = client_config.copy()
             config["account_id"] = "950552"
@@ -303,11 +303,11 @@ class TestLoginFlow:
             }
         )
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             config = client_config.copy()
             config["account_id"] = None
@@ -321,11 +321,11 @@ class TestLoginFlow:
     ) -> None:
         mock_response.json = MagicMock(return_value={"token": "rt", "accounts": []})
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 with pytest.raises(RuntimeError, match="No trading accounts found"):
@@ -347,11 +347,11 @@ class TestLoginFlow:
             }
         )
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 with pytest.raises(RuntimeError, match="Account 950552 not found"):
@@ -367,11 +367,11 @@ class TestLoginFlow:
             }
         )
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 with pytest.raises(RuntimeError, match="Could not extract systemUUID"):
@@ -391,11 +391,11 @@ class TestLoginFlow:
             }
         )
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 with pytest.raises(RuntimeError, match="Could not extract tradingApiToken"):
@@ -426,11 +426,11 @@ class TestTokenRefresh:
             }
         )
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 await client.login()
@@ -484,11 +484,11 @@ class TestTokenRefresh:
 
         mock_response.json = MagicMock(side_effect=mock_json_side_effect)
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 # Use a short refresh time for testing
@@ -519,10 +519,10 @@ class TestTokenRefresh:
 
     async def test_ensure_auth_raises_when_not_authenticated(self, client_config: dict) -> None:
         """Test _ensure_auth raises error before login."""
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 with pytest.raises(RuntimeError, match="Not authenticated"):
@@ -530,10 +530,10 @@ class TestTokenRefresh:
 
     async def test_refresh_token_requires_existing_auth(self, client_config: dict) -> None:
         """Test refresh_token raises error when not authenticated."""
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 with pytest.raises(RuntimeError, match="Cannot refresh"):
@@ -552,14 +552,14 @@ class TestTokenRefresh:
             ],
         }
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.close = AsyncMock()
             resp = AsyncMock()
             resp.status_code = 200
             resp.json = MagicMock(return_value=login_resp)
             mock_session.request = AsyncMock(return_value=resp)
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 # Initial login should use INFO
@@ -592,11 +592,11 @@ class TestErrorHandling:
         mock_response.status_code = 401
         mock_response.text = "Unauthorized"
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 # Set up mock authentication
@@ -616,11 +616,11 @@ class TestErrorHandling:
         mock_response.status_code = 429
         mock_response.text = "Too Many Requests"
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 client._tokens = AuthTokens(
@@ -639,11 +639,11 @@ class TestErrorHandling:
         mock_response.status_code = 500
         mock_response.text = "Internal Server Error"
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 client._tokens = AuthTokens(
@@ -668,11 +668,11 @@ class TestRateLimitingIntegration:
     ) -> None:
         mock_response.json = MagicMock(return_value={})
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 client._tokens = AuthTokens(
@@ -692,11 +692,11 @@ class TestRateLimitingIntegration:
     ) -> None:
         mock_response.json = MagicMock(return_value={})
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 client._tokens = AuthTokens(
@@ -720,10 +720,10 @@ class TestRateLimitingIntegration:
                 assert client._rate_limiter.can_proceed() is False
 
     async def test_rate_limit_exhausted_raises_error(self, client_config: dict) -> None:
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(daily_request_limit=100, **client_config) as client:
                 client._tokens = AuthTokens(
@@ -746,11 +746,11 @@ class TestRateLimitingIntegration:
         """Read/query endpoints should remain available even when write budget is exhausted."""
         mock_response.json = MagicMock(return_value={"ok": True})
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(daily_request_limit=100, **client_config) as client:
                 client._tokens = AuthTokens(
@@ -788,11 +788,11 @@ class TestTradingOperations:
             }
         )
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 client._tokens = AuthTokens(
@@ -836,11 +836,11 @@ class TestTradingOperations:
             ]
         )
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 client._tokens = AuthTokens(
@@ -868,11 +868,11 @@ class TestTradingOperations:
     ) -> None:
         mock_response.json = MagicMock(return_value={"orderId": "new-order-123"})
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 client._tokens = AuthTokens(
@@ -905,11 +905,11 @@ class TestTradingOperations:
         mock_response.status_code = 400
         mock_response.text = "Insufficient margin"
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 client._tokens = AuthTokens(
@@ -931,11 +931,11 @@ class TestTradingOperations:
     ) -> None:
         mock_response.json = MagicMock(return_value={"result": "closed"})
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 client._tokens = AuthTokens(
@@ -958,11 +958,11 @@ class TestTradingOperations:
         modify_ok = {"status": "OK", "errorMessage": "", "result": "modified"}
         mock_response.json = MagicMock(return_value=modify_ok)
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 client._tokens = AuthTokens(
@@ -990,11 +990,11 @@ class TestTradingOperations:
         modify_ok = {"status": "OK", "errorMessage": "", "result": "modified"}
         mock_response.json = MagicMock(return_value=modify_ok)
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 client._tokens = AuthTokens(
@@ -1060,11 +1060,11 @@ class TestInstrumentInfo:
             ]
         )
 
-        with patch("src.execution.matchtrader_client.AsyncSession") as MockSession:
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
             mock_session = AsyncMock()
             mock_session.request = AsyncMock(return_value=mock_response)
             mock_session.close = AsyncMock()
-            MockSession.return_value = mock_session
+            mock_session_cls.return_value = mock_session
 
             async with MatchTraderClient(**client_config) as client:
                 client._tokens = AuthTokens(

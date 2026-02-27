@@ -74,6 +74,46 @@ class MemoryJournal:
             date_str,
         )
 
+    def log_decision(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        decision: str,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        """Log an LLM decision (including HOLD) to today's Markdown file."""
+        now = datetime.now(timezone.utc)
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S UTC")
+
+        content = self._format_decision_block(
+            time_str=time_str,
+            symbol=symbol,
+            side=side,
+            decision=decision,
+            context=context or {},
+        )
+        file_path = self._memory_dir / f"{date_str}.md"
+        self._append_to_file(file_path, content)
+        logger.info("MemoryJournal: logged LLM decision for {} ({})", symbol, date_str)
+
+    def append_trade_result(self, *, symbol: str, pnl: float, reason: str) -> None:
+        """Append a trade result block to today's Markdown file."""
+        now = datetime.now(timezone.utc)
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S UTC")
+
+        content = self._format_trade_result_block(
+            time_str=time_str,
+            symbol=symbol,
+            pnl=pnl,
+            reason=reason,
+        )
+        file_path = self._memory_dir / f"{date_str}.md"
+        self._append_to_file(file_path, content)
+        logger.info("MemoryJournal: appended trade result for {} ({})", symbol, date_str)
+
     # ── Private Methods ────────────────────────────────────────────────────
 
     def _format_trade_block(
@@ -142,6 +182,52 @@ class MemoryJournal:
         lines.append("---")
         lines.append("")
 
+        return "\n".join(lines)
+
+    def _format_decision_block(
+        self,
+        *,
+        time_str: str,
+        symbol: str,
+        side: str,
+        decision: str,
+        context: dict[str, Any],
+    ) -> str:
+        """Format a generic decision block for scheduler LLM outputs."""
+        lines = []
+        lines.append(f"## {time_str} - {symbol} {decision}")
+        lines.append("")
+        lines.append("### Decision Context")
+        lines.append("")
+        lines.append(f"- **Symbol**: {symbol}")
+        lines.append(f"- **Side**: {side}")
+        lines.append(f"- **Decision**: {decision}")
+        for key, value in context.items():
+            lines.append(f"- **{key}**: {value}")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _format_trade_result_block(
+        self,
+        *,
+        time_str: str,
+        symbol: str,
+        pnl: float,
+        reason: str,
+    ) -> str:
+        """Format a trade result append block."""
+        lines = []
+        lines.append("### Trade Result")
+        lines.append("")
+        lines.append(f"- **Time**: {time_str}")
+        lines.append(f"- **Symbol**: {symbol}")
+        lines.append(f"- **PnL**: {pnl}")
+        lines.append(f"- **Reason**: {reason}")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
         return "\n".join(lines)
 
     def _append_to_file(self, file_path: Path, content: str) -> None:
