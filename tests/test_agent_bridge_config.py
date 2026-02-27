@@ -5,6 +5,7 @@ Phase 1 (BUG #6): get_global_news away from OpenAI (404 via Volcengine) to local
 Phase 2: Route ALL data sources to Alpha Vantage (premium, 75 req/min).
 Phase 3: Route get_global_news to Alpha Vantage (topic-based macro news).
 """
+import os
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -59,8 +60,6 @@ class TestAgentBridgeToolVendors:
         bridge = AgentBridge(
             agents_path=tmp_path,
             config={
-                "deep_think_llm": "volcengine/glm-4.7",
-                "quick_think_llm": "volcengine/glm-4.7",
                 "output_language": "繁體中文",
                 "tool_vendors": {
                     "get_global_news": "alpha_vantage",
@@ -91,7 +90,6 @@ class TestAgentBridgeToolVendors:
         bridge = AgentBridge(
             agents_path=tmp_path / "nonexistent",
             config={
-                "deep_think_llm": "volcengine/glm-4.7",
                 "tool_vendors": {
                     "get_global_news": "alpha_vantage",
                 },
@@ -102,6 +100,48 @@ class TestAgentBridgeToolVendors:
         assert bridge._using_mock is True
         # Config should still have tool_vendors
         assert bridge._config["tool_vendors"]["get_global_news"] == "alpha_vantage"
+
+    def test_ensure_loaded_loads_llm_env_from_tradingagents(self, tmp_path, monkeypatch) -> None:
+        """LLM env keys from TradingAgents .env should override os.environ."""
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "RIGHTCODE_API_KEY=rc_key\n"
+            "VOLCENGINE_API_KEY=ve_key\n"
+            "AIHUBMIX_API_KEY=ah_key\n"
+            "LLM_QUICK_THINK_PRIMARY_MODEL=rightcodes/gpt-5.2\n"
+            "NOT_LLM_KEY=should_not_apply\n",
+            encoding="utf-8",
+        )
+
+        class DummyGraph:
+            def __init__(self, selected_analysts, config):
+                del selected_analysts, config
+
+        fake_graph_module = SimpleNamespace(TradingAgentsGraph=DummyGraph)
+        fake_default_module = SimpleNamespace(DEFAULT_CONFIG={})
+
+        def fake_import(name: str):
+            if name == "tradingagents.graph.trading_graph":
+                return fake_graph_module
+            if name == "tradingagents.default_config":
+                return fake_default_module
+            raise ModuleNotFoundError(name)
+
+        monkeypatch.setattr("src.decision.agent_bridge.importlib.import_module", fake_import)
+        monkeypatch.delenv("RIGHTCODE_API_KEY", raising=False)
+        monkeypatch.delenv("VOLCENGINE_API_KEY", raising=False)
+        monkeypatch.delenv("AIHUBMIX_API_KEY", raising=False)
+        monkeypatch.delenv("LLM_QUICK_THINK_PRIMARY_MODEL", raising=False)
+        monkeypatch.delenv("NOT_LLM_KEY", raising=False)
+
+        bridge = AgentBridge(agents_path=tmp_path, config={})
+        bridge._ensure_loaded()
+
+        assert os.getenv("RIGHTCODE_API_KEY") == "rc_key"
+        assert os.getenv("VOLCENGINE_API_KEY") == "ve_key"
+        assert os.getenv("AIHUBMIX_API_KEY") == "ah_key"
+        assert os.getenv("LLM_QUICK_THINK_PRIMARY_MODEL") == "rightcodes/gpt-5.2"
+        assert os.getenv("NOT_LLM_KEY") is None
 
     def test_ensure_loaded_overrides_portable_paths(self, tmp_path, monkeypatch) -> None:
         """AgentBridge should override bad default project/workspace/data paths."""
