@@ -1078,6 +1078,7 @@ class Scheduler:
                         side=pos.side,
                         volume=pos.volume,
                         sl=pos.open_price,
+                        tp=pos.tp_price,
                     )
                     if result.success:
                         self._breakeven_applied.add(pos_id)

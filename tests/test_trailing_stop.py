@@ -162,6 +162,23 @@ class TestApplyBreakevenStops:
         # Verify position added to _breakeven_applied
         assert "POS-1" in scheduler._breakeven_applied
 
+    async def test_breakeven_passes_tp_price_when_present(
+        self, scheduler: Scheduler, mock_matchtrader: AsyncMock, store: DecisionStore
+    ) -> None:
+        """Breakeven modify should preserve existing TP price when present."""
+        pos = _make_position(
+            side="BUY",
+            open_price=1.10000,
+            current_price=1.10600,
+            tp_price=1.11000,
+        )
+        intent = _insert_opened_intent_for_breakeven(store, "INT-1", "EURUSD.", "POS-1", 100.0)
+
+        await scheduler._apply_breakeven_stops([pos], [intent])
+
+        call_kwargs = mock_matchtrader.modify_position.call_args.kwargs
+        assert call_kwargs["tp"] == 1.11000
+
     async def test_buy_below_50_percent_threshold_no_modify(
         self, scheduler: Scheduler, mock_matchtrader: AsyncMock, store: DecisionStore
     ) -> None:
