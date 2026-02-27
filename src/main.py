@@ -77,8 +77,6 @@ class PropFirmPilot:
             agents_path=config.agents.project_path,
             selected_analysts=config.agents.selected_analysts,
             config=build_agent_config(
-                deep_think_llm=config.agents.deep_think_llm,
-                quick_think_llm=config.agents.quick_think_llm,
                 output_language=config.agents.output_language,
             ),
         )
@@ -382,8 +380,6 @@ async def _run_scheduler(config: AppConfig) -> None:
         agents_path=config.agents.project_path,
         selected_analysts=config.agents.selected_analysts,
         config=build_agent_config(
-            deep_think_llm=config.agents.deep_think_llm,
-            quick_think_llm=config.agents.quick_think_llm,
             output_language=config.agents.output_language,
         ),
     )

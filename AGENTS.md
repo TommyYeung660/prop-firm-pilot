@@ -184,7 +184,7 @@ Required secrets (see `.env.example`):
 - `MATCHTRADER_API_URL`, `MATCHTRADER_USERNAME`, `MATCHTRADER_PASSWORD` — broker API
 - `ITICK_API_KEY`, `TRADERMADE_API_KEY` — FX data providers
 - `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN` — inter-project sync
-- `LLM_API_KEY`, `LLM_BASE_URL` — LLM for TradingAgents
+- TradingAgents LLM 設定在 `../../TradingAgents/.env`（`RIGHTCODE_*`, `VOLCENGINE_*`, `AIHUBMIX_*`, `LLM_*`）
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — alert notifications
 
 **Never commit `.env` or hardcode secrets.**

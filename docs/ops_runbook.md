@@ -13,8 +13,7 @@
 * `TRADERMADE_API_KEY` : TraderMade FX 數據供應商金鑰
 * `TELEGRAM_BOT_TOKEN` : Telegram 機器人 API 權杖，用於發送警報
 * `TELEGRAM_CHAT_ID` : Telegram 聊天或群組 ID，用於接收警報
-* `LLM_API_KEY` : TradingAgents LLM 的 API 金鑰
-* `LLM_BASE_URL` : LLM 終端節點網址
+* TradingAgents LLM 設定在 `../../TradingAgents/.env`（`RIGHTCODE_*`, `VOLCENGINE_*`, `AIHUBMIX_*`, `LLM_*`）
 * `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN` : 用於 Dropbox 同步
 
 配置文件路徑為 `config/default.yaml`，運行時會與 `config/e8_signature_50k.yaml` 合併。

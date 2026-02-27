@@ -5,13 +5,17 @@ with scanner signals and returns BUY/SELL/HOLD decisions.
 
 import asyncio
 import importlib
+import os
 import random
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from dotenv import dotenv_values
 from loguru import logger
+
+LLM_ENV_PREFIXES = ("RIGHTCODE_", "VOLCENGINE_", "AIHUBMIX_", "LLM_")
 
 
 class AgentDecision:
@@ -98,10 +102,30 @@ class AgentBridge:
         """Whether the bridge is using the mock fallback instead of real TradingAgents."""
         return self._using_mock
 
+    def _load_tradingagents_env(self) -> None:
+        env_path = self._agents_path / ".env"
+        if not env_path.exists():
+            logger.warning("AgentBridge: TradingAgents .env not found at {}", env_path)
+            return
+
+        values = dotenv_values(env_path)
+        if not values:
+            logger.warning("AgentBridge: TradingAgents .env empty at {}", env_path)
+            return
+
+        for key, value in values.items():
+            if not key or value is None:
+                continue
+            if not key.startswith(LLM_ENV_PREFIXES):
+                continue
+            os.environ[key] = value
+
     def _ensure_loaded(self) -> None:
         """Lazy-load TradingAgentsGraph on first use."""
         if self._graph is not None:
             return
+
+        self._load_tradingagents_env()
 
         # Add TradingAgents to sys.path
         agents_str = str(self._agents_path)

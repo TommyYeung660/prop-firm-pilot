@@ -81,8 +81,6 @@ FX_PAIR_CONTEXT: dict[str, dict[str, Any]] = {
 
 
 def build_agent_config(
-    deep_think_llm: str = "volcengine/glm-4.7",
-    quick_think_llm: str = "volcengine/glm-4.7",
     output_language: str = "繁體中文",
 ) -> dict[str, Any]:
     """Build TradingAgents config dict for FX trading.
@@ -91,8 +89,6 @@ def build_agent_config(
         Config dict ready to pass to TradingAgentsGraph().
     """
     return {
-        "deep_think_llm": deep_think_llm,
-        "quick_think_llm": quick_think_llm,
         "output_language": output_language,
         "market_type": "fx",  # newly added for TradingAgents integration
         "data_vendors": {
