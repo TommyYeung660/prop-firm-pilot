@@ -3,6 +3,10 @@
 
 account_name: "e8_one_5k_challenge"
 
+symbols:
+  - EURUSD
+  - XAUUSD
+
 account:
   plan: "E8 One Challenge"
   initial_balance: 5000
@@ -24,10 +28,20 @@ compliance:
 
 execution:
   max_positions: 3
-  default_risk_per_trade: 0.005  # 每筆交易風險 0.5% ($25)
+  default_risk_pct: 0.005        # 每筆交易風險 0.5% ($25)
   max_slippage_pips: 2.0
   random_delay_min: 0.5
   random_delay_max: 2.0
+
+decision_store:
+  db_path: data/decisions_e8_one_5k.db
+
+monitor:
+  trade_journal_path: data/trade_journal_e8_one_5k.jsonl
+  memory_dir: MEMORY_E8_ONE_5K
+
+optimization:
+  state_path: data/optimization_state_e8_one_5k.json
 
 instruments:
   EURUSD:
@@ -55,6 +69,3 @@ instruments:
     pip_value: 1.0
     min_lot: 0.01
     max_lot: 5.0
-
-monitor:
-  memory_dir: "MEMORY"
