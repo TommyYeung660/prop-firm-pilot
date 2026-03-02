@@ -72,6 +72,10 @@ class ComplianceConfig(BaseModel):
     best_day_stop: float = Field(
         default=0.85, description="Stop new trades at 85% of Best Day limit"
     )
+    hwm_state_path: str = Field(
+        default="data/hwm_state.json",
+        description="File path for HighWaterMarkTracker persistence (dynamic drawdown only)",
+    )
 
 
 class DataConfig(BaseModel):

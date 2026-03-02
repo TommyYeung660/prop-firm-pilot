@@ -144,3 +144,10 @@ class TestHighWaterMarkTracker:
         # loss_level = 5000 (locked)
         # If equity is 5350, remaining = 5350 - 5000 = 350
         assert tracker.max_drawdown_remaining(equity=5350.0) == pytest.approx(350.0)
+
+
+def test_config_has_hwm_state_path():
+    from src.config import ComplianceConfig
+    c = ComplianceConfig(drawdown_type="dynamic")
+    assert hasattr(c, "hwm_state_path")
+    assert c.hwm_state_path == "data/hwm_state.json"
