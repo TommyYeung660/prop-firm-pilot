@@ -1332,6 +1332,10 @@ class Scheduler:
                 else 0.0
             )
 
+
+            max_dd_ref = (
+                self._hwm_tracker.high_water_mark if self._hwm_tracker else None
+            )
             await self._alert_service.daily_summary(
                 date=date_str,
                 trades=trades_today,
@@ -1340,6 +1344,7 @@ class Scheduler:
                 daily_dd_pct=daily_dd_pct,
                 open_positions=len(open_positions),
                 day_start_balance=day_start_balance,
+                max_dd_reference=max_dd_ref,
             )
             logger.info("Daily summary sent for {}", date_str)
         except Exception as e:
