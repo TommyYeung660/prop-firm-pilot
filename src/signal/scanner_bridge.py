@@ -85,12 +85,14 @@ class ScannerBridge:
         date: str | None = None,
         tickers: list[str] | None = None,
         force_retrain: bool = True,
+        interval: str = "1d",
     ) -> list[ScannerSignal]:
         """Run the scanner pipeline and return parsed signals.
 
         Args:
             date: Override date for the pipeline (YYYY-MM-DD). None = today.
             tickers: Optional list of tickers to scan (comma separated string passed to CLI).
+            interval: Data interval for multi-timeframe scanning (e.g. '1d', '4h', '1h').
 
         Returns:
             List of ScannerSignal sorted by rank (best first).
@@ -129,6 +131,7 @@ class ScannerBridge:
         if tickers:
             cmd.extend(["--tickers", ",".join(tickers)])
 
+        cmd.extend(["--interval", interval])
         try:
             result = subprocess.run(
                 cmd,

@@ -409,3 +409,35 @@ class TestE2EPipeline:
         final = store.get_intent(intent.id)
         assert final is not None
         assert final.status == "cancelled"
+
+
+
+# ── Section 4: Interval Parameter (v1.2.0) ────────────────────────────────
+
+
+class TestIntervalParameter:
+    """Tests for ScannerBridge.run_pipeline() interval parameter."""
+
+    def test_run_pipeline_passes_interval(self, tmp_path: Path) -> None:
+        """run_pipeline should pass --interval to the scanner subprocess."""
+        bridge = ScannerBridge(scanner_path=tmp_path)
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
+            bridge.run_pipeline(date="2026-03-01", interval="4h")
+
+            cmd = mock_run.call_args[0][0]
+            assert "--interval" in cmd
+            assert "4h" in cmd
+
+    def test_run_pipeline_default_interval_1d(self, tmp_path: Path) -> None:
+        """Default interval should be '1d' (not passed to cmd if default)."""
+        bridge = ScannerBridge(scanner_path=tmp_path)
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
+            bridge.run_pipeline(date="2026-03-01")
+
+            cmd = mock_run.call_args[0][0]
+            assert "--interval" in cmd
+            assert "1d" in cmd
