@@ -259,6 +259,7 @@ class PropFirmPilot:
             open_positions=len(open_positions),
             daily_pnl=balance_info.equity - balance_info.balance,
             total_pnl=balance_info.equity - self.config.account.initial_balance,
+            # TODO: wire HWM tracker for legacy single-cycle mode
             equity_high_water_mark=self.config.account.initial_balance,
         )
 
