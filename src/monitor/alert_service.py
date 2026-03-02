@@ -259,6 +259,7 @@ class AlertService:
         daily_dd_pct: float,
         open_positions: int = 0,
         day_start_balance: float | None = None,
+        max_dd_reference: float | None = None,
     ) -> bool:
         """Send end-of-day summary with profit target progress and risk status."""
         emoji = "📊" if pnl >= 0 else "📉"
@@ -284,8 +285,10 @@ class AlertService:
             buffer = self.daily_loss_amount - daily_loss_used
             lines.append(f"• Daily loss buffer: ${buffer:,.2f}")
         if self.max_drawdown_amount > 0:
-            max_loss = max(0.0, self._initial_balance - equity)
-            max_buffer = self.max_drawdown_amount - max_loss
+            ref = max_dd_reference or self._initial_balance
+            dd_limit = ref * self._max_drawdown_pct
+            max_loss = max(0.0, ref - equity)
+            max_buffer = dd_limit - max_loss
             lines.append(f"• Max DD buffer: ${max_buffer:,.2f}")
 
         return await self.send("\n".join(lines))
@@ -297,6 +300,7 @@ class AlertService:
         equity: float,
         positions: list[dict[str, Any]],
         day_start_balance: float | None = None,
+        max_dd_reference: float | None = None,
     ) -> str:
         """Format profit status for /profit command response.
 
@@ -341,8 +345,10 @@ class AlertService:
             daily_buffer = self.daily_loss_amount - daily_loss_used
             lines.append(f"• Daily loss buffer: ${daily_buffer:,.2f}")
         if self.max_drawdown_amount > 0:
-            max_loss = max(0.0, self._initial_balance - equity)
-            max_buffer = self.max_drawdown_amount - max_loss
+            ref = max_dd_reference or self._initial_balance
+            dd_limit = ref * self._max_drawdown_pct
+            max_loss = max(0.0, ref - equity)
+            max_buffer = dd_limit - max_loss
             lines.append(f"• Max DD buffer: ${max_buffer:,.2f}")
 
         return "\n".join(lines)

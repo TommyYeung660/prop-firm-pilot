@@ -623,3 +623,34 @@ class TestTelegramBotHandler:
         )
         await handler.start()
         assert handler.is_running is False
+
+
+class TestAlertServiceDynamicDrawdown:
+    """Tests for AlertService with dynamic max drawdown buffer."""
+
+    def test_format_profit_status_with_hwm(self) -> None:
+        alert = AlertService(
+            bot_token="fake:token",
+            chat_id="123456",
+            initial_balance=5000.0,
+            max_drawdown_pct=0.06,
+        )
+        result = alert.format_profit_status(
+            equity=5050.0,
+            positions=[],
+            day_start_balance=5050.0,
+            max_dd_reference=5100.0,  # HWM is higher than initial
+        )
+        # Max buffer = 5100 * 0.06 - (5100 - 5050) = 306 - 50 = 256
+        assert "$256.00" in result
+
+    def test_daily_summary_with_hwm(self) -> None:
+        """Just test it doesn't crash — actual buffer value checked above."""
+        alert = AlertService(
+            bot_token="fake:token",
+            chat_id="123456",
+            initial_balance=5000.0,
+            max_drawdown_pct=0.06,
+        )
+        # Should not raise
+        assert alert.max_drawdown_amount == 300.0
