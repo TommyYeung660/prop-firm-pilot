@@ -47,6 +47,7 @@ from src.optimize.optimization_engine import OptimizationEngine
 from src.optimize.optimization_state import OptimizationState, Thresholds
 from src.scheduler.market_hours import MarketHoursChecker
 from src.scheduler.session_cadence import SessionCadence
+from src.scheduler.volatility_monitor import VolatilityMonitor
 from src.signal.scanner_bridge import ScannerBridge
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -140,6 +141,9 @@ class Scheduler:
 
         # v1.2.0: Session-aware scanner cadence
         self._session_cadence = SessionCadence(config.scheduler)
+
+        # v1.2.0: Volatility-triggered re-scans
+        self._volatility_monitor = VolatilityMonitor(config.scheduler, config.symbols)
     # ── Public API ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -158,6 +162,10 @@ class Scheduler:
         # Spawn configurable number of LLM workers
         for i in range(self._config.scheduler.llm_worker_count):
             tasks.append(self._llm_worker_loop(worker_id=f"llm-{i}"))
+
+        # v1.2.0: Volatility monitor loop (if enabled)
+        if self._config.scheduler.volatility_trigger_enabled:
+            tasks.append(self._volatility_monitor_loop())
 
         await asyncio.gather(*tasks)
 
@@ -1307,6 +1315,50 @@ class Scheduler:
                     intent.position_id if intent.position_id else "unknown",
                     e,
                 )
+
+    async def _volatility_monitor_loop(self) -> None:
+        """Poll quotes and trigger re-scan on significant price moves."""
+        logger.info("Volatility monitor loop: started")
+        while self._running:
+            try:
+                await self._wait_for_market_open("Volatility monitor")
+                now = self._now_utc()
+
+                for symbol in self._config.symbols:
+                    try:
+                        # Map config symbol to broker symbol if needed
+                        broker_symbol = symbol
+                        if self._registry is not None:
+                            broker_symbol = self._registry.to_broker(symbol)
+                        quote = await self._matchtrader.get_quote(broker_symbol)
+                        mid_price = (quote.bid + quote.ask) / 2
+                        self._volatility_monitor.record_quote(symbol, mid_price, now)
+                    except Exception as e:
+                        logger.debug("Volatility monitor: quote failed for {}: {}", symbol, e)
+
+                triggered, symbol, pct = self._volatility_monitor.check_triggers(now)
+                if triggered:
+                    self._rescan_event.set()
+                    await self._send_alert(
+                        f"\U0001f4c8 <b>Volatility Trigger</b>\n"
+                        f"\u2022 {symbol} moved {pct:+.2f}% in "
+                        f"{self._config.scheduler.volatility_window_minutes}min\n"
+                        f"\u2022 Triggering early scan"
+                    )
+
+            except asyncio.CancelledError:
+                logger.info("Volatility monitor loop: cancelled")
+                return
+            except Exception as e:
+                logger.error("Volatility monitor loop error: {}", e)
+
+            try:
+                await asyncio.sleep(self._config.scheduler.volatility_poll_interval_seconds)
+            except asyncio.CancelledError:
+                logger.info("Volatility monitor loop: cancelled during sleep")
+                return
+
+        logger.info("Volatility monitor loop: stopped")
 
     async def _daily_summary_loop(self) -> None:
         """Send a daily summary at the configured UTC hour.
