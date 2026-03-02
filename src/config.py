@@ -214,6 +214,21 @@ class SchedulerConfig(BaseModel):
         description="Weekend market closure settings",
     )
 
+    # v1.2.0: Session-aware scanning cadence
+    session_aware_enabled: bool = Field(
+        default=False, description="Enable session-aware scanner interval adjustment"
+    )
+    active_session_interval_seconds: int = Field(
+        default=3600, description="Scanner interval during active sessions (London/NY overlap, 1h)"
+    )
+    quiet_session_interval_seconds: int = Field(
+        default=14400, description="Scanner interval during quiet hours (Asia, 4h)"
+    )
+    london_open_utc: int = Field(default=7, description="London session open hour (UTC)")
+    london_close_utc: int = Field(default=16, description="London session close hour (UTC)")
+    ny_open_utc: int = Field(default=12, description="New York session open hour (UTC)")
+    ny_close_utc: int = Field(default=21, description="New York session close hour (UTC)")
+
 
 class LoggingConfig(BaseModel):
     """Logging configuration."""
