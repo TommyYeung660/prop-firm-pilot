@@ -46,6 +46,7 @@ from src.monitor.trade_journal import TradeJournal
 from src.optimize.optimization_engine import OptimizationEngine
 from src.optimize.optimization_state import OptimizationState, Thresholds
 from src.scheduler.market_hours import MarketHoursChecker
+from src.scheduler.session_cadence import SessionCadence
 from src.signal.scanner_bridge import ScannerBridge
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -136,6 +137,9 @@ class Scheduler:
 
         # v1.2.0: Event-driven re-scan when a position closes (frees a slot)
         self._rescan_event = asyncio.Event()
+
+        # v1.2.0: Session-aware scanner cadence
+        self._session_cadence = SessionCadence(config.scheduler)
     # ── Public API ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -199,7 +203,7 @@ class Scheduler:
                         "Scanner loop: Best Day protection active ({}), pausing new intents",
                         self._best_day_tracker.summary(),
                     )
-                    await asyncio.sleep(self._config.scheduler.scanner_interval_seconds)
+                    await asyncio.sleep(self._session_cadence.get_scanner_interval(self._now_utc()))
                     continue
                 logger.info("Scanner loop: starting scan for {}", today)
 
@@ -311,10 +315,17 @@ class Scheduler:
                 logger.error("Scanner loop error: {}", e)
                 await self._send_alert(f"⚠️ <b>Scanner Error</b>\n<code>{e}</code>")
             try:
-                # v1.2.0: Wait for either the full interval OR a rescan event (position closed)
+                # v1.2.0: Dynamic interval based on session + rescan event
+                scan_interval = self._session_cadence.get_scanner_interval(self._now_utc())
+                session_name = self._session_cadence.current_session_name(self._now_utc())
+                logger.debug(
+                    "Scanner loop: next scan in {}s (session: {})",
+                    scan_interval,
+                    session_name,
+                )
                 await asyncio.wait_for(
                     self._rescan_event.wait(),
-                    timeout=self._config.scheduler.scanner_interval_seconds,
+                    timeout=scan_interval,
                 )
                 self._rescan_event.clear()
                 logger.info("Scanner loop: rescan event received — running early scan")
