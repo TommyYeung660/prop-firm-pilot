@@ -45,6 +45,7 @@ from src.monitor.memory_journal import MemoryJournal
 from src.monitor.trade_journal import TradeJournal
 from src.optimize.optimization_engine import OptimizationEngine
 from src.optimize.optimization_state import OptimizationState, Thresholds
+from src.scheduler.market_hours import MarketHoursChecker
 from src.signal.scanner_bridge import ScannerBridge
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -121,6 +122,9 @@ class Scheduler:
                 state_path=config.compliance.hwm_state_path,
             )
 
+        # Weekend market closure handling
+        self._market_hours = MarketHoursChecker(config.scheduler.market_hours)
+        self._weekend_force_close_done = False  # Reset each weekend
 
         # Phase 2.5: Trailing stop / breakeven tracking
         self._breakeven_applied: set[str] = set()  # position IDs where SL moved to BE
@@ -184,6 +188,8 @@ class Scheduler:
         logger.info("Scanner loop: started")
         while self._running:
             try:
+                # Weekend check — pause during market closure
+                await self._wait_for_market_open("Scanner loop")
                 today = self._today_str()
                 if self._should_pause_new_entries():
                     logger.warning(
@@ -313,6 +319,8 @@ class Scheduler:
         """Continuously claim pending intents and evaluate via LLM agents."""
         logger.info("LLM worker {}: started", worker_id)
         while self._running:
+            # Weekend check — pause during market closure
+            await self._wait_for_market_open("LLM worker")
             intent: TradeIntent | None = None
             try:
                 intent = await asyncio.to_thread(self._store.claim_next_pending, worker_id)
@@ -615,6 +623,8 @@ class Scheduler:
         logger.info("Execution loop: started")
         while self._running:
             try:
+                # Weekend check — pause during market closure
+                await self._wait_for_market_open("Execution loop")
                 processed = await self._engine.execute_ready_intents()
                 if processed > 0:
                     logger.info("Execution loop: processed {} intents", processed)
@@ -700,6 +710,12 @@ class Scheduler:
         logger.info("Position monitor loop: started")
         while self._running:
             try:
+                # Weekend force-close check
+                if (
+                    self._market_hours.should_force_close(self._now_utc())
+                    and not self._weekend_force_close_done
+                ):
+                    await self._force_close_for_weekend()
                 self._maybe_rollover_best_day_tracker()
                 # Get intents that are in "opened" state
                 opened_intents = await asyncio.to_thread(self._store.get_active_positions)
@@ -771,7 +787,11 @@ class Scheduler:
                     )
                 else:
                     sleep_interval = base_interval
-                await asyncio.sleep(sleep_interval)
+                # During market closure, reduce polling frequency
+                if not self._market_hours.is_market_open(self._now_utc()):
+                    await asyncio.sleep(base_interval * 10)  # 20min instead of 2min
+                else:
+                    await asyncio.sleep(sleep_interval)
             except asyncio.CancelledError:
                 logger.info("Position monitor loop: cancelled during sleep")
                 return
@@ -1350,6 +1370,81 @@ class Scheduler:
         except Exception as e:
             logger.error("Failed to send daily summary: {}", e)
             await self._send_alert(f"⚠️ <b>Daily Summary Error</b>\n<code>{e}</code>")
+
+    # ── Weekend Market Closure ──────────────────────────────────────────
+
+    async def _wait_for_market_open(self, loop_name: str) -> None:
+        """Sleep until market opens. Logs once and sleeps in chunks."""
+        now = self._now_utc()
+        if self._market_hours.is_market_open(now):
+            return
+
+        wait_seconds = self._market_hours.seconds_until_open(now)
+        logger.info(
+            "{}: market closed — sleeping {:.0f}s ({:.1f}h) until open",
+            loop_name,
+            wait_seconds,
+            wait_seconds / 3600,
+        )
+        await self._send_alert(
+            f"💤 <b>{loop_name}</b>: market closed, sleeping until open "
+            f"({wait_seconds / 3600:.1f}h)"
+        )
+
+        # Sleep in 5-minute chunks to allow graceful shutdown
+        while not self._market_hours.is_market_open(self._now_utc()) and self._running:
+            await asyncio.sleep(min(300, wait_seconds))
+            wait_seconds = self._market_hours.seconds_until_open(self._now_utc())
+
+        if self._running:
+            self._weekend_force_close_done = False  # Reset for next weekend
+            logger.info("{}: market open — resuming", loop_name)
+            await self._send_alert(
+                f"☀️ <b>{loop_name}</b>: market open, resuming operations"
+            )
+
+    async def _force_close_for_weekend(self) -> None:
+        """Force-close all open positions before weekend market closure."""
+        logger.warning(
+            "Weekend force-close: closing all positions before market close"
+        )
+        try:
+            open_positions = await self._matchtrader.get_open_positions()
+            if not open_positions:
+                logger.info("Weekend force-close: no open positions")
+                self._weekend_force_close_done = True
+                return
+
+            closed_count = 0
+            total_pnl = 0.0
+            for pos in open_positions:
+                try:
+                    result = await self._matchtrader.close_position(
+                        position_id=str(pos.position_id),
+                        symbol=pos.symbol,
+                        side=pos.side,
+                        volume=pos.volume,
+                    )
+                    if result.success:
+                        closed_count += 1
+                        total_pnl += pos.profit
+                except Exception as e:
+                    logger.error(
+                        "Weekend force-close: failed to close {}: {}",
+                        pos.position_id, e,
+                    )
+
+            self._weekend_force_close_done = True
+            await self._send_alert(
+                f"🌙 <b>Weekend Force-Close</b>\n"
+                f"• Closed {closed_count}/{len(open_positions)} positions\n"
+                f"• Estimated PnL: ${total_pnl:+.2f}"
+            )
+        except Exception as e:
+            logger.error("Weekend force-close failed: {}", e)
+            await self._send_alert(
+                f"⚠️ <b>Weekend Force-Close FAILED</b>\n<code>{e}</code>"
+            )
 
     async def _send_alert(self, message: str) -> None:
         """Send a Telegram alert if AlertService is configured."""
