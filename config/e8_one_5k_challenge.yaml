@@ -5,6 +5,9 @@ account_name: "e8_one_5k_challenge"
 
 symbols:
   - EURUSD
+  - GBPUSD
+  - USDJPY
+  - AUDUSD
 
 account:
   plan: "E8 One Challenge"
@@ -17,7 +20,7 @@ compliance:
   profit_target: 0.09            # 9% 利潤目標 ($450)
   best_day_ratio: 0.40           # 40% Best Day Rule (單日獲利不可超過總獲利的40%)
   best_day_limit: 180            # $450 × 40% = $180/天 (安全閥)
-  daily_api_request_limit: 4000  # 每日 API 請求上限 (官網規定 2000)
+  daily_api_request_limit: 4000  # 每日 API 請求上限
   drawdown_type: "dynamic"       # 動態回撤 (Trailing High-Water Mark)
 
   # 安全裕度 (提前停止交易，避免觸碰紅線)
@@ -47,15 +50,22 @@ scheduler:
   market_hours:
     enabled: true
     close_day: "Friday"
-    close_time_utc: "22:00"    # 17:00 EST
+    close_time_utc: "22:00"    # 冬令時 UTC (夏令時自動調整為 21:00)
     open_day: "Sunday"
-    open_time_utc: "22:00"     # 17:00 EST
+    open_time_utc: "22:00"     # 冬令時 UTC (夏令時自動調整為 21:00)
     force_close_before_weekend: false
     force_close_minutes_before: 15
+    # DST 自動調整 (E8 Markets 伺服器 = Europe/Athens)
+    dst_auto: true
+    server_timezone: "Europe/Athens"
   # v1.2.0: 時段感知掃描節奏
   session_aware_enabled: true
   active_session_interval_seconds: 3600   # 1h during London/NY
   quiet_session_interval_seconds: 14400   # 4h during off-hours
+  # DST 自動調整交易時段 (London/NY 各自根據當地 DST 調整)
+  session_dst_auto: true
+  london_timezone: "Europe/London"
+  ny_timezone: "America/New_York"
   # v1.2.0: 波動率觸發掃描
   volatility_trigger_enabled: true
   volatility_threshold_pct: 0.3

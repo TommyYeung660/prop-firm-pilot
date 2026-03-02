@@ -160,20 +160,37 @@ class DecisionStoreConfig(BaseModel):
 class MarketHoursConfig(BaseModel):
     """FX market hours and weekend closure settings (per-account).
 
-    Times are in UTC. Typical FX: close Friday 22:00 UTC, open Sunday 22:00 UTC.
-    These correspond to 17:00 EST / 17:00 EST (US Eastern).
+    Times are in UTC (winter time baseline). When dst_auto is enabled,
+    close/open times auto-adjust for DST based on server_timezone.
+
+    Typical FX: close Friday 22:00 UTC (winter), open Sunday 22:00 UTC (winter).
+    E8 server = Europe/Athens (UTC+2 winter, UTC+3 summer).
+    In summer, 22:00 winter-UTC shifts to 21:00 actual-UTC.
     """
 
     enabled: bool = Field(default=False, description="Enable weekend market closure handling")
     close_day: str = Field(default="Friday", description="Day market closes (e.g., Friday)")
-    close_time_utc: str = Field(default="22:00", description="Market close time in UTC (HH:MM)")
+    close_time_utc: str = Field(
+        default="22:00", description="Market close time in UTC winter-baseline (HH:MM)"
+    )
     open_day: str = Field(default="Sunday", description="Day market opens (e.g., Sunday)")
-    open_time_utc: str = Field(default="22:00", description="Market open time in UTC (HH:MM)")
+    open_time_utc: str = Field(
+        default="22:00", description="Market open time in UTC winter-baseline (HH:MM)"
+    )
     force_close_before_weekend: bool = Field(
         default=False, description="Force-close all positions before weekend"
     )
     force_close_minutes_before: int = Field(
         default=15, description="Minutes before market close to force-close positions"
+    )
+
+    # DST auto-adjustment
+    dst_auto: bool = Field(
+        default=False, description="Auto-adjust market hours for DST based on server_timezone"
+    )
+    server_timezone: str = Field(
+        default="Europe/Athens",
+        description="IANA timezone of the broker server (e.g., Europe/Athens for E8 Markets)",
     )
 
 
@@ -220,11 +237,29 @@ class SchedulerConfig(BaseModel):
     quiet_session_interval_seconds: int = Field(
         default=14400, description="Scanner interval during quiet hours (Asia, 4h)"
     )
-    london_open_utc: int = Field(default=7, description="London session open hour (UTC)")
-    london_close_utc: int = Field(default=16, description="London session close hour (UTC)")
-    ny_open_utc: int = Field(default=12, description="New York session open hour (UTC)")
-    ny_close_utc: int = Field(default=21, description="New York session close hour (UTC)")
+    london_open_utc: int = Field(
+        default=7, description="London session open hour (UTC winter-baseline)"
+    )
+    london_close_utc: int = Field(
+        default=16, description="London session close hour (UTC winter-baseline)"
+    )
+    ny_open_utc: int = Field(
+        default=12, description="New York session open hour (UTC winter-baseline)"
+    )
+    ny_close_utc: int = Field(
+        default=21, description="New York session close hour (UTC winter-baseline)"
+    )
 
+    # DST auto-adjustment for sessions
+    session_dst_auto: bool = Field(
+        default=False, description="Auto-adjust London/NY session hours for DST"
+    )
+    london_timezone: str = Field(
+        default="Europe/London", description="IANA timezone for London session DST calculation"
+    )
+    ny_timezone: str = Field(
+        default="America/New_York", description="IANA timezone for New York session DST calculation"
+    )
     # v1.2.0: Volatility-triggered scans
     volatility_trigger_enabled: bool = Field(
         default=False, description="Enable volatility-triggered scanner re-scans"
