@@ -62,3 +62,17 @@ logging:
   file: "logs/prop_firm_pilot.log"
   rotation: "10 MB"
   retention: "30 days"
+
+# 排程器 (Scheduler)
+scheduler:
+  reeval_interval_seconds: 7200        # 2h 重新評估持倉
+  llm_worker_count: 2                  # LLM 並行 worker 數
+  # 時段感知掃描節奏 (預設停用)
+  session_aware_enabled: false
+  active_session_interval_seconds: 3600   # 活躍時段 1h
+  quiet_session_interval_seconds: 14400   # 安靜時段 4h
+  # 波動率觸發掃描 (預設停用)
+  volatility_trigger_enabled: false
+  volatility_threshold_pct: 0.3
+  volatility_window_minutes: 30
+  volatility_cooldown_seconds: 900

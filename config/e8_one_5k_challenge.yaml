@@ -53,6 +53,15 @@ scheduler:
     open_time_utc: "22:00"     # 17:00 EST
     force_close_before_weekend: false
     force_close_minutes_before: 15
+  # v1.2.0: 時段感知掃描節奏
+  session_aware_enabled: true
+  active_session_interval_seconds: 3600   # 1h during London/NY
+  quiet_session_interval_seconds: 14400   # 4h during off-hours
+  # v1.2.0: 波動率觸發掃描
+  volatility_trigger_enabled: true
+  volatility_threshold_pct: 0.3
+  volatility_window_minutes: 30
+  volatility_cooldown_seconds: 900
 instruments:
   EURUSD:
     pip_size: 0.0001
