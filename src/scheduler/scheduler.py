@@ -29,6 +29,7 @@ from typing import Any
 from loguru import logger
 
 from src.compliance.best_day_tracker import BestDayTracker
+from src.compliance.hwm_tracker import HighWaterMarkTracker
 from src.config import AppConfig
 from src.decision.agent_bridge import AgentBridge
 from src.decision.decision_formatter import format_decision
@@ -110,6 +111,15 @@ class Scheduler:
         self._optimization_state: OptimizationState | None = None
         self._memory_journal = memory_journal
         self._trade_journal = trade_journal
+
+        # Dynamic drawdown HWM tracking
+        self._hwm_tracker: HighWaterMarkTracker | None = None
+        if config.compliance.drawdown_type == "dynamic":
+            self._hwm_tracker = HighWaterMarkTracker(
+                initial_balance=config.account.initial_balance,
+                drawdown_pct=config.compliance.max_drawdown_limit,
+                state_path=config.compliance.hwm_state_path,
+            )
 
 
         # Phase 2.5: Trailing stop / breakeven tracking
@@ -657,10 +667,15 @@ class Scheduler:
                 return balance.equity
 
             balance = await self._matchtrader.get_balance()
+            # For dynamic drawdown, use HWM as the reference for max drawdown
+            max_dd_reference = self._config.account.initial_balance
+            if self._hwm_tracker is not None:
+                max_dd_reference = self._hwm_tracker.high_water_mark
+
             await self._equity_monitor.start(
                 get_equity=get_equity,
                 day_start_balance=balance.balance,
-                initial_balance=self._config.account.initial_balance,
+                initial_balance=max_dd_reference,  # HWM for dynamic, initial for balance-based
                 daily_drawdown_limit=self._config.compliance.daily_drawdown_limit,
                 max_drawdown_limit=self._config.compliance.max_drawdown_limit,
             )
@@ -919,6 +934,21 @@ class Scheduler:
             equity = balance.equity
         except Exception:
             pass
+
+        # Update dynamic drawdown HWM tracker with new closed balance
+        if self._hwm_tracker is not None and equity is not None:
+            try:
+                self._hwm_tracker.update_balance(balance.balance)
+                self._hwm_tracker.save()
+                logger.info(
+                    "HWM updated: balance=${:.2f}, hwm=${:.2f}, loss_level=${:.2f}, locked={}",
+                    balance.balance,
+                    self._hwm_tracker.high_water_mark,
+                    self._hwm_tracker.loss_level,
+                    self._hwm_tracker.is_locked,
+                )
+            except Exception as e:
+                logger.error("Failed to update HWM tracker: {}", e)
 
         # Map exit_reason to alert hit_type for backward compatibility
         hit_type = {"tp_hit": "TP", "sl_hit": "SL"}.get(exit_reason, "manual")
