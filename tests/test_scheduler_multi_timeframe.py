@@ -6,12 +6,11 @@ Covers:
 - Scanner loop calls _run_intraday_scan() when enabled and signals exist
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from src.config import AppConfig
-
 
 # ── Config defaults ──────────────────────────────────────────────────────────
 

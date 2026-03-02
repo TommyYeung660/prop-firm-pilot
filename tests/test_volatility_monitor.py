@@ -2,8 +2,6 @@
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from src.config import SchedulerConfig
 from src.scheduler.volatility_monitor import VolatilityMonitor
 

@@ -89,7 +89,9 @@ def convert_to_qlib_binary(
 
     # Write features for each symbol
     for symbol, df in processed_data.items():
-        _write_symbol_features(features_dir, symbol, df, cal_index, len(calendar), interval=interval)
+        _write_symbol_features(
+            features_dir, symbol, df, cal_index, len(calendar), interval=interval
+        )
 
     logger.info(
         "Qlib converter: wrote {} symbols, {} calendar days to {}",
@@ -142,7 +144,9 @@ def _write_calendar(
         for dt in calendar:
             f.write(dt.strftime(fmt) + "\n")
 
-    logger.debug("Qlib converter: wrote calendar ({} entries, interval={})", len(calendar), interval)
+    logger.debug(
+        "Qlib converter: wrote calendar ({} entries, interval={})", len(calendar), interval
+    )
 
 
 def _write_instruments(

@@ -1,7 +1,5 @@
 """Tests for trailing stop / breakeven logic (Phase 2.5) — _apply_breakeven_stops()."""
 
-
-
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -360,12 +358,8 @@ class TestApplyBreakevenStops:
             open_price=1.20000,
             current_price=1.20300,  # 30% - should NOT modify
         )
-        intent1 = _insert_opened_intent_for_breakeven(
-            store, "INT-1", "EURUSD.", "POS-1", 100.0
-        )
-        intent2 = _insert_opened_intent_for_breakeven(
-            store, "INT-2", "EURUSD.", "POS-2", 100.0
-        )
+        intent1 = _insert_opened_intent_for_breakeven(store, "INT-1", "EURUSD.", "POS-1", 100.0)
+        intent2 = _insert_opened_intent_for_breakeven(store, "INT-2", "EURUSD.", "POS-2", 100.0)
 
         # Execute
         await scheduler._apply_breakeven_stops([pos1, pos2], [intent1, intent2])

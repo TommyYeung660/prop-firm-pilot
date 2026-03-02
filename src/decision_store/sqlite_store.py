@@ -239,7 +239,6 @@ class DecisionStore:
         self._ensure_columns()
         logger.debug("Decision store tables ensured at {}", self._db_path)
 
-
     def _ensure_columns(self) -> None:
         """Idempotent migration: add columns that may not exist in older DBs."""
         migrations = [
@@ -254,12 +253,11 @@ class DecisionStore:
         ]
         for table, col, col_type in migrations:
             try:
-                self._conn.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
-                )
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
             except sqlite3.OperationalError:
                 pass  # Column already exists
         self._conn.commit()
+
     def close(self) -> None:
         """Close the database connection."""
         self._conn.close()
@@ -435,8 +433,7 @@ class DecisionStore:
                         f"Cannot update decision {intent_id}: not in 'claimed' state"
                     )
                 self._conn.execute(
-                    "UPDATE decisions SET decided_at = :decided_at "
-                    "WHERE intent_id = :intent_id",
+                    "UPDATE decisions SET decided_at = :decided_at WHERE intent_id = :intent_id",
                     {"decided_at": _dt_to_str(now), "intent_id": intent_id},
                 )
                 self._conn.commit()
@@ -635,7 +632,9 @@ class DecisionStore:
         self._conn.commit()
         logger.info(
             "Intent {} closed (pnl={}, reason={})",
-            intent_id, realized_pnl, exit_reason,
+            intent_id,
+            realized_pnl,
+            exit_reason,
         )
 
     def update_execution_meta(self, intent_id: str, meta_json: str) -> None:
@@ -650,6 +649,7 @@ class DecisionStore:
         )
         self._conn.commit()
         logger.debug("Updated execution_meta for intent {}", intent_id)
+
     # ── Queries ─────────────────────────────────────────────────────
 
     def get_pending_intents(self) -> list[TradeIntent]:
@@ -804,7 +804,6 @@ class DecisionStore:
         ).fetchone()
         return row is not None
 
-
     def count_pipeline_intents(self) -> int:
         """Count intents currently in the processing pipeline.
 
@@ -870,7 +869,6 @@ class DecisionStore:
             {"date": date},
         ).fetchone()
         return row["call_count"] if row else 0
-
 
     def get_api_call_breakdown(self, date: str | None = None) -> dict[str, int]:
         """Get API call breakdown (total/read/write) for a date.
@@ -944,6 +942,7 @@ class DecisionStore:
             {"cutoff": cutoff_str},
         ).fetchall()
         return [dict(row) for row in rows]
+
     # ── Dashboard Query Helpers ─────────────────────────────────────
 
     def get_daily_summary(self, trade_date: str | None = None) -> dict[str, int]:

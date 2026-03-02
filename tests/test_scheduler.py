@@ -169,10 +169,13 @@ async def _run_loop_once(scheduler: Scheduler, loop_coro) -> None:
         coro.close()
         return None
 
-    with unittest.mock.patch("asyncio.sleep", fake_sleep), \
-         unittest.mock.patch("asyncio.wait_for", fake_wait_for):
+    with (
+        unittest.mock.patch("asyncio.sleep", fake_sleep),
+        unittest.mock.patch("asyncio.wait_for", fake_wait_for),
+    ):
         scheduler._running = True
         await loop_coro
+
 
 # ── Scanner Loop Tests ──────────────────────────────────────────────────────
 
@@ -246,8 +249,10 @@ class TestScannerLoop:
             coro.close()
             return None
 
-        with unittest.mock.patch("asyncio.sleep", fake_sleep), \
-             unittest.mock.patch("asyncio.wait_for", fake_wait_for):
+        with (
+            unittest.mock.patch("asyncio.sleep", fake_sleep),
+            unittest.mock.patch("asyncio.wait_for", fake_wait_for),
+        ):
             scheduler._running = True
             await scheduler._scanner_loop()
         today = Scheduler._today_str()
@@ -286,8 +291,6 @@ class TestScannerLoop:
         today = Scheduler._today_str()
         intents = store.get_intents_by_date(today)
         assert len(intents) == config.scanner.topk
-
-
 
     async def test_per_symbol_topk_deduplicates_same_symbol(
         self,
@@ -390,6 +393,7 @@ class TestScannerLoop:
         # All 3 symbols should get intents, not 3x GBPUSD
         assert symbols == {"GBPUSD", "EURUSD", "USDJPY"}
 
+
 # ── Scanner Capacity Check Tests ────────────────────────────────────────────
 
 
@@ -407,9 +411,7 @@ class TestScannerCapacityCheck:
     ) -> None:
         """When open positions == max_positions, no new intents are created."""
         # Create a scheduler with max_positions=1
-        config_1 = config.model_copy(
-            update={"execution": ExecutionConfig(max_positions=1)}
-        )
+        config_1 = config.model_copy(update={"execution": ExecutionConfig(max_positions=1)})
         sched = Scheduler(
             config=config_1,
             store=store,
@@ -424,8 +426,12 @@ class TestScannerCapacityCheck:
         store.insert_intent(intent)
         store.claim_next_pending("llm-0")
         store.update_intent_decision(
-            intent.id, side="BUY", sl_pips=20, tp_pips=40,
-            risk_report="test", state_json="{}",
+            intent.id,
+            side="BUY",
+            sl_pips=20,
+            tp_pips=40,
+            risk_report="test",
+            state_json="{}",
         )
         store.mark_ready_for_exec(intent.id)
         store.mark_executing(intent.id)
@@ -452,9 +458,7 @@ class TestScannerCapacityCheck:
         mock_matchtrader: AsyncMock,
     ) -> None:
         """When pipeline intents fill max_positions, no new intents are created."""
-        config_2 = config.model_copy(
-            update={"execution": ExecutionConfig(max_positions=2)}
-        )
+        config_2 = config.model_copy(update={"execution": ExecutionConfig(max_positions=2)})
         sched = Scheduler(
             config=config_2,
             store=store,
@@ -465,12 +469,20 @@ class TestScannerCapacityCheck:
         )
 
         # Insert 2 pending intents (pipeline, not yet opened)
-        store.insert_intent(TradeIntent(
-            trade_date=Scheduler._today_str(), symbol="EURUSD", source="scanner",
-        ))
-        store.insert_intent(TradeIntent(
-            trade_date=Scheduler._today_str(), symbol="GBPUSD", source="scanner",
-        ))
+        store.insert_intent(
+            TradeIntent(
+                trade_date=Scheduler._today_str(),
+                symbol="EURUSD",
+                source="scanner",
+            )
+        )
+        store.insert_intent(
+            TradeIntent(
+                trade_date=Scheduler._today_str(),
+                symbol="GBPUSD",
+                source="scanner",
+            )
+        )
 
         # Scanner returns another signal
         mock_scanner.run_pipeline.return_value = [_make_mock_signal("USDJPY")]
@@ -494,9 +506,7 @@ class TestScannerCapacityCheck:
         mock_matchtrader: AsyncMock,
     ) -> None:
         """When 1 slot is used, only create enough intents to fill remaining."""
-        config_2 = config.model_copy(
-            update={"execution": ExecutionConfig(max_positions=2)}
-        )
+        config_2 = config.model_copy(update={"execution": ExecutionConfig(max_positions=2)})
         sched = Scheduler(
             config=config_2,
             store=store,
@@ -507,9 +517,13 @@ class TestScannerCapacityCheck:
         )
 
         # 1 pending intent already in pipeline
-        store.insert_intent(TradeIntent(
-            trade_date=Scheduler._today_str(), symbol="EURUSD", source="scanner",
-        ))
+        store.insert_intent(
+            TradeIntent(
+                trade_date=Scheduler._today_str(),
+                symbol="EURUSD",
+                source="scanner",
+            )
+        )
 
         # Scanner returns 3 signals — only 1 slot available
         mock_scanner.run_pipeline.return_value = [
@@ -539,9 +553,7 @@ class TestScannerCapacityCheck:
         mock_matchtrader: AsyncMock,
     ) -> None:
         """Open positions + pipeline intents both count toward max_positions."""
-        config_3 = config.model_copy(
-            update={"execution": ExecutionConfig(max_positions=3)}
-        )
+        config_3 = config.model_copy(update={"execution": ExecutionConfig(max_positions=3)})
         sched = Scheduler(
             config=config_3,
             store=store,
@@ -556,17 +568,25 @@ class TestScannerCapacityCheck:
         store.insert_intent(opened)
         store.claim_next_pending("llm-0")
         store.update_intent_decision(
-            opened.id, side="BUY", sl_pips=20, tp_pips=40,
-            risk_report="test", state_json="{}",
+            opened.id,
+            side="BUY",
+            sl_pips=20,
+            tp_pips=40,
+            risk_report="test",
+            state_json="{}",
         )
         store.mark_ready_for_exec(opened.id)
         store.mark_executing(opened.id)
         store.mark_opened(opened.id, position_id="POS-001")
 
         # 1 pending intent in pipeline
-        store.insert_intent(TradeIntent(
-            trade_date=Scheduler._today_str(), symbol="GBPUSD", source="scanner",
-        ))
+        store.insert_intent(
+            TradeIntent(
+                trade_date=Scheduler._today_str(),
+                symbol="GBPUSD",
+                source="scanner",
+            )
+        )
 
         # Scanner returns 2 signals — only 1 slot available
         mock_scanner.run_pipeline.return_value = [
@@ -594,9 +614,7 @@ class TestScannerCapacityCheck:
         mock_matchtrader: AsyncMock,
     ) -> None:
         """Idempotency (intent_exists) check still skips duplicates within capacity."""
-        config_3 = config.model_copy(
-            update={"execution": ExecutionConfig(max_positions=3)}
-        )
+        config_3 = config.model_copy(update={"execution": ExecutionConfig(max_positions=3)})
         sched = Scheduler(
             config=config_3,
             store=store,
@@ -607,9 +625,13 @@ class TestScannerCapacityCheck:
         )
 
         # Insert a pending intent for EURUSD
-        store.insert_intent(TradeIntent(
-            trade_date=Scheduler._today_str(), symbol="EURUSD", source="scanner",
-        ))
+        store.insert_intent(
+            TradeIntent(
+                trade_date=Scheduler._today_str(),
+                symbol="EURUSD",
+                source="scanner",
+            )
+        )
 
         # Scanner returns EURUSD again + a new symbol
         mock_scanner.run_pipeline.return_value = [
@@ -1059,9 +1081,9 @@ class TestStartStop:
         assert len(args) == 7
         # Clean up unawaited coroutines / scheduled tasks to suppress warnings
         for item in args:
-            if hasattr(item, 'close'):
+            if hasattr(item, "close"):
                 item.close()
-            elif hasattr(item, 'cancel'):
+            elif hasattr(item, "cancel"):
                 item.cancel()
 
     async def test_start_with_multiple_llm_workers(
@@ -1092,9 +1114,9 @@ class TestStartStop:
         assert len(args) == 9
         # Clean up unawaited coroutines / scheduled tasks to suppress warnings
         for item in args:
-            if hasattr(item, 'close'):
+            if hasattr(item, "close"):
                 item.close()
-            elif hasattr(item, 'cancel'):
+            elif hasattr(item, "cancel"):
                 item.cancel()
 
 
@@ -2388,9 +2410,7 @@ class TestBestDayIntegration:
         assert sched._best_day_tracker._stop_ratio == config.compliance.best_day_stop
 
 
-
 # ── Manual Close PnL Fallback Tests ────────────────────────────────────────
-
 
 
 class TestManualClosePnlFallback:

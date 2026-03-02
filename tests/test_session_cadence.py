@@ -2,8 +2,6 @@
 
 from datetime import datetime, timezone
 
-import pytest
-
 from src.config import SchedulerConfig
 from src.scheduler.session_cadence import SessionCadence
 

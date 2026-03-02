@@ -5,6 +5,7 @@ Phase 1 (BUG #6): get_global_news away from OpenAI (404 via Volcengine) to local
 Phase 2: Route ALL data sources to Alpha Vantage (premium, 75 req/min).
 Phase 3: Route get_global_news to Alpha Vantage (topic-based macro news).
 """
+
 import os
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -38,6 +39,7 @@ class TestBuildAgentConfig:
         config = build_agent_config()
         assert config["data_vendors"]["news_data"] == "alpha_vantage"
         assert config["tool_vendors"]["get_global_news"] == "alpha_vantage"
+
     def test_tool_vendors_routes_to_alpha_vantage(self) -> None:
         """Alpha Vantage premium (75 req/min) for news, global_news, and indicators."""
         config = build_agent_config()
@@ -228,7 +230,6 @@ class TestAgentBridgeDateNormalize:
 
 
 # ── main.py integration tests ──────────────────────────────────────────────
-
 
 
 class TestMainUsesBuiltConfig:

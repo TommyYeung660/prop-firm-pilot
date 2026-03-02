@@ -82,8 +82,13 @@ class TraderMadeProvider(FxDataProvider):
     BASE_URL = "https://marketdata.tradermade.com/api/v1/timeseries"
     MAX_DAYS_PER_REQUEST = 365  # Free tier limitation
     INTERVAL_MAP = {
-        "daily": "daily", "4h": "4H", "1h": "1H",
-        "30min": "30min", "15min": "15min", "5min": "5min", "1min": "1min",
+        "daily": "daily",
+        "4h": "4H",
+        "1h": "1H",
+        "30min": "30min",
+        "15min": "15min",
+        "5min": "5min",
+        "1min": "1min",
     }
 
     def __init__(self, api_key: str, max_retries: int = 3) -> None:
@@ -116,8 +121,7 @@ class TraderMadeProvider(FxDataProvider):
         api_interval = self.INTERVAL_MAP.get(interval)
         if api_interval is None:
             raise ValueError(
-                f"Unsupported interval '{interval}'. "
-                f"Available: {list(self.INTERVAL_MAP.keys())}"
+                f"Unsupported interval '{interval}'. Available: {list(self.INTERVAL_MAP.keys())}"
             )
 
         all_frames: list[pd.DataFrame] = []
@@ -135,7 +139,10 @@ class TraderMadeProvider(FxDataProvider):
         if not all_frames:
             logger.warning(
                 "TraderMade: no data returned for {} ({} to {}, interval={})",
-                symbol, start_date, end_date, interval,
+                symbol,
+                start_date,
+                end_date,
+                interval,
             )
             return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
 
@@ -148,7 +155,11 @@ class TraderMadeProvider(FxDataProvider):
 
         logger.info(
             "TraderMade: fetched {} rows for {} ({} to {}, interval={})",
-            len(result), symbol, start_date, end_date, interval,
+            len(result),
+            symbol,
+            start_date,
+            end_date,
+            interval,
         )
         return result
 
@@ -246,8 +257,13 @@ class ITickProvider(FxDataProvider):
     MAX_BARS_PER_REQUEST = 1000
     RATE_LIMIT_DELAY = 12.0  # 5 req/min = 1 req per 12s
     KTYPE_MAP = {
-        "daily": "8", "4h": "6", "1h": "5",
-        "30min": "4", "15min": "3", "5min": "2", "1min": "1",
+        "daily": "8",
+        "4h": "6",
+        "1h": "5",
+        "30min": "4",
+        "15min": "3",
+        "5min": "2",
+        "1min": "1",
     }
 
     def __init__(self, api_key: str, max_retries: int = 3) -> None:
@@ -280,8 +296,7 @@ class ITickProvider(FxDataProvider):
         ktype = self.KTYPE_MAP.get(interval)
         if ktype is None:
             raise ValueError(
-                f"Unsupported interval '{interval}'. "
-                f"Available: {list(self.KTYPE_MAP.keys())}"
+                f"Unsupported interval '{interval}'. Available: {list(self.KTYPE_MAP.keys())}"
             )
 
         all_frames: list[pd.DataFrame] = []
@@ -307,7 +322,10 @@ class ITickProvider(FxDataProvider):
         if not all_frames:
             logger.warning(
                 "iTick: no data returned for {} ({} to {}, interval={})",
-                symbol, start_date, end_date, interval,
+                symbol,
+                start_date,
+                end_date,
+                interval,
             )
             return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
 
@@ -317,8 +335,7 @@ class ITickProvider(FxDataProvider):
         start_ts_filter = pd.Timestamp(start_date)
         end_ts_filter = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
         result = result[
-            (result["datetime"] >= start_ts_filter)
-            & (result["datetime"] <= end_ts_filter)
+            (result["datetime"] >= start_ts_filter) & (result["datetime"] <= end_ts_filter)
         ]
         result = (
             result.drop_duplicates(subset=["datetime"])
@@ -328,7 +345,11 @@ class ITickProvider(FxDataProvider):
 
         logger.info(
             "iTick: fetched {} rows for {} ({} to {}, interval={})",
-            len(result), symbol, start_date, end_date, interval,
+            len(result),
+            symbol,
+            start_date,
+            end_date,
+            interval,
         )
         return result
 

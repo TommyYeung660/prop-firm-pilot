@@ -6,8 +6,7 @@ import httpx
 import pytest
 import respx
 
-from src.data.fx_data_fetcher import TraderMadeProvider, ITickProvider
-
+from src.data.fx_data_fetcher import ITickProvider, TraderMadeProvider
 
 # ── TraderMade fetch_bars ────────────────────────────────────────────────────
 
@@ -97,7 +96,7 @@ async def test_tradermade_fetch_bars_1h_interval():
         )
     )
     async with httpx.AsyncClient() as client:
-        df = await provider.fetch_bars(
+        await provider.fetch_bars(
             "EURUSD", date(2026, 3, 1), date(2026, 3, 1), client, interval="1h"
         )
 
@@ -188,7 +187,7 @@ async def test_itick_fetch_bars_1h_interval():
         )
     )
     async with httpx.AsyncClient() as client:
-        df = await provider.fetch_bars(
+        await provider.fetch_bars(
             "EURUSD", date(2026, 3, 1), date(2026, 3, 1), client, interval="1h"
         )
 

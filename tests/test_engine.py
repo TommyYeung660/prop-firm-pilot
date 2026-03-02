@@ -1173,7 +1173,6 @@ class TestSLTPPriceConversion:
         )
 
 
-
 # ── Slippage Detection Tests ────────────────────────────────────────────────
 
 
@@ -1191,7 +1190,6 @@ class TestSlippageDetection:
         """No alert when fill price is within slippage tolerance."""
         from src.execution.matchtrader_client import QuoteInfo
 
-
         mock_matchtrader.get_quote.return_value = QuoteInfo(
             symbol="EURUSD.", bid=1.10873, ask=1.10877
         )
@@ -1206,8 +1204,11 @@ class TestSlippageDetection:
         )
 
         engine = ExecutionEngine(
-            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
-            sizer=mock_sizer, config=config,
+            store=store,
+            guard=mock_guard,
+            matchtrader=mock_matchtrader,
+            sizer=mock_sizer,
+            config=config,
         )
         _make_ready_intent(store, symbol="EURUSD", side="BUY")
         await engine.execute_ready_intents()
@@ -1226,7 +1227,6 @@ class TestSlippageDetection:
         """Should log warning when fill price exceeds max slippage."""
         from src.execution.matchtrader_client import QuoteInfo
 
-
         config.execution.max_slippage_pips = 0.5
 
         mock_matchtrader.get_quote.return_value = QuoteInfo(
@@ -1244,8 +1244,12 @@ class TestSlippageDetection:
 
         alert_service = AsyncMock()
         engine = ExecutionEngine(
-            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
-            sizer=mock_sizer, config=config, alert_service=alert_service,
+            store=store,
+            guard=mock_guard,
+            matchtrader=mock_matchtrader,
+            sizer=mock_sizer,
+            config=config,
+            alert_service=alert_service,
         )
         _make_ready_intent(store, symbol="EURUSD", side="BUY")
         await engine.execute_ready_intents()
@@ -1253,7 +1257,6 @@ class TestSlippageDetection:
         alert_service.system_error.assert_called_once()
         call_args = alert_service.system_error.call_args[0][0]
         assert "Slippage alert" in call_args
-
 
     async def test_quote_fetch_failure_proceeds(
         self,
@@ -1276,8 +1279,11 @@ class TestSlippageDetection:
         )
 
         engine = ExecutionEngine(
-            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
-            sizer=mock_sizer, config=config,
+            store=store,
+            guard=mock_guard,
+            matchtrader=mock_matchtrader,
+            sizer=mock_sizer,
+            config=config,
         )
         _make_ready_intent(store, symbol="EURUSD", side="BUY")
         result = await engine.execute_ready_intents()
@@ -1315,8 +1321,12 @@ class TestSlippageDetection:
 
         alert_service = AsyncMock()
         engine = ExecutionEngine(
-            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
-            sizer=mock_sizer, config=config, alert_service=alert_service,
+            store=store,
+            guard=mock_guard,
+            matchtrader=mock_matchtrader,
+            sizer=mock_sizer,
+            config=config,
+            alert_service=alert_service,
         )
         _make_ready_intent(store, symbol="EURUSD", side="SELL")
         await engine.execute_ready_intents()
@@ -1324,7 +1334,6 @@ class TestSlippageDetection:
         alert_service.system_error.assert_called_once()
         call_args = alert_service.system_error.call_args[0][0]
         assert "Slippage alert" in call_args
-
 
 
 # ── BUG #1: Trade Opened price=0.0 fix tests ──────────────────────────────
@@ -1354,8 +1363,12 @@ class TestTradeOpenedPriceAlert:
 
         alert_service = AsyncMock()
         engine = ExecutionEngine(
-            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
-            sizer=mock_sizer, config=config, alert_service=alert_service,
+            store=store,
+            guard=mock_guard,
+            matchtrader=mock_matchtrader,
+            sizer=mock_sizer,
+            config=config,
+            alert_service=alert_service,
         )
         _make_ready_intent(store, symbol="EURUSD", side="BUY")
         await engine.execute_ready_intents()
@@ -1391,8 +1404,12 @@ class TestTradeOpenedPriceAlert:
 
         alert_service = AsyncMock()
         engine = ExecutionEngine(
-            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
-            sizer=mock_sizer, config=config, alert_service=alert_service,
+            store=store,
+            guard=mock_guard,
+            matchtrader=mock_matchtrader,
+            sizer=mock_sizer,
+            config=config,
+            alert_service=alert_service,
         )
         _make_ready_intent(store, symbol="EURUSD", side="SELL")
         await engine.execute_ready_intents()
@@ -1424,8 +1441,12 @@ class TestTradeOpenedPriceAlert:
 
         alert_service = AsyncMock()
         engine = ExecutionEngine(
-            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
-            sizer=mock_sizer, config=config, alert_service=alert_service,
+            store=store,
+            guard=mock_guard,
+            matchtrader=mock_matchtrader,
+            sizer=mock_sizer,
+            config=config,
+            alert_service=alert_service,
         )
         _make_ready_intent(store, symbol="EURUSD", side="BUY")
         await engine.execute_ready_intents()
@@ -1455,8 +1476,12 @@ class TestTradeOpenedPriceAlert:
 
         alert_service = AsyncMock()
         engine = ExecutionEngine(
-            store=store, guard=mock_guard, matchtrader=mock_matchtrader,
-            sizer=mock_sizer, config=config, alert_service=alert_service,
+            store=store,
+            guard=mock_guard,
+            matchtrader=mock_matchtrader,
+            sizer=mock_sizer,
+            config=config,
+            alert_service=alert_service,
         )
         _make_ready_intent(store, symbol="GBPUSD", side="BUY")
         await engine.execute_ready_intents()

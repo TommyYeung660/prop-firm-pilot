@@ -68,9 +68,7 @@ def scheduler(config: AppConfig, store: DecisionStore) -> Scheduler:
 class TestOptimizationIntegration:
     """Scheduler should refresh optimization state during daily summary."""
 
-    async def test_daily_summary_triggers_optimization_refresh(
-        self, scheduler: Scheduler
-    ) -> None:
+    async def test_daily_summary_triggers_optimization_refresh(self, scheduler: Scheduler) -> None:
         engine = MagicMock()
         scheduler._optimization_engine = engine
 

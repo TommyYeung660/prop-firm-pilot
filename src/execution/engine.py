@@ -350,9 +350,7 @@ class ExecutionEngine:
                 # Extract fill price for alert
                 fill_price = self._extract_open_price(order.raw_response)
                 if fill_price is None:
-                    fill_price = await self._fetch_position_open_price(
-                        order.position_id
-                    )
+                    fill_price = await self._fetch_position_open_price(order.position_id)
                 await self._send_alert_opened(
                     symbol,
                     side,
@@ -370,8 +368,7 @@ class ExecutionEngine:
                     meta_instrument = self._config.instruments.get(symbol)
                     if meta_instrument is not None:
                         slippage_pips_val = (
-                            abs(meta_fill_price - relevant_price)
-                            / meta_instrument.pip_size
+                            abs(meta_fill_price - relevant_price) / meta_instrument.pip_size
                         )
 
                 execution_meta = self._build_execution_meta(
@@ -566,8 +563,7 @@ class ExecutionEngine:
         compliance_passed: bool,
         order_raw_response: dict[str, Any],
     ) -> str:
-        """Build execution metadata JSON string for persistence.
-        """
+        """Build execution metadata JSON string for persistence."""
         data: dict[str, Any] = {
             "fill_price": fill_price,
             "volume": volume,

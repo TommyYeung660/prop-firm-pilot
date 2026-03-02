@@ -69,9 +69,7 @@ class OptimizationState(BaseModel):
         description="State generation timestamp (UTC)",
     )
     pnl_lookback_days: int = Field(default=7, description="PnL lookback window (days)")
-    winrate_lookback_days: int = Field(
-        default=14, description="Win-rate lookback window (days)"
-    )
+    winrate_lookback_days: int = Field(default=14, description="Win-rate lookback window (days)")
 
     global_thresholds: Thresholds = Field(default_factory=Thresholds)
     symbol_thresholds: dict[str, Thresholds] = Field(default_factory=dict)

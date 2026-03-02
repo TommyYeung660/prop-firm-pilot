@@ -23,15 +23,15 @@ class E8RuleSynthesizer:
         return {
             "account_type": "E8 One Challenge",
             "balance": 5000.0,
-            "daily_drawdown_limit": 0.02, # 2% Daily Pause / Loss
-            "max_drawdown_limit": 0.06,   # 6% Trailing Drawdown
-            "drawdown_type": "dynamic",   # Trailing from HWM, locks at initial balance
-            "profit_target": 0.06,        # 6% Profit Target
-            "best_day_ratio": 0.40,       # 40%
+            "daily_drawdown_limit": 0.02,  # 2% Daily Pause / Loss
+            "max_drawdown_limit": 0.06,  # 6% Trailing Drawdown
+            "drawdown_type": "dynamic",  # Trailing from HWM, locks at initial balance
+            "profit_target": 0.06,  # 6% Profit Target
+            "best_day_ratio": 0.40,  # 40%
             "daily_api_request_limit": 2000,
             "daily_drawdown_stop": 0.85,
             "max_drawdown_stop": 0.85,
-            "best_day_stop": 0.85
+            "best_day_stop": 0.85,
         }
 
     @staticmethod
@@ -42,13 +42,13 @@ class E8RuleSynthesizer:
         return {
             "account_type": "E8 Trial",
             "balance": 5000.0,
-            "daily_drawdown_limit": 0.02, # Usually 2% or 4%
-            "max_drawdown_limit": 0.04,   # Usually 4% or 8%
+            "daily_drawdown_limit": 0.02,  # Usually 2% or 4%
+            "max_drawdown_limit": 0.04,  # Usually 4% or 8%
             "drawdown_type": "dynamic",
-            "profit_target": 0.06,        # Usually 6%
+            "profit_target": 0.06,  # Usually 6%
             "best_day_ratio": 0.40,
             "daily_api_request_limit": 2000,
             "daily_drawdown_stop": 0.85,
             "max_drawdown_stop": 0.85,
-            "best_day_stop": 0.85
+            "best_day_stop": 0.85,
         }

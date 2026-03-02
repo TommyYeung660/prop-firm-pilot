@@ -28,6 +28,7 @@ class DrawdownMonitor:
         self._day_start_balance = 0.0
         self._initial_balance = 0.0
         self._high_water_mark = 0.0
+
     def update(
         self,
         equity: float,

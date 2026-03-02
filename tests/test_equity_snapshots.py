@@ -1,8 +1,5 @@
 """Tests for equity snapshots (Phase 2.8) — insert_equity_snapshot() and get_equity_history()."""
 
-
-
-
 import pytest
 
 from src.decision_store.sqlite_store import DecisionStore

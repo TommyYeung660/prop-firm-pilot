@@ -18,6 +18,7 @@ def test_scheduler_config_reeval_interval_default():
 def test_e8_one_5k_session_aware_config():
     """e8_one_5k_challenge should have session-aware cadence enabled."""
     from src.config import load_config
+
     config = load_config("config/e8_one_5k_challenge.yaml")
     assert config.scheduler.session_aware_enabled is True
     assert config.scheduler.active_session_interval_seconds == 3600

@@ -411,7 +411,6 @@ class TestE2EPipeline:
         assert final.status == "cancelled"
 
 
-
 # ── Section 4: Interval Parameter (v1.2.0) ────────────────────────────────
 
 

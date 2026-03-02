@@ -62,6 +62,10 @@ scheduler:
   volatility_threshold_pct: 0.3
   volatility_window_minutes: 30
   volatility_cooldown_seconds: 900
+  # v1.2.0: 多時間框架分析 (先停用，驗證日內數據後再啟用)
+  multi_timeframe_enabled: false
+  entry_timeframe: "4h"
+  intraday_lookback_days: 90
 instruments:
   EURUSD:
     pip_size: 0.0001

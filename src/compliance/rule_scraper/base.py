@@ -8,10 +8,11 @@ class AccountRules(BaseModel):
     size: float
     daily_drawdown_limit: float
     max_drawdown_limit: float
-    drawdown_type: str # "balance", "dynamic", "equity"
+    drawdown_type: str  # "balance", "dynamic", "equity"
     profit_target: float
     best_day_ratio: float
     best_day_limit: float
+
 
 class BaseScraper(ABC):
     @abstractmethod

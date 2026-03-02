@@ -58,6 +58,7 @@ CREATE INDEX IF NOT EXISTS idx_fx_intraday_symbol_interval_dt
 ON fx_intraday (symbol, interval, datetime)
 """
 
+
 class FxDuckDbStore:
     """DuckDB-based cache for FX daily and intraday OHLCV data.
 
@@ -225,8 +226,17 @@ class FxDuckDbStore:
         if "volume" not in df.columns:
             df["volume"] = 0
 
-        cols = ["symbol", "interval", "datetime", "open", "high", "low", "close",
-                "volume", "provider"]
+        cols = [
+            "symbol",
+            "interval",
+            "datetime",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "provider",
+        ]
         df = pd.DataFrame(df[cols])
 
         self._conn.execute("BEGIN TRANSACTION")
@@ -250,7 +260,11 @@ class FxDuckDbStore:
             count = len(df)
             logger.info(
                 "FxDuckDbStore: upserted {} intraday rows for {} ({}, {} to {})",
-                count, symbol, interval, min_dt, max_dt,
+                count,
+                symbol,
+                interval,
+                min_dt,
+                max_dt,
             )
             return count
 
@@ -258,7 +272,9 @@ class FxDuckDbStore:
             self._conn.execute("ROLLBACK")
             logger.error(
                 "FxDuckDbStore: intraday upsert failed for {} ({}): {}",
-                symbol, interval, e,
+                symbol,
+                interval,
+                e,
             )
             raise
 
@@ -291,18 +307,19 @@ class FxDuckDbStore:
             params.append(pd.Timestamp(start_date))
         if end_date:
             query += " AND datetime <= ?"
-            params.append(
-                pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-            )
+            params.append(pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
 
         query += " ORDER BY datetime ASC"
         result = self._conn.execute(query, params).fetchdf()
 
         logger.debug(
             "FxDuckDbStore: read {} intraday rows for {} ({})",
-            len(result), symbol, interval,
+            len(result),
+            symbol,
+            interval,
         )
         return result
+
     def get_date_range(self, symbol: str) -> tuple[date | None, date | None]:
         """Get the min and max dates available for a symbol.
 

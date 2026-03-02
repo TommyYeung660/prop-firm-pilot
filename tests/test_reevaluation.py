@@ -1,6 +1,5 @@
 """Tests for HOLD re-evaluation logic (Phase 2.6) — _reevaluate_open_positions()."""
 
-
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -166,6 +165,7 @@ class TestReevaluateOpenPositions:
         await scheduler._reevaluate_open_positions([pos], opened_intents)
         mock_matchtrader.close_position.assert_not_called()
         assert "POS-1" not in scheduler._reevaluation_close_positions
+
     async def test_buy_decision_keeps_position_open(
         self,
         scheduler: Scheduler,
@@ -418,7 +418,6 @@ class TestReevaluateOpenPositions:
 
         mock_matchtrader.close_position.assert_not_called()
 
-
     async def test_sell_signal_on_buy_position_closes(
         self,
         scheduler: Scheduler,
@@ -525,7 +524,6 @@ class TestReevaluateOpenPositions:
         mock_matchtrader.close_position.assert_not_called()
         assert "POS-1" not in scheduler._reevaluation_close_positions
 
-
     async def test_min_hold_time_skips_early_reeval(
         self,
         tmp_path: Path,
@@ -625,6 +623,7 @@ class TestReevaluateOpenPositions:
         await sched._reevaluate_open_positions([pos], opened_intents)
 
         mock_agents.decide.assert_called_once()
+
 
 # ── Test Class: Re-evaluation Exit Reason Override ──────────────────────
 
@@ -737,8 +736,6 @@ def scheduler_with_hold_time(
         engine=AsyncMock(),
         matchtrader=mock_matchtrader,
     )
-
-
 
 
 # ── BUG #3: PnL Fallback Tests ──────────────────────────────────────────

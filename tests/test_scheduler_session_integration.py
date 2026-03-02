@@ -2,8 +2,6 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from src.config import AppConfig
 from src.scheduler.session_cadence import SessionCadence
 

@@ -209,9 +209,7 @@ class TestCallTypeClassification:
 
     def _classify(self, method: str, path: str) -> str:
         _write_paths = ("/position/open", "/position/close", "/position/edit")
-        return (
-            "write" if method == "POST" and any(wp in path for wp in _write_paths) else "read"
-        )
+        return "write" if method == "POST" and any(wp in path for wp in _write_paths) else "read"
 
     def test_post_position_open_classified_as_write(self) -> None:
         """POST to /position/open -> write."""

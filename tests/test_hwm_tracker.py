@@ -150,11 +150,10 @@ class TestHighWaterMarkTracker:
 
 def test_config_has_hwm_state_path():
     from src.config import ComplianceConfig
+
     c = ComplianceConfig(drawdown_type="dynamic")
     assert hasattr(c, "hwm_state_path")
     assert c.hwm_state_path == "data/hwm_state.json"
-
-
 
 
 class TestDrawdownMonitorDynamic:
@@ -165,7 +164,10 @@ class TestDrawdownMonitorDynamic:
         monitor = DrawdownMonitor(config)
         # Provide high_water_mark=5100 (balance grew from 5000)
         monitor.update(
-            equity=5050, day_start_balance=5100, initial_balance=5000, high_water_mark=5100,
+            equity=5050,
+            day_start_balance=5100,
+            initial_balance=5000,
+            high_water_mark=5100,
         )
         # max loss should be from HWM: 5100 * 0.06 = 306
         # current loss from HWM: 5100 - 5050 = 50
@@ -176,7 +178,10 @@ class TestDrawdownMonitorDynamic:
         config = ComplianceConfig(max_drawdown_limit=0.06, drawdown_type="dynamic")
         monitor = DrawdownMonitor(config)
         monitor.update(
-            equity=5050, day_start_balance=5100, initial_balance=5000, high_water_mark=5100,
+            equity=5050,
+            day_start_balance=5100,
+            initial_balance=5000,
+            high_water_mark=5100,
         )
         # max loss = 306, current loss = 50, remaining = 256
         assert monitor.max_drawdown_remaining == pytest.approx(256.0)

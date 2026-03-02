@@ -737,7 +737,6 @@ class TestDashboardQueries:
         status = store.get_pipeline_status()
         assert status["total_active"] == 0
 
-
     def test_count_pipeline_intents_empty(self, store: DecisionStore) -> None:
         """Should return 0 when no pipeline intents exist."""
         assert store.count_pipeline_intents() == 0
@@ -760,8 +759,12 @@ class TestDashboardQueries:
         store.insert_intent(intent)
         store.claim_next_pending("llm-0")
         store.update_intent_decision(
-            intent.id, side="BUY", sl_pips=20, tp_pips=40,
-            risk_report="test", state_json="{}",
+            intent.id,
+            side="BUY",
+            sl_pips=20,
+            tp_pips=40,
+            risk_report="test",
+            state_json="{}",
         )
         store.mark_ready_for_exec(intent.id)
         store.mark_executing(intent.id)

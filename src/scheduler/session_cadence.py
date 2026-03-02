@@ -17,8 +17,6 @@ Usage:
 
 from datetime import datetime
 
-from loguru import logger
-
 from src.config import SchedulerConfig
 
 

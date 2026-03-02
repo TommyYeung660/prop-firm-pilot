@@ -144,6 +144,7 @@ class Scheduler:
 
         # v1.2.0: Volatility-triggered re-scans
         self._volatility_monitor = VolatilityMonitor(config.scheduler, config.symbols)
+
     # ── Public API ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -227,9 +228,7 @@ class Scheduler:
                     sym = signal.instrument
                     if sym not in best_per_symbol or signal.score > best_per_symbol[sym].score:
                         best_per_symbol[sym] = signal
-                candidates = sorted(
-                    best_per_symbol.values(), key=lambda s: s.score, reverse=True
-                )
+                candidates = sorted(best_per_symbol.values(), key=lambda s: s.score, reverse=True)
                 topk_signals = candidates[: self._config.scanner.topk]
                 logger.info(
                     "Scanner loop: {} signals -> {} symbols -> {} candidates",
@@ -240,12 +239,8 @@ class Scheduler:
 
                 # ── Capacity check: avoid creating intents beyond max_positions ──
                 max_pos = self._config.execution.max_positions
-                open_count = len(
-                    await asyncio.to_thread(self._store.get_active_positions)
-                )
-                pipeline_count = await asyncio.to_thread(
-                    self._store.count_pipeline_intents
-                )
+                open_count = len(await asyncio.to_thread(self._store.get_active_positions))
+                pipeline_count = await asyncio.to_thread(self._store.count_pipeline_intents)
                 total_occupied = open_count + pipeline_count
                 available_slots = max_pos - total_occupied
                 if available_slots <= 0:
@@ -814,14 +809,18 @@ class Scheduler:
                     logger.warning(
                         "Position monitor: API budget critical ({}/{} remaining)"
                         " — throttling to {}s interval",
-                        remaining, daily_limit, sleep_interval,
+                        remaining,
+                        daily_limit,
+                        sleep_interval,
                     )
                 elif remaining < daily_limit * 0.30:
                     sleep_interval = base_interval * 2
                     logger.info(
                         "Position monitor: API budget low ({}/{} remaining)"
                         " — throttling to {}s interval",
-                        remaining, daily_limit, sleep_interval,
+                        remaining,
+                        daily_limit,
+                        sleep_interval,
                     )
                 else:
                     sleep_interval = base_interval
@@ -918,7 +917,6 @@ class Scheduler:
                 pnl,
                 position_id,
             )
-
 
         # Clean up reevaluation tracking
         self._last_reevaluation.pop(position_id, None)
@@ -1039,7 +1037,8 @@ class Scheduler:
             except Exception as e:
                 logger.error(
                     "Position monitor: alert failed for {}: {}",
-                    position_id, e,
+                    position_id,
+                    e,
                 )
 
         # v1.2.0: Signal scanner to re-scan immediately (slot freed)
@@ -1106,7 +1105,6 @@ class Scheduler:
             f"• Total PnL locked: ${total_pnl:+.2f}\n"
             f"• {self._best_day_tracker.summary()}"
         )
-
 
     async def _apply_breakeven_stops(
         self, open_positions: list[Any], opened_intents: list[TradeIntent]
@@ -1197,7 +1195,6 @@ class Scheduler:
                     e,
                 )
 
-
     async def _reevaluate_open_positions(
         self, open_positions: list[Any], opened_intents: list[TradeIntent]
     ) -> None:
@@ -1276,9 +1273,8 @@ class Scheduler:
                 )
 
                 # Determine if the signal is a reversal of the current position
-                is_reversal = (
-                    (pos.side == "BUY" and decision.decision == "SELL")
-                    or (pos.side == "SELL" and decision.decision == "BUY")
+                is_reversal = (pos.side == "BUY" and decision.decision == "SELL") or (
+                    pos.side == "SELL" and decision.decision == "BUY"
                 )
 
                 if is_reversal:
@@ -1324,7 +1320,6 @@ class Scheduler:
                     e,
                 )
 
-
     async def _run_intraday_scan(self, daily_signals: list, today: str) -> None:
         """Run intraday scanner on symbols that daily scan identified.
 
@@ -1335,7 +1330,9 @@ class Scheduler:
         symbols = [s.instrument for s in daily_signals]
         logger.info(
             "Multi-timeframe: running {} scan for {} symbols: {}",
-            entry_tf, len(symbols), symbols,
+            entry_tf,
+            len(symbols),
+            symbols,
         )
 
         intraday_signals = await asyncio.to_thread(
@@ -1351,10 +1348,14 @@ class Scheduler:
             for signal in intraday_signals:
                 logger.info(
                     "Multi-timeframe {}: {} score={:.4f} conf={}",
-                    entry_tf, signal.instrument, signal.score, signal.confidence,
+                    entry_tf,
+                    signal.instrument,
+                    signal.score,
+                    signal.confidence,
                 )
         else:
             logger.info("Multi-timeframe: no intraday signals generated")
+
     async def _volatility_monitor_loop(self) -> None:
         """Poll quotes and trigger re-scan on significant price moves."""
         logger.info("Volatility monitor loop: started")
@@ -1469,10 +1470,7 @@ class Scheduler:
                 else 0.0
             )
 
-
-            max_dd_ref = (
-                self._hwm_tracker.high_water_mark if self._hwm_tracker else None
-            )
+            max_dd_ref = self._hwm_tracker.high_water_mark if self._hwm_tracker else None
             await self._alert_service.daily_summary(
                 date=date_str,
                 trades=trades_today,
@@ -1516,15 +1514,11 @@ class Scheduler:
         if self._running:
             self._weekend_force_close_done = False  # Reset for next weekend
             logger.info("{}: market open — resuming", loop_name)
-            await self._send_alert(
-                f"☀️ <b>{loop_name}</b>: market open, resuming operations"
-            )
+            await self._send_alert(f"☀️ <b>{loop_name}</b>: market open, resuming operations")
 
     async def _force_close_for_weekend(self) -> None:
         """Force-close all open positions before weekend market closure."""
-        logger.warning(
-            "Weekend force-close: closing all positions before market close"
-        )
+        logger.warning("Weekend force-close: closing all positions before market close")
         try:
             open_positions = await self._matchtrader.get_open_positions()
             if not open_positions:
@@ -1548,7 +1542,8 @@ class Scheduler:
                 except Exception as e:
                     logger.error(
                         "Weekend force-close: failed to close {}: {}",
-                        pos.position_id, e,
+                        pos.position_id,
+                        e,
                     )
 
             self._weekend_force_close_done = True
@@ -1559,9 +1554,7 @@ class Scheduler:
             )
         except Exception as e:
             logger.error("Weekend force-close failed: {}", e)
-            await self._send_alert(
-                f"⚠️ <b>Weekend Force-Close FAILED</b>\n<code>{e}</code>"
-            )
+            await self._send_alert(f"⚠️ <b>Weekend Force-Close FAILED</b>\n<code>{e}</code>")
 
     async def _send_alert(self, message: str) -> None:
         """Send a Telegram alert if AlertService is configured."""
@@ -1628,9 +1621,7 @@ class Scheduler:
         return 0.6 * cls._confidence_score(confidence) + 0.4 * score
 
     @classmethod
-    def _passes_threshold(
-        cls, confidence: str, blended: float, thresholds: Thresholds
-    ) -> bool:
+    def _passes_threshold(cls, confidence: str, blended: float, thresholds: Thresholds) -> bool:
         """Check whether confidence meets configured thresholds."""
         current = cls._confidence_score(confidence)
         required = cls._confidence_score(thresholds.min_confidence)

@@ -511,9 +511,7 @@ async def _run_scheduler(config: AppConfig) -> None:
                     timeout=10.0,
                 )
             except asyncio.TimeoutError:
-                logger.warning(
-                    "PropFirmPilot: shutdown timed out after 10s — forcing exit"
-                )
+                logger.warning("PropFirmPilot: shutdown timed out after 10s — forcing exit")
             store.close()
             logger.info("PropFirmPilot: shutdown complete")
 
