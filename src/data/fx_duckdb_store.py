@@ -36,15 +36,37 @@ CREATE INDEX IF NOT EXISTS idx_fx_daily_symbol_date
 ON fx_daily (symbol, date)
 """
 
+# DuckDB schema for FX intraday bars (4h, 1h, etc.)
+CREATE_INTRADAY_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS fx_intraday (
+    symbol      VARCHAR NOT NULL,
+    interval    VARCHAR NOT NULL,
+    datetime    TIMESTAMP NOT NULL,
+    open        DOUBLE NOT NULL,
+    high        DOUBLE NOT NULL,
+    low         DOUBLE NOT NULL,
+    close       DOUBLE NOT NULL,
+    volume      BIGINT DEFAULT 0,
+    provider    VARCHAR DEFAULT 'unknown',
+    fetched_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, interval, datetime)
+)
+"""
+
+CREATE_INTRADAY_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_fx_intraday_symbol_interval_dt
+ON fx_intraday (symbol, interval, datetime)
+"""
 
 class FxDuckDbStore:
-    """DuckDB-based cache for FX daily OHLCV data.
+    """DuckDB-based cache for FX daily and intraday OHLCV data.
 
     Usage:
         store = FxDuckDbStore("data/fx_prices.duckdb")
-        store.upsert("EURUSD", df)          # Save fetched data
-        df = store.read("EURUSD", start, end)  # Read cached data
-        missing = store.get_missing_dates("EURUSD", start, end)  # Find gaps
+        store.upsert("EURUSD", df)          # Save daily data
+        store.upsert_intraday("EURUSD", df, interval="4h")  # Save intraday
+        df = store.read("EURUSD", start, end)  # Read daily
+        df = store.read_intraday("EURUSD", interval="4h")   # Read intraday
     """
 
     def __init__(self, db_path: str | Path) -> None:
@@ -57,6 +79,8 @@ class FxDuckDbStore:
         """Create tables and indexes if not exist."""
         self._conn.execute(CREATE_TABLE_SQL)
         self._conn.execute(CREATE_INDEX_SQL)
+        self._conn.execute(CREATE_INTRADAY_TABLE_SQL)
+        self._conn.execute(CREATE_INTRADAY_INDEX_SQL)
         logger.debug("FxDuckDbStore: schema initialized at {}", self._db_path)
 
     def upsert(self, symbol: str, df: pd.DataFrame, provider: str = "unknown") -> int:
@@ -166,6 +190,119 @@ class FxDuckDbStore:
         """Read cached data for multiple symbols."""
         return {sym: self.read(sym, start_date, end_date) for sym in symbols}
 
+    # ── Intraday Storage ────────────────────────────────────────────────────
+
+    def upsert_intraday(
+        self,
+        symbol: str,
+        df: pd.DataFrame,
+        interval: str = "4h",
+        provider: str = "unknown",
+    ) -> int:
+        """Insert or update intraday bars for a symbol.
+
+        Args:
+            symbol: FX pair (e.g. "EURUSD").
+            df: DataFrame with columns: datetime, open, high, low, close, volume.
+            interval: Bar interval (e.g. "4h", "1h", "30min").
+            provider: Data provider name for audit trail.
+
+        Returns:
+            Number of rows upserted.
+        """
+        if df.empty:
+            return 0
+
+        df = df.copy()
+        df["symbol"] = symbol
+        df["interval"] = interval
+        df["provider"] = provider
+
+        # Ensure datetime column is proper Timestamp
+        df["datetime"] = pd.to_datetime(df["datetime"])
+
+        # Ensure volume column
+        if "volume" not in df.columns:
+            df["volume"] = 0
+
+        cols = ["symbol", "interval", "datetime", "open", "high", "low", "close",
+                "volume", "provider"]
+        df = pd.DataFrame(df[cols])
+
+        self._conn.execute("BEGIN TRANSACTION")
+        try:
+            min_dt = df["datetime"].min()
+            max_dt = df["datetime"].max()
+            self._conn.execute(
+                "DELETE FROM fx_intraday "
+                "WHERE symbol = ? AND interval = ? AND datetime BETWEEN ? AND ?",
+                [symbol, interval, min_dt, max_dt],
+            )
+
+            self._conn.execute(
+                "INSERT INTO fx_intraday "
+                "(symbol, interval, datetime, open, high, low, close, volume, provider) "
+                "SELECT symbol, interval, datetime, open, high, low, close, volume, provider "
+                "FROM df"
+            )
+            self._conn.execute("COMMIT")
+
+            count = len(df)
+            logger.info(
+                "FxDuckDbStore: upserted {} intraday rows for {} ({}, {} to {})",
+                count, symbol, interval, min_dt, max_dt,
+            )
+            return count
+
+        except Exception as e:
+            self._conn.execute("ROLLBACK")
+            logger.error(
+                "FxDuckDbStore: intraday upsert failed for {} ({}): {}",
+                symbol, interval, e,
+            )
+            raise
+
+    def read_intraday(
+        self,
+        symbol: str,
+        interval: str = "4h",
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> pd.DataFrame:
+        """Read cached intraday bars for a symbol.
+
+        Args:
+            symbol: FX pair.
+            interval: Bar interval (e.g. "4h", "1h").
+            start_date: Start date (inclusive). None = all.
+            end_date: End date (inclusive). None = all.
+
+        Returns:
+            DataFrame with columns: datetime, open, high, low, close, volume.
+        """
+        query = (
+            "SELECT datetime, open, high, low, close, volume FROM fx_intraday "
+            "WHERE symbol = ? AND interval = ?"
+        )
+        params: list[str | date] = [symbol, interval]
+
+        if start_date:
+            query += " AND datetime >= ?"
+            params.append(pd.Timestamp(start_date))
+        if end_date:
+            query += " AND datetime <= ?"
+            params.append(
+                pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            )
+
+        query += " ORDER BY datetime ASC"
+        result = self._conn.execute(query, params).fetchdf()
+
+        logger.debug(
+            "FxDuckDbStore: read {} intraday rows for {} ({})",
+            len(result), symbol, interval,
+        )
+        return result
     def get_date_range(self, symbol: str) -> tuple[date | None, date | None]:
         """Get the min and max dates available for a symbol.
 
