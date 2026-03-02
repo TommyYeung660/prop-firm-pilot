@@ -27,12 +27,13 @@ class DrawdownMonitor:
         self._equity = 0.0
         self._day_start_balance = 0.0
         self._initial_balance = 0.0
-
+        self._high_water_mark = 0.0
     def update(
         self,
         equity: float,
         day_start_balance: float,
         initial_balance: float,
+        high_water_mark: float = 0.0,
     ) -> None:
         """Update drawdown monitor with latest account values.
 
@@ -41,6 +42,7 @@ class DrawdownMonitor:
         self._equity = equity
         self._day_start_balance = day_start_balance
         self._initial_balance = initial_balance
+        self._high_water_mark = high_water_mark if high_water_mark > 0 else initial_balance
 
     # ── Daily Drawdown ──────────────────────────────────────────────────
 
@@ -72,28 +74,36 @@ class DrawdownMonitor:
     # ── Max Drawdown ────────────────────────────────────────────────────
 
     @property
+    def _max_dd_reference(self) -> float:
+        """Reference balance for max drawdown calculation.
+        Uses HWM for dynamic accounts, initial_balance otherwise."""
+        if self._config.drawdown_type == "dynamic" and self._high_water_mark > 0:
+            return self._high_water_mark
+        return self._initial_balance
+
+    @property
     def max_drawdown_pct(self) -> float:
         """Current max drawdown as fraction of the max limit consumed.
 
         Returns 0.0 (no drawdown) to 1.0+ (limit breached).
         """
-        if self._initial_balance <= 0:
+        if self._max_dd_reference <= 0:
             return 0.0
-        max_loss = self._initial_balance * self._config.max_drawdown_limit
-        current_loss = max(0.0, self._initial_balance - self._equity)
+        max_loss = self._max_dd_reference * self._config.max_drawdown_limit
+        current_loss = max(0.0, self._max_dd_reference - self._equity)
         return current_loss / max_loss if max_loss > 0 else 0.0
 
     @property
     def max_drawdown_remaining(self) -> float:
         """Dollars remaining before max drawdown limit is hit."""
-        max_loss = self._initial_balance * self._config.max_drawdown_limit
-        current_loss = max(0.0, self._initial_balance - self._equity)
+        max_loss = self._max_dd_reference * self._config.max_drawdown_limit
+        current_loss = max(0.0, self._max_dd_reference - self._equity)
         return max(0.0, max_loss - current_loss)
 
     @property
     def max_drawdown_dollars(self) -> float:
-        """Current total drawdown in dollars (from initial balance)."""
-        return max(0.0, self._initial_balance - self._equity)
+        """Current total drawdown in dollars (from reference balance)."""
+        return max(0.0, self._max_dd_reference - self._equity)
 
     # ── Alert Classification ────────────────────────────────────────────
 

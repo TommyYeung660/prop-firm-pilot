@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from src.compliance.drawdown_monitor import DrawdownMonitor
 from src.compliance.hwm_tracker import HighWaterMarkTracker
+from src.config import ComplianceConfig
 
 
 class TestHighWaterMarkTracker:
@@ -151,3 +153,38 @@ def test_config_has_hwm_state_path():
     c = ComplianceConfig(drawdown_type="dynamic")
     assert hasattr(c, "hwm_state_path")
     assert c.hwm_state_path == "data/hwm_state.json"
+
+
+
+
+class TestDrawdownMonitorDynamic:
+    """Tests for DrawdownMonitor with dynamic drawdown support."""
+
+    def test_max_drawdown_uses_hwm_when_provided(self) -> None:
+        config = ComplianceConfig(max_drawdown_limit=0.06, drawdown_type="dynamic")
+        monitor = DrawdownMonitor(config)
+        # Provide high_water_mark=5100 (balance grew from 5000)
+        monitor.update(
+            equity=5050, day_start_balance=5100, initial_balance=5000, high_water_mark=5100,
+        )
+        # max loss should be from HWM: 5100 * 0.06 = 306
+        # current loss from HWM: 5100 - 5050 = 50
+        # pct consumed: 50/306 ≈ 0.1634
+        assert monitor.max_drawdown_pct == pytest.approx(50 / 306, rel=1e-3)
+
+    def test_max_drawdown_remaining_uses_hwm(self) -> None:
+        config = ComplianceConfig(max_drawdown_limit=0.06, drawdown_type="dynamic")
+        monitor = DrawdownMonitor(config)
+        monitor.update(
+            equity=5050, day_start_balance=5100, initial_balance=5000, high_water_mark=5100,
+        )
+        # max loss = 306, current loss = 50, remaining = 256
+        assert monitor.max_drawdown_remaining == pytest.approx(256.0)
+
+    def test_max_drawdown_falls_back_to_initial_when_no_hwm(self) -> None:
+        """When high_water_mark is not provided, fall back to initial_balance."""
+        config = ComplianceConfig(max_drawdown_limit=0.08, drawdown_type="balance")
+        monitor = DrawdownMonitor(config)
+        monitor.update(equity=49000, day_start_balance=50000, initial_balance=50000)
+        # Should use initial_balance as before
+        assert monitor.max_drawdown_pct == pytest.approx(1000 / 4000, rel=1e-3)
