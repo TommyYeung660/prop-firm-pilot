@@ -123,15 +123,28 @@ class TestCSVParsing:
         assert "EURUSD" in instruments
         assert "USDJPY" in instruments
 
-    def test_load_multiday_returns_all(self, bridge: ScannerBridge) -> None:
-        """signals_multiday.csv has 6 rows across 2 dates → all 6 loaded."""
+    def test_load_multiday_returns_latest_date_only(self, bridge: ScannerBridge) -> None:
+        """signals_multiday.csv has 2 dates → returns only latest date (3 signals)."""
         signals = bridge.load_signals_from_file(FIXTURES_DIR / "signals_multiday.csv")
-        assert len(signals) == 6
+        assert len(signals) == 3  # Only 2026-02-16 (latest date)
+        instruments = {s.instrument for s in signals}
+        assert instruments == {"XAUUSD", "EURUSD", "AUDUSD"}
 
-    def test_load_nonexistent_file(self, bridge: ScannerBridge) -> None:
-        """Nonexistent file → empty list, no exception."""
-        signals = bridge.load_signals_from_file("/does/not/exist/signals.csv")
-        assert signals == []
+    def test_load_multiday_with_target_date(self, bridge: ScannerBridge) -> None:
+        """target_date selects signals for that specific date."""
+        signals = bridge.load_signals_from_file(
+            FIXTURES_DIR / "signals_multiday.csv", target_date="2026-02-15"
+        )
+        assert len(signals) == 3  # EURUSD, GBPUSD, USDJPY on 02-15
+        instruments = {s.instrument for s in signals}
+        assert instruments == {"EURUSD", "GBPUSD", "USDJPY"}
+
+    def test_load_multiday_missing_target_date_falls_back(self, bridge: ScannerBridge) -> None:
+        """target_date not in CSV → falls back to latest date."""
+        signals = bridge.load_signals_from_file(
+            FIXTURES_DIR / "signals_multiday.csv", target_date="2026-01-01"
+        )
+        assert len(signals) == 3  # Falls back to 2026-02-16 (latest)
 
     def test_load_empty_file(self, bridge: ScannerBridge, tmp_path: Path) -> None:
         """CSV with header only → empty list."""
@@ -343,34 +356,17 @@ class TestE2EPipeline:
     def test_multiday_scanner_independent(
         self, bridge: ScannerBridge, store: DecisionStore
     ) -> None:
-        """Multiday CSV: only create intents for target date, not all dates."""
+        """Multiday CSV with target_date: only create intents for target date."""
         target_date = "2026-02-16"
-        signals = bridge.load_signals_from_file(FIXTURES_DIR / "signals_multiday.csv")
-        assert len(signals) == 6
+        signals = bridge.load_signals_from_file(
+            FIXTURES_DIR / "signals_multiday.csv", target_date=target_date
+        )
+        # load_signals_from_file now filters by date automatically
+        assert len(signals) == 3  # XAUUSD, EURUSD, AUDUSD on 2026-02-16
 
-        # Filter by target date — this is not done by load_signals_from_file
-        # (it loads all rows). The caller (scheduler) would filter by date.
-        # Here we simulate the scheduler's date filtering by reading the CSV
-        # manually and matching dates. Since ScannerSignal doesn't store datetime,
-        # we use a different approach: load via CSV reader to get dates.
-        import csv
-
-        target_instruments = set()
-        with open(FIXTURES_DIR / "signals_multiday.csv") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if row["datetime"] == target_date:
-                    target_instruments.add(row["instrument"])
-
-        assert len(target_instruments) == 3  # XAUUSD, EURUSD, AUDUSD on 2026-02-16
-
-        # Insert only target date signals
         for signal in signals:
-            if signal.instrument in target_instruments:
-                # Check for duplicates (e.g., EURUSD appears on both dates)
-                if not store.intent_exists(signal.instrument, target_date, "scanner"):
-                    intent = _signal_to_intent(signal, target_date)
-                    store.insert_intent(intent)
+            intent = _signal_to_intent(signal, target_date)
+            store.insert_intent(intent)
 
         intents = store.get_intents_by_date(target_date)
         assert len(intents) == 3

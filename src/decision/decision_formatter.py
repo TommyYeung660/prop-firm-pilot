@@ -46,7 +46,6 @@ DEFAULT_SL_TP: dict[str, dict[str, float]] = {
     "GBPUSD": {"sl_pips": 50, "tp_pips": 100},
     "USDJPY": {"sl_pips": 45, "tp_pips": 90},
     "AUDUSD": {"sl_pips": 35, "tp_pips": 70},
-    "XAUUSD": {"sl_pips": 150, "tp_pips": 300},
 }
 
 

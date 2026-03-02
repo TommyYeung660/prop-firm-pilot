@@ -49,9 +49,3 @@ instruments:
     min_lot: 0.01
     max_lot: 50.0
     avg_spread_pips: 1.4
-  XAUUSD:
-    pip_value: 1.0      # 1 lot = 100 oz, $0.01 move = $1
-    pip_size: 0.01
-    min_lot: 0.01
-    max_lot: 20.0
-    avg_spread_pips: 25.0  # Gold spread 通常較大

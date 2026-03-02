@@ -157,7 +157,7 @@ class ScannerBridge:
                         "ScannerBridge: attempting fallback to existing signals file: {}",
                         signals_path,
                     )
-                    return self.load_signals_from_file(signals_path)
+                    return self.load_signals_from_file(signals_path, target_date=date)
 
                 return []
 
@@ -166,7 +166,7 @@ class ScannerBridge:
             # Read output file directly
             # Path: outputs/signals/signals.csv
             signals_path = self._scanner_path / "outputs" / "signals" / "signals.csv"
-            return self.load_signals_from_file(signals_path)
+            return self.load_signals_from_file(signals_path, target_date=date)
 
         except subprocess.TimeoutExpired:
             logger.error("ScannerBridge: pipeline timed out after 600s")
@@ -175,39 +175,49 @@ class ScannerBridge:
             logger.error("ScannerBridge: failed to run pipeline: {}", e)
             return []
 
-    def load_signals_from_file(self, path: str | Path) -> list[ScannerSignal]:
-        """Load signals from a pre-existing signals.csv file."""
+    def load_signals_from_file(
+        self, path: str | Path, target_date: str | None = None
+    ) -> list[ScannerSignal]:
+        """Load signals from a pre-existing signals.csv file.
+
+        Args:
+            path: Path to the signals.csv file.
+            target_date: If provided (YYYY-MM-DD), only return signals for this date.
+                         If no signals match the exact date, falls back to the latest date.
+                         If None, returns only the latest date's signals.
+        """
         path = Path(path)
         if not path.exists():
             logger.error("ScannerBridge: signals file not found: {}", path)
             return []
 
-        signals = []
+        all_signals: dict[str, list[ScannerSignal]] = {}
         try:
             with open(path, encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for i, row in enumerate(reader):
                     try:
-                        # CSV: datetime, instrument, score, rank,
-                        # confidence, score_gap, drop_distance,
-                        # topk_spread, weight.
-                        # Scanner output might vary. Let's be robust.
-
                         inst = row.get("instrument", row.get("ticker", ""))
                         if not inst:
                             continue
 
+                        row_date = row.get("datetime", "").split(" ")[0]  # YYYY-MM-DD
+
                         signal = ScannerSignal(
                             instrument=inst,
                             score=float(row.get("score", 0)),
-                            rank=int(float(row.get("rank", i + 1))),  # int(float()) handles "1.0"
+                            rank=int(float(row.get("rank", i + 1))),
                             confidence=row.get("confidence", "medium"),
                             score_gap=float(row.get("score_gap", 0)),
                             drop_distance=float(row.get("drop_distance", 0)),
                             topk_spread=float(row.get("topk_spread", 0)),
                             weight=float(row.get("weight", 0)),
                         )
-                        signals.append(signal)
+
+                        if row_date not in all_signals:
+                            all_signals[row_date] = []
+                        all_signals[row_date].append(signal)
+
                     except (ValueError, TypeError) as e:
                         logger.warning("ScannerBridge: skipping malformed row {}: {}", i, e)
 
@@ -215,7 +225,32 @@ class ScannerBridge:
             logger.error("ScannerBridge: failed to read CSV: {}", e)
             return []
 
-        # Filter by topk if needed, or just return all
+        if not all_signals:
+            logger.warning("ScannerBridge: no signals found in {}", path)
+            return []
+
+        # Pick the target date's signals, or fall back to latest date
+        available_dates = sorted(all_signals.keys())
+        if target_date and target_date in all_signals:
+            chosen_date = target_date
+        else:
+            chosen_date = available_dates[-1]  # latest date
+            if target_date and target_date not in all_signals:
+                logger.warning(
+                    "ScannerBridge: target_date {} not found in signals (available: {} to {}). "
+                    "Falling back to latest date {}.",
+                    target_date,
+                    available_dates[0],
+                    available_dates[-1],
+                    chosen_date,
+                )
+
+        signals = all_signals[chosen_date]
         signals.sort(key=lambda s: s.rank)
-        logger.info("ScannerBridge: loaded {} signals (top: {})", len(signals), signals[:3])
+        logger.info(
+            "ScannerBridge: loaded {} signals for date {} (total dates in file: {})",
+            len(signals),
+            chosen_date,
+            len(available_dates),
+        )
         return signals

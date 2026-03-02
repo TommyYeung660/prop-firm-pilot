@@ -5,7 +5,6 @@ account_name: "e8_one_5k_challenge"
 
 symbols:
   - EURUSD
-  - XAUUSD
 
 account:
   plan: "E8 One Challenge"
@@ -85,10 +84,5 @@ instruments:
   AUDUSD:
     pip_size: 0.0001
     pip_value: 10.0
-    min_lot: 0.01
-    max_lot: 5.0
-  XAUUSD:
-    pip_size: 0.01
-    pip_value: 1.0
     min_lot: 0.01
     max_lot: 5.0

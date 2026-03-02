@@ -56,7 +56,7 @@ class TestE8OneConfig:
         assert e8_one_config.compliance.best_day_ratio == 0.40
         assert e8_one_config.compliance.best_day_limit == 180
         assert e8_one_config.compliance.drawdown_type == "dynamic"
-        assert e8_one_config.symbols == ["EURUSD", "XAUUSD"]
+        assert e8_one_config.symbols == ["EURUSD"]
         assert e8_one_config.execution.default_risk_pct == 0.005
         assert e8_one_config.decision_store.db_path == "data/decisions_e8_one_5k.db"
         assert e8_one_config.monitor.trade_journal_path == "data/trade_journal_e8_one_5k.jsonl"
