@@ -316,6 +316,14 @@ class Scheduler:
                             f"conf={signal.confidence})"
                         )
 
+                # v1.2.0: Multi-timeframe — run intraday scan to confirm entry timing
+                if self._config.scheduler.multi_timeframe_enabled and topk_signals:
+                    try:
+                        await self._run_intraday_scan(topk_signals, today)
+                    except Exception as e:
+                        logger.warning(
+                            "Multi-timeframe scan failed (proceeding with daily-only): {}", e
+                        )
             except asyncio.CancelledError:
                 logger.info("Scanner loop: cancelled")
                 return
@@ -1316,6 +1324,37 @@ class Scheduler:
                     e,
                 )
 
+
+    async def _run_intraday_scan(self, daily_signals: list, today: str) -> None:
+        """Run intraday scanner on symbols that daily scan identified.
+
+        This provides entry timing — the daily scan sets direction,
+        the intraday scan confirms the entry point is favorable.
+        """
+        entry_tf = self._config.scheduler.entry_timeframe
+        symbols = [s.instrument for s in daily_signals]
+        logger.info(
+            "Multi-timeframe: running {} scan for {} symbols: {}",
+            entry_tf, len(symbols), symbols,
+        )
+
+        intraday_signals = await asyncio.to_thread(
+            self._scanner.run_pipeline,
+            date=today,
+            tickers=symbols,
+            interval=entry_tf,
+        )
+
+        # Log results — intents were already created by daily scan
+        # Intraday scan results are used for confidence boosting (Phase 2)
+        if intraday_signals:
+            for signal in intraday_signals:
+                logger.info(
+                    "Multi-timeframe {}: {} score={:.4f} conf={}",
+                    entry_tf, signal.instrument, signal.score, signal.confidence,
+                )
+        else:
+            logger.info("Multi-timeframe: no intraday signals generated")
     async def _volatility_monitor_loop(self) -> None:
         """Poll quotes and trigger re-scan on significant price moves."""
         logger.info("Volatility monitor loop: started")

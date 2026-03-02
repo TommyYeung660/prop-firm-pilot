@@ -246,6 +246,17 @@ class SchedulerConfig(BaseModel):
         default=900, description="Min seconds between volatility-triggered scans (15min)"
     )
 
+    # v1.2.0: Multi-timeframe analysis
+    multi_timeframe_enabled: bool = Field(
+        default=False, description="Enable multi-timeframe entry timing"
+    )
+    entry_timeframe: str = Field(
+        default="4h", description="Shorter timeframe for entry timing (4h or 1h)"
+    )
+    intraday_lookback_days: int = Field(
+        default=90, description="Days of intraday data to fetch for entry analysis"
+    )
+
 
 class LoggingConfig(BaseModel):
     """Logging configuration."""
