@@ -157,6 +157,30 @@ class DecisionStoreConfig(BaseModel):
     )
 
 
+
+
+class MarketHoursConfig(BaseModel):
+    """FX market hours and weekend closure settings (per-account).
+
+    Times are in UTC. Typical FX: close Friday 22:00 UTC, open Sunday 22:00 UTC.
+    These correspond to 17:00 EST / 17:00 EST (US Eastern).
+    """
+
+    enabled: bool = Field(default=False, description="Enable weekend market closure handling")
+    close_day: str = Field(default="Friday", description="Day market closes (e.g., Friday)")
+    close_time_utc: str = Field(
+        default="22:00", description="Market close time in UTC (HH:MM)"
+    )
+    open_day: str = Field(default="Sunday", description="Day market opens (e.g., Sunday)")
+    open_time_utc: str = Field(
+        default="22:00", description="Market open time in UTC (HH:MM)"
+    )
+    force_close_before_weekend: bool = Field(
+        default=False, description="Force-close all positions before weekend"
+    )
+    force_close_minutes_before: int = Field(
+        default=15, description="Minutes before market close to force-close positions"
+    )
 class SchedulerConfig(BaseModel):
     """Async scheduler cadences for the Hybrid EA+LLM pipeline."""
 
@@ -184,6 +208,10 @@ class SchedulerConfig(BaseModel):
     reeval_min_hold_seconds: int = Field(
         default=3600,
         description="Minimum seconds a position must be held before first re-evaluation (1h)",
+    )
+    market_hours: MarketHoursConfig = Field(
+        default_factory=MarketHoursConfig,
+        description="Weekend market closure settings",
     )
 
 
