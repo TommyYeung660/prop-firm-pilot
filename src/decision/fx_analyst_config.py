@@ -5,6 +5,8 @@ Configures which analysts are active, which data sources they use,
 and how their prompts are adapted for FX trading.
 """
 
+import os
+from datetime import date
 from typing import Any
 
 # FX-appropriate analysts (removed: fundamentals, options — not applicable to FX)
@@ -79,6 +81,22 @@ FX_PAIR_CONTEXT: dict[str, dict[str, Any]] = {
     },
 }
 
+# ── EODHD Switchover Configuration ───────────────────────────────────────
+# Before switchover date: use Alpha Vantage. On/after: use EODHD.
+# Override via env: EODHD_SWITCHOVER_DATE (ISO format), EODHD_FORCE_PRIMARY=1
+_DEFAULT_SWITCHOVER_DATE = "2026-03-21"
+
+
+def _get_primary_vendor() -> str:
+    """Determine primary data vendor based on switchover date."""
+    force = os.getenv("EODHD_FORCE_PRIMARY", "").strip() in ("1", "true", "yes")
+    if force:
+        return "eodhd"
+    switchover_str = os.getenv("EODHD_SWITCHOVER_DATE", _DEFAULT_SWITCHOVER_DATE)
+    switchover_date = date.fromisoformat(switchover_str)
+    if date.today() >= switchover_date:
+        return "eodhd"
+    return "alpha_vantage"
 
 def build_agent_config(
     output_language: str = "繁體中文",
@@ -88,23 +106,23 @@ def build_agent_config(
     Returns:
         Config dict ready to pass to TradingAgentsGraph().
     """
+    primary = _get_primary_vendor()
     return {
         "output_language": output_language,
         "market_type": "fx",  # newly added for TradingAgents integration
         "data_vendors": {
-            "core_stock_apis": "alpha_vantage",
-            "news_data": "alpha_vantage",
+            "core_stock_apis": primary,
+            "news_data": primary,
         },
         # Tool-level vendor overrides (takes precedence over category-level)
-        # - get_news: Alpha Vantage NEWS_SENTIMENT API with ticker filter (premium 75 req/min)
-        # - get_global_news: Alpha Vantage NEWS_SENTIMENT API with topic filter
-        #   (economy_monetary, economy_macro, financial_markets — no ticker, macro-only)
-        # - get_indicators: Alpha Vantage technical indicator APIs (SMA, EMA, RSI etc.)
-        #   support FX symbols natively (e.g. symbol=GBPUSD)
+        # - get_news: primary vendor's news API
+        # - get_global_news: primary vendor's global news API
+        # - get_indicators: primary vendor's technical indicator APIs
+        # - get_insider_*: always local (finnhub)
         "tool_vendors": {
-            "get_global_news": "alpha_vantage",
-            "get_news": "alpha_vantage",
-            "get_indicators": "alpha_vantage",
+            "get_global_news": primary,
+            "get_news": primary,
+            "get_indicators": primary,
             "get_insider_sentiment": "local",
             "get_insider_transactions": "local",
         },
