@@ -229,6 +229,23 @@ class SchedulerConfig(BaseModel):
     ny_open_utc: int = Field(default=12, description="New York session open hour (UTC)")
     ny_close_utc: int = Field(default=21, description="New York session close hour (UTC)")
 
+    # v1.2.0: Volatility-triggered scans
+    volatility_trigger_enabled: bool = Field(
+        default=False, description="Enable volatility-triggered scanner re-scans"
+    )
+    volatility_threshold_pct: float = Field(
+        default=0.3, description="Price change % to trigger re-scan (0.3 = 0.3%)"
+    )
+    volatility_window_minutes: int = Field(
+        default=30, description="Rolling window for price change calculation (minutes)"
+    )
+    volatility_poll_interval_seconds: int = Field(
+        default=60, description="How often to check quote prices for volatility (seconds)"
+    )
+    volatility_cooldown_seconds: int = Field(
+        default=900, description="Min seconds between volatility-triggered scans (15min)"
+    )
+
 
 class LoggingConfig(BaseModel):
     """Logging configuration."""
