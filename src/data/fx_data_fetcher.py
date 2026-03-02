@@ -40,6 +40,29 @@ class FxDataProvider(abc.ABC):
         """
         ...
 
+    @abc.abstractmethod
+    async def fetch_bars(
+        self,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+        client: httpx.AsyncClient,
+        interval: str = "daily",
+    ) -> pd.DataFrame:
+        """Fetch OHLCV bars at the given interval.
+
+        Args:
+            symbol: FX pair e.g. "EURUSD".
+            start_date: Start date (inclusive).
+            end_date: End date (inclusive).
+            client: httpx.AsyncClient instance.
+            interval: "daily", "4h", "1h", "30min", "15min", "5min", "1min".
+
+        Returns:
+            DataFrame with columns: datetime, open, high, low, close, volume.
+        """
+        ...
+
     @property
     @abc.abstractmethod
     def name(self) -> str: ...
@@ -58,6 +81,10 @@ class TraderMadeProvider(FxDataProvider):
 
     BASE_URL = "https://marketdata.tradermade.com/api/v1/timeseries"
     MAX_DAYS_PER_REQUEST = 365  # Free tier limitation
+    INTERVAL_MAP = {
+        "daily": "daily", "4h": "4H", "1h": "1H",
+        "30min": "30min", "15min": "15min", "5min": "5min", "1min": "1min",
+    }
 
     def __init__(self, api_key: str, max_retries: int = 3) -> None:
         self._api_key = api_key
@@ -74,14 +101,32 @@ class TraderMadeProvider(FxDataProvider):
         end_date: date,
         client: httpx.AsyncClient,
     ) -> pd.DataFrame:
-        """Fetch daily bars, paginating if range > 1 year."""
+        """Fetch daily bars — delegates to fetch_bars()."""
+        return await self.fetch_bars(symbol, start_date, end_date, client, interval="daily")
+
+    async def fetch_bars(
+        self,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+        client: httpx.AsyncClient,
+        interval: str = "daily",
+    ) -> pd.DataFrame:
+        """Fetch bars at the given interval, paginating if range > 1 year."""
+        api_interval = self.INTERVAL_MAP.get(interval)
+        if api_interval is None:
+            raise ValueError(
+                f"Unsupported interval '{interval}'. "
+                f"Available: {list(self.INTERVAL_MAP.keys())}"
+            )
+
         all_frames: list[pd.DataFrame] = []
         current_start = start_date
 
-        while current_start < end_date:
+        while current_start <= end_date:
             chunk_end = min(current_start + timedelta(days=self.MAX_DAYS_PER_REQUEST), end_date)
 
-            df = await self._fetch_chunk(symbol, current_start, chunk_end, client)
+            df = await self._fetch_chunk(symbol, current_start, chunk_end, client, api_interval)
             if not df.empty:
                 all_frames.append(df)
 
@@ -89,7 +134,8 @@ class TraderMadeProvider(FxDataProvider):
 
         if not all_frames:
             logger.warning(
-                "TraderMade: no data returned for {} ({} to {})", symbol, start_date, end_date
+                "TraderMade: no data returned for {} ({} to {}, interval={})",
+                symbol, start_date, end_date, interval,
             )
             return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
 
@@ -101,11 +147,8 @@ class TraderMadeProvider(FxDataProvider):
         )
 
         logger.info(
-            "TraderMade: fetched {} rows for {} ({} to {})",
-            len(result),
-            symbol,
-            start_date,
-            end_date,
+            "TraderMade: fetched {} rows for {} ({} to {}, interval={})",
+            len(result), symbol, start_date, end_date, interval,
         )
         return result
 
@@ -115,6 +158,7 @@ class TraderMadeProvider(FxDataProvider):
         start_date: date,
         end_date: date,
         client: httpx.AsyncClient,
+        api_interval: str = "daily",
     ) -> pd.DataFrame:
         """Fetch a single chunk (max 1 year)."""
         params = {
@@ -123,7 +167,7 @@ class TraderMadeProvider(FxDataProvider):
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "format": "records",
-            "interval": "daily",
+            "interval": api_interval,
         }
 
         for attempt in range(1, self._max_retries + 1):
@@ -201,6 +245,10 @@ class ITickProvider(FxDataProvider):
     BASE_URL = "https://api.itick.org/forex/kline"
     MAX_BARS_PER_REQUEST = 1000
     RATE_LIMIT_DELAY = 12.0  # 5 req/min = 1 req per 12s
+    KTYPE_MAP = {
+        "daily": "8", "4h": "6", "1h": "5",
+        "30min": "4", "15min": "3", "5min": "2", "1min": "1",
+    }
 
     def __init__(self, api_key: str, max_retries: int = 3) -> None:
         self._api_key = api_key
@@ -217,13 +265,31 @@ class ITickProvider(FxDataProvider):
         end_date: date,
         client: httpx.AsyncClient,
     ) -> pd.DataFrame:
-        """Fetch daily bars using reverse pagination (from end_date backwards)."""
+        """Fetch daily bars — delegates to fetch_bars()."""
+        return await self.fetch_bars(symbol, start_date, end_date, client, interval="daily")
+
+    async def fetch_bars(
+        self,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+        client: httpx.AsyncClient,
+        interval: str = "daily",
+    ) -> pd.DataFrame:
+        """Fetch bars at the given interval using reverse pagination."""
+        ktype = self.KTYPE_MAP.get(interval)
+        if ktype is None:
+            raise ValueError(
+                f"Unsupported interval '{interval}'. "
+                f"Available: {list(self.KTYPE_MAP.keys())}"
+            )
+
         all_frames: list[pd.DataFrame] = []
         end_ts = int(pd.Timestamp(end_date).timestamp() * 1000)
         start_ts = int(pd.Timestamp(start_date).timestamp() * 1000)
 
-        while end_ts > start_ts:
-            df = await self._fetch_chunk(symbol, end_ts, client)
+        while end_ts >= start_ts:
+            df = await self._fetch_chunk(symbol, end_ts, client, ktype)
             if df.empty:
                 break
 
@@ -240,16 +306,19 @@ class ITickProvider(FxDataProvider):
 
         if not all_frames:
             logger.warning(
-                "iTick: no data returned for {} ({} to {})", symbol, start_date, end_date
+                "iTick: no data returned for {} ({} to {}, interval={})",
+                symbol, start_date, end_date, interval,
             )
             return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
 
         result = pd.concat(all_frames, ignore_index=True)
 
         # Filter to requested date range
+        start_ts_filter = pd.Timestamp(start_date)
+        end_ts_filter = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
         result = result[
-            (result["datetime"] >= pd.Timestamp(start_date))
-            & (result["datetime"] <= pd.Timestamp(end_date))
+            (result["datetime"] >= start_ts_filter)
+            & (result["datetime"] <= end_ts_filter)
         ]
         result = (
             result.drop_duplicates(subset=["datetime"])
@@ -258,7 +327,8 @@ class ITickProvider(FxDataProvider):
         )
 
         logger.info(
-            "iTick: fetched {} rows for {} ({} to {})", len(result), symbol, start_date, end_date
+            "iTick: fetched {} rows for {} ({} to {}, interval={})",
+            len(result), symbol, start_date, end_date, interval,
         )
         return result
 
@@ -267,12 +337,13 @@ class ITickProvider(FxDataProvider):
         symbol: str,
         end_ts: int,
         client: httpx.AsyncClient,
+        ktype: str = "8",
     ) -> pd.DataFrame:
         """Fetch a single chunk of up to 1000 bars."""
         params = {
             "region": "GB",
             "code": symbol,
-            "kType": "8",  # Daily
+            "kType": ktype,
             "et": str(end_ts),
             "limit": str(self.MAX_BARS_PER_REQUEST),
             "token": self._api_key,
