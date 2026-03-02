@@ -188,7 +188,7 @@ class SchedulerConfig(BaseModel):
     llm_poll_interval_seconds: int = Field(default=30, description="LLM worker poll interval")
     execution_poll_interval_seconds: int = Field(default=10, description="Execution engine poll")
     janitor_interval_seconds: int = Field(default=600, description="Janitor cleanup cycle (10min)")
-    llm_worker_count: int = Field(default=1, description="Number of concurrent LLM workers")
+    llm_worker_count: int = Field(default=2, description="Number of concurrent LLM workers")
     equity_poll_interval_seconds: int = Field(
         default=60, description="Equity monitor poll interval"
     )
@@ -203,7 +203,7 @@ class SchedulerConfig(BaseModel):
         description="Move SL to breakeven when profit reaches this fraction of TP distance",
     )
     reeval_interval_seconds: int = Field(
-        default=14400, description="Re-evaluate open positions via LLM every N seconds (4h)"
+        default=7200, description="Re-evaluate open positions via LLM every N seconds (2h)"
     )
     reeval_min_hold_seconds: int = Field(
         default=3600,
