@@ -44,6 +44,15 @@ monitor:
 optimization:
   state_path: data/optimization_state_e8_one_5k.json
 
+scheduler:
+  market_hours:
+    enabled: true
+    close_day: "Friday"
+    close_time_utc: "22:00"    # 17:00 EST
+    open_day: "Sunday"
+    open_time_utc: "22:00"     # 17:00 EST
+    force_close_before_weekend: false
+    force_close_minutes_before: 15
 instruments:
   EURUSD:
     pip_size: 0.0001
