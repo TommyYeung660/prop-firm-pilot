@@ -36,6 +36,7 @@ FEATURE_COLUMNS = ["open", "high", "low", "close", "volume", "factor"]
 def convert_to_qlib_binary(
     data: dict[str, pd.DataFrame],
     output_dir: str | Path,
+    interval: str = "day",
 ) -> Path:
     """Convert FX DataFrames to Qlib binary format.
 
@@ -43,6 +44,7 @@ def convert_to_qlib_binary(
         data: Dict of symbol -> DataFrame. Each DataFrame must have columns:
               datetime (or date), open, high, low, close, volume.
         output_dir: Root directory for Qlib binary data.
+        interval: Time interval for file suffixes — "day", "4h", "1h", etc.
 
     Returns:
         Path to the output directory.
@@ -67,7 +69,7 @@ def convert_to_qlib_binary(
             logger.warning("Qlib converter: skipping {} (empty DataFrame)", symbol)
             continue
 
-        df = _prepare_dataframe(df)
+        df = _prepare_dataframe(df, interval=interval)
         processed_data[symbol] = df
         all_dates.update(df["datetime"].tolist())
 
@@ -80,14 +82,14 @@ def convert_to_qlib_binary(
     cal_index = {dt: i for i, dt in enumerate(calendar)}
 
     # Write calendar
-    _write_calendar(calendars_dir, calendar)
+    _write_calendar(calendars_dir, calendar, interval=interval)
 
     # Write instruments
     _write_instruments(instruments_dir, processed_data, calendar)
 
     # Write features for each symbol
     for symbol, df in processed_data.items():
-        _write_symbol_features(features_dir, symbol, df, cal_index, len(calendar))
+        _write_symbol_features(features_dir, symbol, df, cal_index, len(calendar), interval=interval)
 
     logger.info(
         "Qlib converter: wrote {} symbols, {} calendar days to {}",
@@ -98,8 +100,13 @@ def convert_to_qlib_binary(
     return output_dir
 
 
-def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize DataFrame for Qlib conversion."""
+def _prepare_dataframe(df: pd.DataFrame, interval: str = "day") -> pd.DataFrame:
+    """Normalize DataFrame for Qlib conversion.
+
+    Args:
+        df: Raw DataFrame.
+        interval: "day" normalizes timestamps to date-level; intraday preserves time.
+    """
     df = df.copy()
 
     # Ensure datetime column
@@ -108,8 +115,9 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     elif "datetime" in df.columns:
         df["datetime"] = pd.to_datetime(df["datetime"])
 
-    # Normalize to date-level precision (remove time component)
-    df["datetime"] = df["datetime"].dt.normalize()
+    # Only normalize to date-level for daily interval
+    if interval == "day":
+        df["datetime"] = df["datetime"].dt.normalize()
 
     # Ensure volume
     if "volume" not in df.columns:
@@ -118,20 +126,23 @@ def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     # Add adj factor (always 1.0 for FX — no splits/dividends)
     df["factor"] = 1.0
 
-    # Drop duplicates, sort by date
+    # Drop duplicates, sort by datetime
     df = df.drop_duplicates(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
 
     return df
 
 
-def _write_calendar(calendars_dir: Path, calendar: list[pd.Timestamp]) -> None:
-    """Write calendars/day.txt — one date per line, YYYY-MM-DD."""
-    cal_path = calendars_dir / "day.txt"
+def _write_calendar(
+    calendars_dir: Path, calendar: list[pd.Timestamp], interval: str = "day"
+) -> None:
+    """Write calendars/{interval}.txt — one timestamp per line."""
+    cal_path = calendars_dir / f"{interval}.txt"
+    fmt = "%Y-%m-%d" if interval == "day" else "%Y-%m-%d %H:%M:%S"
     with open(cal_path, "w", encoding="utf-8") as f:
         for dt in calendar:
-            f.write(dt.strftime("%Y-%m-%d") + "\n")
+            f.write(dt.strftime(fmt) + "\n")
 
-    logger.debug("Qlib converter: wrote calendar ({} days)", len(calendar))
+    logger.debug("Qlib converter: wrote calendar ({} entries, interval={})", len(calendar), interval)
 
 
 def _write_instruments(
@@ -156,6 +167,7 @@ def _write_symbol_features(
     df: pd.DataFrame,
     cal_index: dict[pd.Timestamp, int],
     cal_length: int,
+    interval: str = "day",
 ) -> None:
     """Write binary feature files for a single symbol."""
     symbol_dir = features_dir / symbol
@@ -190,11 +202,11 @@ def _write_symbol_features(
         trimmed = values[start_index : end_index + 1]
 
         # Write .bin file (raw float32 bytes)
-        bin_path = symbol_dir / f"{col}.day.bin"
+        bin_path = symbol_dir / f"{col}.{interval}.bin"
         trimmed.tofile(str(bin_path))
 
         # Write .meta file (JSON with start/end indices)
-        meta_path = symbol_dir / f"{col}.day.meta"
+        meta_path = symbol_dir / f"{col}.{interval}.meta"
         meta = {
             "start_index": start_index,
             "end_index": end_index,
