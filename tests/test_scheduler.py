@@ -6,6 +6,7 @@ with a real DecisionStore (in-memory SQLite). Tests cover all worker loops:
 scanner, LLM worker, execution, janitor, and equity monitor.
 """
 
+import asyncio
 import unittest.mock
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -146,7 +147,8 @@ async def _run_loop_once(scheduler: Scheduler, loop_coro) -> None:
     """Run a scheduler loop for exactly one iteration then stop.
 
     Patches asyncio.sleep so the loop body runs once, then _running is set
-    to False causing the while-loop to exit.
+    to False causing the while-loop to exit.  Also patches asyncio.wait_for
+    for the scanner loop's rescan-event wait (v1.2.0).
     """
     call_count = 0
 
@@ -156,10 +158,21 @@ async def _run_loop_once(scheduler: Scheduler, loop_coro) -> None:
         if call_count >= 1:
             scheduler._running = False
 
-    with unittest.mock.patch("asyncio.sleep", fake_sleep):
+    _orig_wait_for = asyncio.wait_for
+
+    async def fake_wait_for(coro, *, timeout=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 1:
+            scheduler._running = False
+        # Cancel the coroutine to avoid 'was never awaited' warnings
+        coro.close()
+        return None
+
+    with unittest.mock.patch("asyncio.sleep", fake_sleep), \
+         unittest.mock.patch("asyncio.wait_for", fake_wait_for):
         scheduler._running = True
         await loop_coro
-
 
 # ── Scanner Loop Tests ──────────────────────────────────────────────────────
 
@@ -225,10 +238,18 @@ class TestScannerLoop:
             if call_count >= 1:
                 scheduler._running = False
 
-        with unittest.mock.patch("asyncio.sleep", fake_sleep):
+        async def fake_wait_for(coro, *, timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 1:
+                scheduler._running = False
+            coro.close()
+            return None
+
+        with unittest.mock.patch("asyncio.sleep", fake_sleep), \
+             unittest.mock.patch("asyncio.wait_for", fake_wait_for):
             scheduler._running = True
             await scheduler._scanner_loop()
-
         today = Scheduler._today_str()
         intents = store.get_intents_by_date(today)
         assert len(intents) == 1  # Still only 1, not 2

@@ -133,6 +133,9 @@ class Scheduler:
         self._last_reevaluation: dict[str, datetime] = {}  # position_id -> last eval time
         self._reevaluation_close_positions: dict[str, float] = {}  # pos_id -> unrealized PnL
         self._last_known_profit: dict[str, float] = {}  # pos_id -> last polled profit
+
+        # v1.2.0: Event-driven re-scan when a position closes (frees a slot)
+        self._rescan_event = asyncio.Event()
     # ── Public API ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -308,7 +311,15 @@ class Scheduler:
                 logger.error("Scanner loop error: {}", e)
                 await self._send_alert(f"⚠️ <b>Scanner Error</b>\n<code>{e}</code>")
             try:
-                await asyncio.sleep(self._config.scheduler.scanner_interval_seconds)
+                # v1.2.0: Wait for either the full interval OR a rescan event (position closed)
+                await asyncio.wait_for(
+                    self._rescan_event.wait(),
+                    timeout=self._config.scheduler.scanner_interval_seconds,
+                )
+                self._rescan_event.clear()
+                logger.info("Scanner loop: rescan event received — running early scan")
+            except asyncio.TimeoutError:
+                pass  # Normal timeout — proceed with scheduled scan
             except asyncio.CancelledError:
                 logger.info("Scanner loop: cancelled during sleep")
                 return
@@ -1003,6 +1014,10 @@ class Scheduler:
                     "Position monitor: alert failed for {}: {}",
                     position_id, e,
                 )
+
+        # v1.2.0: Signal scanner to re-scan immediately (slot freed)
+        self._rescan_event.set()
+        logger.info("Position closed → rescan event set for {}", symbol)
 
     async def _close_winning_positions(self, open_positions: list[Any]) -> None:
         """Close all winning (profitable) positions to protect Best Day Rule.
