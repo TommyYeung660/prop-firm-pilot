@@ -78,24 +78,11 @@ class ComplianceConfig(BaseModel):
     )
 
 
-class DataConfig(BaseModel):
-    """FX data acquisition settings."""
-
-    interval: str = "1d"
-    lookback_days: int = 730
-    provider: Literal["itick", "tradermade", "alpha_vantage"] = "itick"
-    duckdb_path: str = "data/fx_prices.duckdb"
-    qlib_binary_dir: str = "data/qlib_binary"
-
-
 class ScannerConfig(BaseModel):
     """Bridge config for qlib_market_scanner."""
 
     project_path: str = "../../qlib_market_scanner"
     topk: int = 3
-    n_drop: int = 1
-    enable_rdagent_factors: bool = True
-    min_factor_ic_ir: float = 0.5
     max_signal_age_days: int = 2  # v1.3.0: reject signals older than N days
 
 
@@ -139,13 +126,6 @@ class OptimizationConfig(BaseModel):
     ab_model_b: str = "gpt-5.2"
     ab_ratio: float = 0.5
 
-
-class ScheduleConfig(BaseModel):
-    """Daily cycle scheduling (UTC)."""
-
-    daily_cycle: str = "06:00"
-    equity_monitor: str = "always"
-    rdagent_trigger: str = "weekend"
 
 
 class DecisionStoreConfig(BaseModel):
@@ -315,13 +295,11 @@ class AppConfig(BaseModel):
     symbols: list[str] = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"]
     account: AccountConfig = AccountConfig()
     compliance: ComplianceConfig = ComplianceConfig()
-    data: DataConfig = DataConfig()
     scanner: ScannerConfig = ScannerConfig()
     agents: AgentsConfig = AgentsConfig()
     execution: ExecutionConfig = ExecutionConfig()
     monitor: MonitorConfig = MonitorConfig()
     optimization: OptimizationConfig = OptimizationConfig()
-    schedule: ScheduleConfig = ScheduleConfig()
     logging: LoggingConfig = LoggingConfig()
     instruments: dict[str, InstrumentConfig] = {}
     decision_store: DecisionStoreConfig = DecisionStoreConfig()
