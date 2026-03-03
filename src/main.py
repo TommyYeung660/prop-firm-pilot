@@ -72,6 +72,7 @@ class PropFirmPilot:
             scanner_path=config.scanner.project_path,
             topk=config.scanner.topk,
             profile="fx",  # Explicitly use FX profile
+            entry_timeframe=config.scheduler.entry_timeframe,
         )
         self.agents = AgentBridge(
             agents_path=config.agents.project_path,
@@ -159,6 +160,8 @@ class PropFirmPilot:
             signals = self.scanner.run_pipeline(
                 date=today,
                 tickers=self.config.symbols,
+                interval=self.config.scheduler.scanner_timeframe,
+                max_signal_age_days=self.config.scanner.max_signal_age_days,
             )
             if not signals:
                 logger.warning("PropFirmPilot: no signals from scanner — skipping trades")
@@ -376,6 +379,7 @@ async def _run_scheduler(config: AppConfig) -> None:
         scanner_path=config.scanner.project_path,
         topk=config.scanner.topk,
         profile="fx",
+        entry_timeframe=config.scheduler.entry_timeframe,
     )
     agents = AgentBridge(
         agents_path=config.agents.project_path,

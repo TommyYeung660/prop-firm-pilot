@@ -288,6 +288,13 @@ class SchedulerConfig(BaseModel):
     intraday_lookback_days: int = Field(
         default=90, description="Days of intraday data to fetch for entry analysis"
     )
+    # v1.3.5: Dual-timeframe separation
+    scanner_timeframe: str = Field(
+        default="1d", description="Timeframe for Qlib scanner pipeline (1d recommended)"
+    )
+    agent_timeframe: str = Field(
+        default="4h", description="Timeframe for TradingAgents entry analysis (4h recommended)"
+    )
 
 
 class LoggingConfig(BaseModel):

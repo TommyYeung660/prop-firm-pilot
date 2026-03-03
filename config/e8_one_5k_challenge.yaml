@@ -75,6 +75,9 @@ scheduler:
   multi_timeframe_enabled: true
   entry_timeframe: "4h"
   intraday_lookback_days: 90
+  # v1.3.5: 雙時間框架分離 — Scanner 固定 1D (Alpha158 最佳), Agent 使用 4H 進場
+  scanner_timeframe: "1d"
+  agent_timeframe: "4h"
 instruments:
   EURUSD:
     pip_size: 0.0001
