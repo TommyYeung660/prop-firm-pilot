@@ -78,6 +78,15 @@ scheduler:
   # v1.3.5: 雙時間框架分離 — Scanner 固定 1D (Alpha158 最佳), Agent 使用 4H 進場
   scanner_timeframe: "1d"
   agent_timeframe: "4h"
+
+# v1.3.0: FX 分析師配置 — macro 對外匯交易至關重要（央行政策、經濟指標、地緣政治）
+agents:
+  selected_analysts:
+    - market
+    - news
+    - social
+    - macro
+
 instruments:
   EURUSD:
     pip_size: 0.0001

@@ -92,7 +92,7 @@ class AgentBridge:
         config: dict[str, Any] | None = None,
     ) -> None:
         self._agents_path = Path(agents_path).resolve()
-        self._selected_analysts = selected_analysts or ["market", "news", "social"]
+        self._selected_analysts = selected_analysts or ["market", "news", "social", "macro"]
         self._config = config or {}
         self._graph: Any = None  # Lazy-loaded TradingAgentsGraph
         self._using_mock: bool = False
