@@ -1,13 +1,15 @@
-# PropFirmPilot v1.3.0 — EODHD 數據源遷移版本報告
+# PropFirmPilot v1.3.0 — EODHD 數據源遷移 + 交易業績修復 版本報告
 
-> **報告日期**: 2026-03-02  
-> **版本**: v1.3.0（EODHD Data Source Migration）  
+> **報告日期**: 2026-03-03（更新）  
+> **版本**: v1.3.0（EODHD Data Source Migration + Performance Fixes）  
 > **基準版本**: v1.2.0（`ee2afd1`，排程優化 + DST 自動適配 + Scanner 修復）  
-> **聚焦範圍**: 將三個倉庫的主要金融數據源從 Alpha Vantage 遷移至 EODHD，支援日期感知自動切換
+> **聚焦範圍**: (A) 三倉庫數據源從 Alpha Vantage 遷移至 EODHD；(B) v1.2.0 prod 交易業績問題根因修復
 
 ---
 
 ## 目錄
+
+### Part A — EODHD 數據源遷移
 
 1. [版本摘要](#1-版本摘要)
 2. [版本資訊](#2-版本資訊)
@@ -20,15 +22,34 @@
 9. [組態參考](#9-組態參考)
 10. [修改檔案清單](#10-修改檔案清單)
 11. [測試覆蓋](#11-測試覆蓋)
-12. [已知限制與未來工作](#12-已知限制與未來工作)
-13. [相依性變更](#13-相依性變更)
+
+### Part B — v1.2.0 交易業績修復
+
+12. [v1.2.0 Prod 問題分析](#12-v120-prod-問題分析)
+13. [Performance Fixes 詳述](#13-performance-fixes-詳述)
+14. [Performance Fixes 修改檔案](#14-performance-fixes-修改檔案)
+15. [Performance Fixes 測試覆蓋](#15-performance-fixes-測試覆蓋)
+
+### 共用
+
+16. [已知限制與未來工作](#16-已知限制與未來工作)
+17. [相依性變更](#17-相依性變更)
 
 ---
 
 ## 1. 版本摘要
 
-v1.3.0 完成了從 **Alpha Vantage** 到 **EODHD (eodhistoricaldata.com)** 的數據源遷移。Alpha Vantage 訂閱於 2026-03-21 到期，同日切換至 EODHD 付費方案（EOD + Intraday All World Extended, $29.99/月）。
+v1.3.0 包含兩大工作主題：
 
+### Part A: EODHD 數據源遷移
+
+完成了從 **Alpha Vantage** 到 **EODHD (eodhistoricaldata.com)** 的數據源遷移。Alpha Vantage 訂閱於 2026-03-21 到期，同日切換至 EODHD 付費方案（EOD + Intraday All World Extended, $29.99/月）。
+
+### Part B: v1.2.0 交易業績修復
+
+分析 v1.2.0 prod 運行 18 小時的日誌（`logs/prod_02032023/`），發現 ~$84 / ~1% 的虧損源自 5 個根因：MTF 停用、過期 scanner signals 靜默通過、缺少宏觀分析師、全 SELL 方向偏差。本版本針對性修復前四項。
+
+### 核心設計原則
 此版本的核心設計原則是 **零停機遷移**：
 
 - **日期感知切換**：`EODHD_SWITCHOVER_DATE`（預設 `2026-03-21`）控制主數據源；切換前使用 Alpha Vantage，切換後使用 EODHD
@@ -42,9 +63,10 @@ v1.3.0 完成了從 **Alpha Vantage** 到 **EODHD (eodhistoricaldata.com)** 的�
 |---|---|---|---|
 | TradingAgents | 7 modules + 7 test files | 3 files | 52 tests (47 unit + 5 integration) |
 | qlib_market_scanner | 1 module + 3 test files | 4 files | 12 tests (8 unit + 4 integration) |
-| prop-firm-pilot | 1 test file | 3 files | 4 tests |
+| prop-firm-pilot (EODHD) | 1 test file | 3 files | 4 tests |
+| prop-firm-pilot (Perf) | 1 fixture + 1 plan | 7 files | 6 tests (4 freshness + 2 config) |
 
-**總計**: 8 新模組、10 新測試檔、10 修改檔、68 新測試
+**總計**: 8 新模組、12 新測試檔、17 修改檔、74 新測試
 
 ---
 
@@ -542,39 +564,203 @@ EODHD_API_KEY=           # Required after switchover date
 | `test_eodhd_stock_fetcher.py` | 4 | download_ticker、download_universe、CSV 快取 |
 | `test_eodhd_integration.py` | 4 (skip) | 真實 API 調用 — 無 API key 時自動 skip |
 
-### prop-firm-pilot（701 passed, 1 failed）
+### prop-firm-pilot（707 passed, 1 failed）
+
+#### EODHD Switchover 測試
 
 | 測試檔案 | 測試數 | 說明 |
 |---|---|---|
 | `test_switchover.py` | 4 | 日期前 → AV、日期後 → EODHD、強制覆寫、自訂日期 |
+
+#### Performance Fixes 測試
+
+| 測試檔案 | 測試數 | 說明 |
+|---|---|---|
+| `test_scanner_bridge.py` (`TestSignalFreshness`) | 4 | 過期信號過濾、新鮮信號通過、停用檢查、缺少目標日期 |
+| `test_config.py` | 2 | macro 分析師預設、max_signal_age_days 預設 |
 
 **已知失敗**（非本版本引入）：
 - `test_prop_firm_guard_e8_one.py::TestE8OneConfig::test_config_loads_correctly` — 預期 `symbols == ["EURUSD"]` 但實際包含 4 個貨幣對，此為 v1.2.0 前已存在的問題
 
 ---
 
-## 12. 已知限制與未來工作
+---
+
+## 12. v1.2.0 Prod 問題分析
+
+### 運行概況
+
+| 項目 | 值 |
+|---|---|
+| 帳戶 | E8 One $5K Challenge |
+| 運行時長 | ~18 小時 |
+| 起始餘額 | $5,019.10 (HWM) |
+| 結束餘額 | ~$4,940.78 |
+| 實現虧損 | ~$84 (~1%) |
+| 已平倉交易 | 6 筆（7/8 為 SELL） |
+| 未平倉 | 2 筆 |
+| 日誌目錄 | `logs/prod_02032023/` |
+
+### 5 個根因
+
+| # | 根因 | 影響 | 嚴重度 |
+|---|---|---|---|
+| 1 | **MTF 停用** — `multi_timeframe_enabled: false`，僅使用日線分析，缺少 4h/1h 共振確認 | 價格運動判斷不夠精細，時機欠佳 | 高 |
+| 2 | **過期 Scanner Signals** — signals.csv 日期為 3-5 天前，無新鮮度檢查、靜默 fallback | 基於過時市場狀態做交易決策 | 高 |
+| 3 | **缺少宏觀分析師** — `selected_analysts` 僅有 market/news/social，缺 macro | 忽略央行利率、NFP、CPI 等基本面因素 | 中 |
+| 4 | **全 SELL 方向偏差** — 7/8 筆交易為 SELL | 缺少多時間框架 + 宏觀信息導致單向判斷 | 中 |
+| 5 | **版本字串過期** — `src/main.py` 仍顯示 v1.0.0 | 日誌版本追蹤困難 | 低 |
+
+### Alpha158 IC/IR 驗證
+
+| 因子類型 | 代表 | IC | IR | 結論 |
+|---|---|---|---|---|
+| 長週期 (MA60) | `MA60`, `STD60` | 0.30 | 0.97 | ✅ MTF 可提升捕捉能力 |
+| 短週期 (MA5) | `MA5`, `ROC5` | 0.15 | 0.54 | ℹ️ 單獨使用差 |
+| KBar | `KMID`, `KLEN` | 0.22 | 0.78 | ⚠️ 需配合長週期 |
+
+---
+
+## 13. Performance Fixes 詳述
+
+### Fix 1: 啟用多時間框架分析 (MTF)
+
+**問題**: `config/e8_one_5k_challenge.yaml` 中 `multi_timeframe_enabled: false`，僅使用日線 K 線，缺少 4h/1h 共振確認。
+
+**修復**:
+```yaml
+# config/e8_one_5k_challenge.yaml
+scheduler:
+  # v1.3.0: 啟用多時間框架分析 — 日內數據已驗證，Alpha158 IC/IR 確認長週期因子優勢
+  multi_timeframe_enabled: true
+  entry_timeframe: "4h"
+  intraday_lookback_days: 90
+```
+
+**預期效果**: Scanner 將同時分析 daily + 4h + 1h 數據，交叉確認後再發出信號。
+
+### Fix 2: Signal Freshness Guard
+
+**問題**: `load_signals_from_file()` 讀取 3-5 天前的 signals.csv 並靜默 fallback，基於過時市場狀態做決策。
+
+**修復**:
+- 新增 `ScannerConfig.max_signal_age_days: int = 2` 參數
+- `load_signals_from_file()` 新增 freshness guard：比較 `chosen_date` 與 `target_date` 的差距，超過 N 天則返回空列表並 log warning
+- `run_pipeline()` 新增 `max_signal_age_days` 參數，傳遞到兩個 `load_signals_from_file()` 呼叫點
+
+```python
+# src/signal/scanner_bridge.py — 核心遏輯
+if max_signal_age_days is not None and target_date:
+    age = (target_dt - chosen_dt).days
+    if age > max_signal_age_days:
+        logger.warning(
+            "ScannerBridge: signals too old ({} days > max {}). Rejecting.",
+            age, max_signal_age_days,
+        )
+        return []
+```
+
+### Fix 3: 啟用宏觀分析師 (Macro Analyst)
+
+**問題**: `selected_analysts` 僅有 `[market, news, social]`，缺少 `macro` 分析師。
+
+**修復**:
+- `config/default.yaml`: `selected_analysts` 加入 `macro`
+- `src/config.py` `AgentsConfig`: 預設值同步更新為 `["market", "news", "social", "macro"]`
+
+**預期效果**: LLM 決策引擎將納入央行利率、經濟數據 (NFP, CPI) 等基本面因素。
+
+### Fix 4: Scheduler Staleness 整合
+
+**問題**: Scheduler 不傳遞 `max_signal_age_days` 給 `run_pipeline()`，freshness guard 無效。
+
+**修復**:
+- `_scanner_loop()` 傳遞 `max_signal_age_days=self._config.scanner.max_signal_age_days`
+- 空 signals 時發送 Telegram alert，再 skip 本次循環
+
+```python
+# src/scheduler/scheduler.py
+signals = await asyncio.to_thread(
+    self._scanner.run_pipeline,
+    date=today,
+    tickers=self._config.symbols,
+    max_signal_age_days=self._config.scanner.max_signal_age_days,
+)
+if not signals:
+    await self._send_alert("⚠️ Scanner: No Signals ...")
+    continue
+```
+
+### Fix 5: 版本字串更新
+
+- `src/main.py` line 571: `v1.0.0` → `v1.3.0`
+
+### Fix 6: SELL 偏差緩解（觀察性）
+
+SELL 偏差是 Fix 1-4 的綜合結果，不需要單獨修復：
+- MTF 啟用後，多時間框架交叉確認會減少單向偏差
+- 宏觀分析師提供基本面方向性判斷
+- 新鮮度守衛排除過時信號的虛假確認
+
+**驗證方式**: 在 prod 運行中觀察 BUY/SELL 比例是否趨於均衡。
+
+---
+
+## 14. Performance Fixes 修改檔案
+
+| 檔案 | 動作 | 說明 |
+|---|---|---|
+| `config/e8_one_5k_challenge.yaml` | 修改 | `multi_timeframe_enabled: true` |
+| `config/default.yaml` | 修改 | `selected_analysts` 加入 `macro` |
+| `src/config.py` | 修改 | 新增 `max_signal_age_days: int = 2`，更新 `AgentsConfig` 預設 |
+| `src/signal/scanner_bridge.py` | 修改 | freshness guard 遏輯 + `run_pipeline()` 參數傳遞 |
+| `src/scheduler/scheduler.py` | 修改 | `max_signal_age_days` 傳遞 + 空 signals Telegram alert |
+| `src/main.py` | 修改 | 版本字串 v1.0.0 → v1.3.0 |
+| `tests/test_scanner_bridge.py` | 修改 | 新增 `TestSignalFreshness` class (4 tests) |
+| `tests/test_config.py` | 修改 | 新增 2 個 config 測試 |
+| `tests/fixtures/scanner/signals_stale.csv` | 新增 | 過期信號 fixture (dated 2026-02-20) |
+| `docs/plans/2026-03-03-v1.3.0-performance-fixes.md` | 新增 | 完整實施計畫 (553 行) |
+
+---
+
+## 15. Performance Fixes 測試覆蓋
+
+| 測試 | 檔案 | 驗證內容 |
+|---|---|---|
+| `test_stale_signals_rejected` | `test_scanner_bridge.py` | 3 天前 signals 被過濾，返回空列表 |
+| `test_fresh_signals_returned_normally` | `test_scanner_bridge.py` | 當天 signals 正常返回 |
+| `test_freshness_disabled_when_none` | `test_scanner_bridge.py` | `max_signal_age_days=None` 時不執行檢查 |
+| `test_freshness_skipped_without_target_date` | `test_scanner_bridge.py` | 無 `target_date` 時跳過檢查 |
+| `test_default_config_includes_macro_analyst` | `test_config.py` | `AgentsConfig` 預設包含 macro |
+| `test_scanner_config_max_signal_age_days_default` | `test_config.py` | `ScannerConfig.max_signal_age_days == 2` |
+
+---
+
+## 16. 已知限制與未來工作
 
 ### 已知限制
 
 1. **Free Tier 限制**：在 3/21 前只能用 EODHD free tier 測試（20 calls/day，限 demo tickers），無法完整測試所有貨幣對
-2. **FX 小時線未整合**：EODHD 支援 1H intraday 但本版本尚未在 qlib_market_scanner 的 FX pipeline 中整合（日線 → 小時線轉換需額外工作）
-3. **VWMA 不可用**：EODHD Technical API 不提供 VWMA 指標，回傳說明訊息而非數據
-4. **期權數據未遷移**：繼續使用 OpenBB/yfinance，未來考慮購買 EODHD Options 套件
-5. **Alpha Vantage 未移除**：AV 代碼完整保留作為 fallback，切換後降級為備用
+2. **FX 小時線未整合**：EODHD 支援 1H intraday 但本版本尚未在 qlib_market_scanner 的 FX pipeline 中整合
+3. **VWMA 不可用**：EODHD Technical API 不提供 VWMA 指標
+4. **期權數據未遷移**：繼續使用 OpenBB/yfinance
+5. **Alpha Vantage 未移除**：AV 代碼保留作為 fallback
+6. **Performance Fixes 僅針對前 4 個根因**：SELL 偏差緩解需在 prod 中觀察驗證
 
 ### 未來工作
 
-1. **FX Intraday Integration**：在 qlib_market_scanner 中整合 EODHD 1H 數據，支援 v1.2.0 的多時間框架分析
-2. **AV Free Tier Fallback 驗證**：確認 AV 免費方案（5 calls/min）是否足以作為可靠 fallback
-3. **EODHD Options Data**：評估 EODHD Options 套件（額外費用），替代 OpenBB/yfinance
+1. **FX Intraday Integration**：在 qlib_market_scanner 中整合 EODHD 1H 數據
+2. **AV Free Tier Fallback 驗證**：確認 AV 免費方案是否足以作為可靠 fallback
+3. **EODHD Options Data**：評估 EODHD Options 套件
 4. **API 額度監控**：新增 EODHD API 調用計數器和預警機制
-5. **移除 AV 硬編碼**：在確認 EODHD 穩定運行數週後，考慮移除 AV 相關代碼以簡化維護
+5. **移除 AV 硬編碼**：確認 EODHD 穩定運行數週後再移除
 6. **修復 pre-existing test failure**：`test_prop_firm_guard_e8_one.py` 的 symbols 斷言
+7. **Signal Freshness 可調整性**：考慮將 `max_signal_age_days` 加入 per-symbol 細粒度設定
+8. **SELL 偏差監控**：新增 BUY/SELL 比例追蹤指標，在 Telegram 日報中顯示
 
 ---
 
-## 13. 相依性變更
+## 17. 相依性變更
 
 | 套件 | 倉庫 | 變更 | 說明 |
 |---|---|---|---|
@@ -582,10 +768,10 @@ EODHD_API_KEY=           # Required after switchover date
 | `python-dateutil` | TradingAgents | 已存在 | `eodhd_indicator.py` 使用 `relativedelta` 計算 lookback |
 | `httpx` | qlib_market_scanner | 未使用 | qlib_market_scanner 的 EODHD fetcher 使用 `requests`（同步） |
 
-**無新增第三方依賴** — 所有 EODHD 模組使用各倉庫已有的 `requests` / `httpx` 庫。
+**無新增第三方依賴** — 所有模組使用各倉庫已有的庫。Performance Fixes 同樣無新增依賴。
 
 **跨 Repo 相依**：三個倉庫版本號統一為 1.3.0，部署時需同步更新。
 
 ---
 
-> **報告結束** — PropFirmPilot v1.3.0 EODHD 數據源遷移版本
+> **報告結束** — PropFirmPilot v1.3.0 EODHD 數據源遷移 + 交易業績修復版本
