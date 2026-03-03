@@ -24,6 +24,7 @@ class ScannerSignal:
         drop_distance: float = 0.0,
         topk_spread: float = 0.0,
         weight: float = 0.0,
+        entry_timeframe: str = "4h",
     ) -> None:
         self.instrument = instrument
         self.score = score
@@ -33,6 +34,7 @@ class ScannerSignal:
         self.drop_distance = drop_distance
         self.topk_spread = topk_spread
         self.weight = weight
+        self.entry_timeframe = entry_timeframe
 
     def to_qlib_data(self) -> dict[str, Any]:
         """Convert to qlib_data dict for TradingAgents.propagate().
@@ -52,6 +54,7 @@ class ScannerSignal:
             "score_gap": self.score_gap,
             "drop_distance": self.drop_distance,
             "topk_spread": self.topk_spread,
+            "entry_timeframe": self.entry_timeframe,
         }
 
     def __repr__(self) -> str:
@@ -72,10 +75,12 @@ class ScannerBridge:
         scanner_path: str | Path,
         topk: int = 3,
         profile: str = "fx",
+        entry_timeframe: str = "4h",
     ) -> None:
         self._scanner_path = Path(scanner_path).resolve()
         self._topk = topk
         self._profile = profile
+        self._entry_timeframe = entry_timeframe
 
         if not self._scanner_path.exists():
             logger.warning("ScannerBridge: scanner path does not exist: {}", self._scanner_path)
@@ -227,6 +232,7 @@ class ScannerBridge:
                             drop_distance=float(row.get("drop_distance", 0)),
                             topk_spread=float(row.get("topk_spread", 0)),
                             weight=float(row.get("weight", 0)),
+                            entry_timeframe=self._entry_timeframe,
                         )
 
                         if row_date not in all_signals:
@@ -234,7 +240,7 @@ class ScannerBridge:
                         all_signals[row_date].append(signal)
 
                     except (ValueError, TypeError) as e:
-                        logger.warning("ScannerBridge: skipping malformed row {}: {}", i, e)
+                        logger.warning("ScannerBridge: skipping malformed了 row {}: {}", i, e)
 
         except Exception as e:
             logger.error("ScannerBridge: failed to read CSV: {}", e)
