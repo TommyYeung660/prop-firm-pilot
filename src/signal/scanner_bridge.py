@@ -86,6 +86,7 @@ class ScannerBridge:
         tickers: list[str] | None = None,
         force_retrain: bool = True,
         interval: str = "1d",
+        max_signal_age_days: int | None = None,
     ) -> list[ScannerSignal]:
         """Run the scanner pipeline and return parsed signals.
 
@@ -93,6 +94,7 @@ class ScannerBridge:
             date: Override date for the pipeline (YYYY-MM-DD). None = today.
             tickers: Optional list of tickers to scan (comma separated string passed to CLI).
             interval: Data interval for multi-timeframe scanning (e.g. '1d', '4h', '1h').
+            max_signal_age_days: If provided, reject signals older than this many days.
 
         Returns:
             List of ScannerSignal sorted by rank (best first).
@@ -157,7 +159,11 @@ class ScannerBridge:
                         "ScannerBridge: attempting fallback to existing signals file: {}",
                         signals_path,
                     )
-                    return self.load_signals_from_file(signals_path, target_date=date)
+                    return self.load_signals_from_file(
+                        signals_path,
+                        target_date=date,
+                        max_signal_age_days=max_signal_age_days,
+                    )
 
                 return []
 
@@ -166,7 +172,11 @@ class ScannerBridge:
             # Read output file directly
             # Path: outputs/signals/signals.csv
             signals_path = self._scanner_path / "outputs" / "signals" / "signals.csv"
-            return self.load_signals_from_file(signals_path, target_date=date)
+            return self.load_signals_from_file(
+                signals_path,
+                target_date=date,
+                max_signal_age_days=max_signal_age_days,
+            )
 
         except subprocess.TimeoutExpired:
             logger.error("ScannerBridge: pipeline timed out after 600s")
@@ -176,7 +186,10 @@ class ScannerBridge:
             return []
 
     def load_signals_from_file(
-        self, path: str | Path, target_date: str | None = None
+        self,
+        path: str | Path,
+        target_date: str | None = None,
+        max_signal_age_days: int | None = None,
     ) -> list[ScannerSignal]:
         """Load signals from a pre-existing signals.csv file.
 
@@ -185,6 +198,8 @@ class ScannerBridge:
             target_date: If provided (YYYY-MM-DD), only return signals for this date.
                          If no signals match the exact date, falls back to the latest date.
                          If None, returns only the latest date's signals.
+            max_signal_age_days: If provided, reject signals older than this many days
+                                 relative to target_date. None = no freshness check.
         """
         path = Path(path)
         if not path.exists():
@@ -242,6 +257,32 @@ class ScannerBridge:
                     target_date,
                     available_dates[0],
                     available_dates[-1],
+                    chosen_date,
+                )
+
+        # v1.3.0: Signal freshness guard — reject stale signals
+        if max_signal_age_days is not None and target_date:
+            from datetime import date as date_type
+
+            try:
+                target_dt = date_type.fromisoformat(target_date)
+                chosen_dt = date_type.fromisoformat(chosen_date)
+                age_days = (target_dt - chosen_dt).days
+                if age_days > max_signal_age_days:
+                    logger.warning(
+                        "ScannerBridge: signal date {} is {} days old (max={}), "
+                        "rejecting stale signals for target_date {}",
+                        chosen_date,
+                        age_days,
+                        max_signal_age_days,
+                        target_date,
+                    )
+                    return []
+            except ValueError:
+                logger.warning(
+                    "ScannerBridge: could not parse dates for freshness check "
+                    "(target={}, chosen={}), proceeding without check",
+                    target_date,
                     chosen_date,
                 )
 

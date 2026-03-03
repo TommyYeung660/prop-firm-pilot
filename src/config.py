@@ -96,13 +96,14 @@ class ScannerConfig(BaseModel):
     n_drop: int = 1
     enable_rdagent_factors: bool = True
     min_factor_ic_ir: float = 0.5
+    max_signal_age_days: int = 2  # v1.3.0: reject signals older than N days
 
 
 class AgentsConfig(BaseModel):
     """Bridge config for TradingAgents."""
 
     project_path: str = "../../TradingAgents"
-    selected_analysts: list[str] = ["market", "news", "social"]
+    selected_analysts: list[str] = ["market", "news", "social", "macro"]
     output_language: str = "繁體中文"
 
 

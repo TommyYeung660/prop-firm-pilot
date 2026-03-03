@@ -220,8 +220,25 @@ class Scheduler:
                     self._scanner.run_pipeline,
                     date=today,
                     tickers=self._config.symbols,
+                    max_signal_age_days=self._config.scanner.max_signal_age_days,
                 )
 
+                # v1.3.0: Early exit when no fresh signals available
+                if not signals:
+                    logger.warning(
+                        "Scanner loop: no signals returned for {} "
+                        "(may be stale or unavailable)",
+                        today,
+                    )
+                    await self._send_alert(
+                        f"\u26a0\ufe0f <b>Scanner: No Signals</b>\n"
+                        f"No fresh signals for {today}. "
+                        f"Skipping intent creation this cycle."
+                    )
+                    await asyncio.sleep(
+                        self._session_cadence.get_scanner_interval(self._now_utc())
+                    )
+                    continue
                 # Per-symbol topk: pick the best signal per symbol, then take topk
                 best_per_symbol: dict[str, Any] = {}
                 for signal in signals:

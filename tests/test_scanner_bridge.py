@@ -436,3 +436,60 @@ class TestIntervalParameter:
             cmd = mock_run.call_args[0][0]
             assert "--interval" in cmd
             assert "1d" in cmd
+
+
+# ── Section 5: Signal Freshness Guard (v1.3.0) ────────────────────────────────────
+
+
+class TestSignalFreshness:
+    """Tests for signal freshness guard in load_signals_from_file (v1.3.0)."""
+
+    def test_fresh_signals_returned_normally(self, bridge: ScannerBridge, tmp_path: Path) -> None:
+        """Signals within max_signal_age_days should be returned as-is."""
+        import csv
+        from datetime import date
+
+        today = date.today().isoformat()
+        fresh_csv = tmp_path / "signals_fresh.csv"
+        with open(fresh_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                ["datetime", "instrument", "score", "rank", "score_gap",
+                 "drop_distance", "topk_spread", "confidence", "weight"]
+            )
+            writer.writerow([today, "EURUSD", "0.61", "1", "0.05", "0.18", "0.12", "high", "0.333"])
+
+        signals = bridge.load_signals_from_file(
+            fresh_csv, target_date=today, max_signal_age_days=2
+        )
+        assert len(signals) == 1
+        assert signals[0].instrument == "EURUSD"
+
+    def test_stale_signals_rejected(self, bridge: ScannerBridge) -> None:
+        """Signals older than max_signal_age_days should return empty list."""
+        signals = bridge.load_signals_from_file(
+            FIXTURES_DIR / "signals_stale.csv",
+            target_date="2026-03-03",
+            max_signal_age_days=2,
+        )
+        # 2026-02-20 is 11 days before 2026-03-03 → stale → rejected
+        assert signals == []
+
+    def test_stale_signals_weekend_tolerance(self, bridge: ScannerBridge) -> None:
+        """Friday signals should be valid on Sunday (2-day tolerance)."""
+        signals = bridge.load_signals_from_file(
+            FIXTURES_DIR / "signals_stale.csv",
+            target_date="2026-02-22",  # Sunday — 2 days after Feb 20 (Friday)
+            max_signal_age_days=2,
+        )
+        # 2026-02-20 → 2026-02-22 = 2 days ≤ max_signal_age_days=2 → accepted
+        assert len(signals) == 3
+
+    def test_stale_signals_default_no_check(self, bridge: ScannerBridge) -> None:
+        """When max_signal_age_days=None (default), no freshness check."""
+        signals = bridge.load_signals_from_file(
+            FIXTURES_DIR / "signals_stale.csv",
+            target_date="2026-12-31",  # Way in the future
+        )
+        # Default behavior: fallback to latest date, no staleness rejection
+        assert len(signals) == 3
