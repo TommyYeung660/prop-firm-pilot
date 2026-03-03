@@ -568,7 +568,7 @@ def main() -> None:
     config = load_config(args.config)
     setup_logging(config)
 
-    logger.info("PropFirmPilot v1.3.0 starting")
+    logger.info("PropFirmPilot v1.3.5 starting")
     logger.info("Config: {}", args.config)
     logger.info("Symbols: {}", config.symbols)
 
