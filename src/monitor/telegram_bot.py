@@ -59,6 +59,7 @@ class TelegramBotHandler:
         self._trade_journal = trade_journal
         self._poll_interval = poll_interval
         self._offset = 0
+        self._conflict_backoff = 0.0
         self._running = False
         self._enabled = bool(bot_token and chat_id)
 
@@ -134,21 +135,43 @@ class TelegramBotHandler:
         """Poll Telegram getUpdates API for new messages.
 
         Uses long-polling with a 10-second timeout to minimize API calls.
+        On 409 Conflict (another instance polling the same bot token),
+        applies exponential backoff to avoid thrashing.
         """
+        # M1: Back off when a 409 conflict was recently detected
+        if self._conflict_backoff > 0:
+            logger.debug(
+                "TelegramBotHandler: conflict backoff {:.0f}s",
+                self._conflict_backoff,
+            )
+            await asyncio.sleep(self._conflict_backoff)
+
         url = (
             f"{self.TELEGRAM_API}/bot{self._bot_token}/getUpdates?offset={self._offset}&timeout=10"
         )
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.get(url)
-                if response.status_code != 200:
+                if response.status_code == 200:
+                    self._conflict_backoff = 0.0  # Reset on success
+                    data = response.json()
+                    return data.get("result", [])
+                if response.status_code == 409:
+                    # M1: Another instance is polling this bot token
+                    self._conflict_backoff = min(
+                        max(self._conflict_backoff * 2, 5.0), 120.0
+                    )
                     logger.warning(
-                        "TelegramBotHandler: getUpdates returned {}",
-                        response.status_code,
+                        "TelegramBotHandler: 409 Conflict — another instance is polling"
+                        " this bot token. Backing off {:.0f}s",
+                        self._conflict_backoff,
                     )
                     return []
-                data = response.json()
-                return data.get("result", [])
+                logger.warning(
+                    "TelegramBotHandler: getUpdates returned {}",
+                    response.status_code,
+                )
+                return []
         except httpx.HTTPError as e:
             logger.warning("TelegramBotHandler: getUpdates failed: {}", e)
             return []
