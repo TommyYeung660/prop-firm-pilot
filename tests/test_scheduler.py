@@ -2460,12 +2460,12 @@ class TestManualClosePnlFallback:
         mock_matchtrader.get_balance.return_value = MagicMock(equity=5012.50)
 
         await _run_loop_once(sched, sched._position_monitor_loop())
-
-        # trade_closed should be called with the fallback PnL, not 0.0
-        mock_alert.trade_closed.assert_called_once()
-        call_kwargs = mock_alert.trade_closed.call_args[1]
+        # With PnL=0.0 from broker, fallback to last_known=12.50 > 0 → re-inferred as tp_hit
+        # So sl_tp_hit alert should fire (not trade_closed)
+        mock_alert.sl_tp_hit.assert_called_once()
+        call_kwargs = mock_alert.sl_tp_hit.call_args[1]
         assert call_kwargs["pnl"] == 12.50
-        assert call_kwargs["reason"] == "Position closed (manual_close)"
+        assert call_kwargs["hit_type"] == "TP"
 
         # Intent should be stored with correct realized PnL
         updated = store.get_intent(opened.id)
@@ -2645,10 +2645,11 @@ class TestManualClosePnlFallback:
 
         await _run_loop_once(sched, sched._position_monitor_loop())
 
-        # Should use fallback PnL from last_known_profit
-        mock_alert.trade_closed.assert_called_once()
-        call_kwargs = mock_alert.trade_closed.call_args[1]
+        # Position not found in broker → fallback PnL=22.10 > 0 → re-inferred as tp_hit
+        mock_alert.sl_tp_hit.assert_called_once()
+        call_kwargs = mock_alert.sl_tp_hit.call_args[1]
         assert call_kwargs["pnl"] == 22.10
+        assert call_kwargs["hit_type"] == "TP"
 
         updated = store.get_intent(opened.id)
         assert updated.realized_pnl == 22.10

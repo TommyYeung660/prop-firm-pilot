@@ -891,27 +891,37 @@ class Scheduler:
         volume = 0.0
         exit_reason = "manual_close"  # Default — could be tp_hit, sl_hit, etc.
         try:
-            # Short delay to let broker update closed positions list
-            await asyncio.sleep(2.0)
-            # Search last 24h of closed positions
+            # Retry with increasing delays to let broker update closed positions list
             now_ms = int(self._now_utc().timestamp() * 1000)
             day_ago_ms = now_ms - 86_400_000
-            closed_positions = await self._matchtrader.get_closed_positions(
-                from_ts=day_ago_ms, to_ts=now_ms
-            )
-            # Find matching closed position
-            for closed in closed_positions:
-                if str(closed.position_id) == position_id:
-                    pnl = closed.profit
-                    close_price = closed.close_price
-                    open_price = closed.open_price
-                    volume = closed.volume
-                    # Infer exit reason from PnL direction
-                    if pnl > 0:
-                        exit_reason = "tp_hit"
-                    elif pnl < 0:
-                        exit_reason = "sl_hit"
+            matched = False
+            for attempt, delay in enumerate((2.0, 4.0, 8.0), start=1):
+                await asyncio.sleep(delay)
+                closed_positions = await self._matchtrader.get_closed_positions(
+                    from_ts=day_ago_ms, to_ts=now_ms
+                )
+                for closed in closed_positions:
+                    if str(closed.position_id) == position_id:
+                        pnl = closed.profit
+                        close_price = closed.close_price
+                        open_price = closed.open_price
+                        volume = closed.volume
+                        # Infer exit reason from PnL direction
+                        if pnl > 0:
+                            exit_reason = "tp_hit"
+                        elif pnl < 0:
+                            exit_reason = "sl_hit"
+                        matched = True
+                        break
+                if matched:
                     break
+                logger.debug(
+                    "Position monitor: closed position {} not found in broker API"
+                    " (attempt {}/3, waited {}s)",
+                    position_id,
+                    attempt,
+                    delay,
+                )
         except Exception as e:
             logger.warning(
                 "Position monitor: could not fetch closed position details for {}: {}",
@@ -942,12 +952,22 @@ class Scheduler:
                     position_id,
                 )
             self._reevaluation_close_positions.pop(position_id, None)
-        # Fallback for manual_close: use last-known unrealized PnL from position monitor
+        # Fallback for unknown close: use last-known unrealized PnL from position monitor
         if pnl == 0.0 and position_id in self._last_known_profit:
             pnl = self._last_known_profit[position_id]
             logger.info(
-                "Position monitor: using last-known polled PnL ${:+.2f} for {} (manual_close)",
+                "Position monitor: using last-known polled PnL ${:+.2f} for {}",
                 pnl,
+                position_id,
+            )
+        # Re-infer exit_reason from final PnL if still classified as manual_close.
+        # This handles cases where broker API didn't return the closed position
+        # but we recovered PnL from _last_known_profit or other fallbacks.
+        if exit_reason == "manual_close" and pnl != 0.0:
+            exit_reason = "tp_hit" if pnl > 0 else "sl_hit"
+            logger.info(
+                "Position monitor: re-inferred exit_reason={} from fallback PnL for {}",
+                exit_reason,
                 position_id,
             )
 
