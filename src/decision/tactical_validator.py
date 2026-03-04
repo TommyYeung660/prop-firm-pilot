@@ -18,7 +18,7 @@ Usage:
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal, cast
 
 import pandas as pd
 from loguru import logger
@@ -104,7 +104,8 @@ def compute_ema(series: pd.Series, period: int) -> pd.Series:
     Returns:
         EMA series of same length as input.
     """
-    return series.ewm(span=period, adjust=False).mean()
+    ema = series.ewm(span=period, adjust=False).mean()
+    return cast(pd.Series, ema)
 
 
 def compute_rsi(series: pd.Series, period: int = 14) -> float:
@@ -125,8 +126,8 @@ def compute_rsi(series: pd.Series, period: int = 14) -> float:
     avg_loss = loss.ewm(span=period, adjust=False).mean()
 
     rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return float(rsi.iloc[-1])
+    rsi_series = pd.Series(100 - (100 / (1 + rs)))
+    return float(rsi_series.iloc[-1])
 
 
 # ── TacticalValidator ──────────────────────────────────────────────────────
@@ -217,7 +218,7 @@ class TacticalValidator:
             current_atr = compute_atr(data.bars_1h, period=self._config.hard_gates.atr_period)
             # Median ATR over the full 1H dataset
             if not pd.isna(current_atr) and len(data.bars_1h) > self._config.hard_gates.atr_period:
-                all_atrs = []
+                all_atrs: list[Any] = []
                 period = self._config.hard_gates.atr_period
                 for i in range(period + 1, len(data.bars_1h) + 1):
                     window = data.bars_1h.iloc[:i]
@@ -270,7 +271,7 @@ class TacticalValidator:
                 detail="Insufficient 5min data for EMA",
             )
 
-        closes = bars_5min["close"]
+        closes = cast(pd.Series, bars_5min["close"])
         fast = compute_ema(closes, self._config.soft_gates.ema_fast)
         slow = compute_ema(closes, self._config.soft_gates.ema_slow)
 
@@ -305,7 +306,8 @@ class TacticalValidator:
                 detail="Insufficient 5min data for RSI",
             )
 
-        rsi = compute_rsi(bars_5min["close"], self._config.soft_gates.rsi_period)
+        closes = cast(pd.Series, bars_5min["close"])
+        rsi = compute_rsi(closes, self._config.soft_gates.rsi_period)
 
         rsi_limit = (
             self._config.soft_gates.rsi_overbought

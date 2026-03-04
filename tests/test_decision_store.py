@@ -954,3 +954,80 @@ class TestGetClosedIntents:
         # intent2 was created later, should be first
         assert closed[0].id == intent2.id
         assert closed[1].id == intent1.id
+
+
+# ── v1.3.7: Tactical Pending Transitions ───────────────────────────────────
+
+
+class TestTacticalPendingTransitions:
+    """Tests for tactical_pending state transitions in DecisionStore."""
+
+    def test_mark_tactical_pending_from_claimed(
+        self, store: DecisionStore, sample_intent: TradeIntent
+    ) -> None:
+        store.insert_intent(sample_intent)
+        store.claim_next_pending("worker-0")
+        store.update_intent_decision(
+            sample_intent.id, "SELL", sl_pips=40, tp_pips=80,
+            risk_report="test", state_json="{}",
+        )
+        store.mark_tactical_pending(sample_intent.id)
+        intent = store.get_intent(sample_intent.id)
+        assert intent is not None
+        assert intent.status == "tactical_pending"
+
+    def test_mark_ready_from_tactical_pending(
+        self, store: DecisionStore, sample_intent: TradeIntent
+    ) -> None:
+        store.insert_intent(sample_intent)
+        store.claim_next_pending("worker-0")
+        store.update_intent_decision(
+            sample_intent.id, "SELL", sl_pips=40, tp_pips=80,
+            risk_report="test", state_json="{}",
+        )
+        store.mark_tactical_pending(sample_intent.id)
+        store.mark_ready_for_exec_from_tactical(sample_intent.id)
+        intent = store.get_intent(sample_intent.id)
+        assert intent is not None
+        assert intent.status == "ready_for_exec"
+
+    def test_cancel_from_tactical_pending(
+        self, store: DecisionStore, sample_intent: TradeIntent
+    ) -> None:
+        store.insert_intent(sample_intent)
+        store.claim_next_pending("worker-0")
+        store.update_intent_decision(
+            sample_intent.id, "SELL", sl_pips=40, tp_pips=80,
+            risk_report="test", state_json="{}",
+        )
+        store.mark_tactical_pending(sample_intent.id)
+        store.mark_cancelled(sample_intent.id, reason="tactical_expired")
+        intent = store.get_intent(sample_intent.id)
+        assert intent is not None
+        assert intent.status == "cancelled"
+
+    def test_intent_exists_includes_tactical_pending(
+        self, store: DecisionStore, sample_intent: TradeIntent
+    ) -> None:
+        """intent_exists should block new intents when one is in tactical_pending."""
+        store.insert_intent(sample_intent)
+        store.claim_next_pending("worker-0")
+        store.update_intent_decision(
+            sample_intent.id, "SELL", sl_pips=40, tp_pips=80,
+            risk_report="test", state_json="{}",
+        )
+        store.mark_tactical_pending(sample_intent.id)
+        assert store.intent_exists("EURUSD", "2026-02-16", "scanner")
+
+    def test_pipeline_count_includes_tactical_pending(
+        self, store: DecisionStore, sample_intent: TradeIntent
+    ) -> None:
+        """count_pipeline_intents should include tactical_pending status."""
+        store.insert_intent(sample_intent)
+        store.claim_next_pending("worker-0")
+        store.update_intent_decision(
+            sample_intent.id, "SELL", sl_pips=40, tp_pips=80,
+            risk_report="test", state_json="{}",
+        )
+        store.mark_tactical_pending(sample_intent.id)
+        assert store.count_pipeline_intents() == 1

@@ -446,6 +446,14 @@ class DecisionStore:
         """Transition intent from claimed → ready_for_exec."""
         self._transition(intent_id, "claimed", "ready_for_exec")
 
+    def mark_tactical_pending(self, intent_id: str) -> None:
+        """Transition intent from claimed \u2192 tactical_pending (v1.3.7)."""
+        self._transition(intent_id, "claimed", "tactical_pending")
+
+    def mark_ready_for_exec_from_tactical(self, intent_id: str) -> None:
+        """Transition intent from tactical_pending \u2192 ready_for_exec (v1.3.7)."""
+        self._transition(intent_id, "tactical_pending", "ready_for_exec")
+
     def mark_executing(self, intent_id: str) -> None:
         """Transition intent from ready_for_exec → executing."""
         self._transition(intent_id, "ready_for_exec", "executing")
@@ -564,7 +572,7 @@ class DecisionStore:
                    SET status = 'cancelled',
                        execution_error = :reason,
                        executed_at = :executed_at
-                   WHERE id = :id AND status IN ('pending', 'claimed')""",
+                   WHERE id = :id AND status IN ('pending', 'claimed', 'tactical_pending')""",
                 {
                     "reason": reason,
                     "executed_at": _dt_to_str(now),
@@ -574,7 +582,8 @@ class DecisionStore:
             if not updated:
                 self._conn.rollback()
                 raise InvalidTransitionError(
-                    f"Cannot cancel {intent_id}: not in 'pending' or 'claimed' state"
+                    f"Cannot cancel {intent_id}: not in 'pending',"
+                    f" 'claimed', or 'tactical_pending' state"
                 )
             self._conn.execute(
                 """UPDATE decisions
@@ -798,7 +807,7 @@ class DecisionStore:
                WHERE symbol = :symbol
                  AND trade_date = :td
                  AND source = :source
-                 AND status IN ('pending', 'claimed', 'ready_for_exec')
+                 AND status IN ('pending', 'claimed', 'tactical_pending', 'ready_for_exec')
                LIMIT 1""",
             {"symbol": symbol, "td": trade_date, "source": source},
         ).fetchone()
@@ -844,7 +853,7 @@ class DecisionStore:
     def count_pipeline_intents(self) -> int:
         """Count intents currently in the processing pipeline.
 
-        Pipeline states: pending, claimed, ready_for_exec, executing.
+        Pipeline states: pending, claimed, tactical_pending, ready_for_exec, executing.
         These intents are expected to eventually become open positions,
         so they should be counted toward max_positions to avoid over-creation.
 
@@ -852,8 +861,10 @@ class DecisionStore:
             Number of intents in pipeline states.
         """
         row = self._conn.execute(
-            """SELECT COUNT(*) as cnt FROM intents
-               WHERE status IN ('pending', 'claimed', 'ready_for_exec', 'executing')"""
+            "SELECT COUNT(*) as cnt FROM intents"
+            " WHERE status IN ("
+            "  'pending', 'claimed', 'tactical_pending',"
+            "  'ready_for_exec', 'executing')"
         ).fetchone()
         return row["cnt"] if row else 0
 
