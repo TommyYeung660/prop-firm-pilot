@@ -56,3 +56,58 @@ def test_e8_one_5k_v136_tuned_params():
     assert config.scheduler.volatility_poll_interval_seconds == 15
     assert config.scheduler.volatility_cooldown_seconds == 300
     assert config.scheduler.volatility_threshold_pct == 0.2
+
+
+class TestTacticalConfig:
+    """Verify TacticalConfig loads with defaults and from YAML."""
+
+    def test_default_tactical_config(self) -> None:
+        from src.config import AppConfig, TacticalConfig
+
+        config = AppConfig()
+        assert hasattr(config, "tactical")
+        assert isinstance(config.tactical, TacticalConfig)
+        assert config.tactical.enabled is True
+        assert config.tactical.shadow_mode is True
+
+    def test_tactical_hard_gates_defaults(self) -> None:
+        from src.config import TacticalConfig
+
+        tc = TacticalConfig()
+        assert tc.hard_gates.spread_max_multiplier == 2.0
+        assert tc.hard_gates.atr_min_ratio == 0.5
+        assert tc.hard_gates.atr_max_ratio == 2.5
+        assert tc.hard_gates.atr_period == 14
+        assert tc.hard_gates.atr_timeframe == "1h"
+        assert tc.hard_gates.data_max_age_seconds == 600
+
+    def test_tactical_soft_gates_defaults(self) -> None:
+        from src.config import TacticalConfig
+
+        tc = TacticalConfig()
+        assert tc.soft_gates.min_score == 2
+        assert tc.soft_gates.ema_fast == 8
+        assert tc.soft_gates.ema_slow == 21
+        assert tc.soft_gates.rsi_period == 14
+        assert tc.soft_gates.candle_min_body_ratio == 0.3
+
+    def test_tactical_retry_defaults(self) -> None:
+        from src.config import TacticalConfig
+
+        tc = TacticalConfig()
+        assert tc.retry.interval_seconds == 300
+        assert tc.retry.max_retries == 12
+        assert tc.retry.expire_action == "degrade"
+        assert tc.retry.jitter_seconds == 10
+
+    def test_tactical_cache_defaults(self) -> None:
+        from src.config import TacticalConfig
+
+        tc = TacticalConfig()
+        assert tc.decision_cache.ttl_seconds == 14400
+
+    def test_tactical_dedup_defaults(self) -> None:
+        from src.config import TacticalConfig
+
+        tc = TacticalConfig()
+        assert tc.intent_dedup.cooldown_after_close_seconds == 1800

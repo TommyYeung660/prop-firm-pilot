@@ -108,7 +108,7 @@ class TestTradeIntent:
             for target in (
                 "pending",
                 "claimed",
-                "ready_for_exec",
+                "tactical_pending",
                 "executing",
                 "opened",
                 "rejected",
@@ -130,7 +130,7 @@ class TestValidTransitions:
         all_statuses: list[IntentStatus] = [
             "pending",
             "claimed",
-            "ready_for_exec",
+            "tactical_pending",
             "executing",
             "opened",
             "rejected",
@@ -202,3 +202,36 @@ class TestDecisionRecord:
         assert record.status == "closed"
         assert record.order_id == "order-1"
         assert record.position_id == "pos-1"
+
+
+# ── v1.3.7: Tactical pending transitions ───────────────────────────────
+
+
+class TestTacticalPendingTransitions:
+    """Verify tactical_pending status is wired into the state machine."""
+
+    def test_claimed_can_transition_to_tactical_pending(self) -> None:
+        intent = TradeIntent(trade_date="2026-03-04", symbol="EURUSD")
+        intent.status = "claimed"
+        assert intent.can_transition_to("tactical_pending")
+
+    def test_tactical_pending_can_transition_to_ready_for_exec(self) -> None:
+        intent = TradeIntent(trade_date="2026-03-04", symbol="EURUSD")
+        intent.status = "tactical_pending"
+        assert intent.can_transition_to("ready_for_exec")
+
+    def test_tactical_pending_can_transition_to_cancelled(self) -> None:
+        intent = TradeIntent(trade_date="2026-03-04", symbol="EURUSD")
+        intent.status = "tactical_pending"
+        assert intent.can_transition_to("cancelled")
+
+    def test_tactical_pending_cannot_transition_to_opened(self) -> None:
+        intent = TradeIntent(trade_date="2026-03-04", symbol="EURUSD")
+        intent.status = "tactical_pending"
+        assert not intent.can_transition_to("opened")
+
+    def test_tactical_pending_in_intent_status_literal(self) -> None:
+        """Ensure tactical_pending is a valid IntentStatus value."""
+        intent = TradeIntent(trade_date="2026-03-04", symbol="EURUSD")
+        intent.status = "tactical_pending"
+        assert intent.status == "tactical_pending"

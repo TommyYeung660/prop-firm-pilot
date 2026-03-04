@@ -283,6 +283,92 @@ class SchedulerConfig(BaseModel):
     )
 
 
+# ── Tactical Execution Config (v1.3.7) ──────────────────────────────────
+
+
+class TacticalHardGatesConfig(BaseModel):
+    """Hard gate thresholds — ALL must pass for tactical approval."""
+
+    spread_max_multiplier: float = Field(
+        default=2.0, description="Max spread as multiplier of typical spread"
+    )
+    atr_min_ratio: float = Field(
+        default=0.5, description="Min ATR ratio vs rolling median (avoid dead market)"
+    )
+    atr_max_ratio: float = Field(
+        default=2.5, description="Max ATR ratio vs rolling median (avoid extreme volatility)"
+    )
+    atr_period: int = Field(default=14, description="ATR lookback period")
+    atr_timeframe: str = Field(default="1h", description="Timeframe for ATR calculation")
+    data_max_age_seconds: int = Field(
+        default=600, description="Max age of latest bar data in seconds"
+    )
+
+
+class TacticalSoftGatesConfig(BaseModel):
+    """Soft gate thresholds — scoring system, min_score out of 3 must pass."""
+
+    min_score: int = Field(default=2, description="Minimum soft gates to pass (out of 3)")
+    ema_fast: int = Field(default=8, description="Fast EMA period for momentum check")
+    ema_slow: int = Field(default=21, description="Slow EMA period for momentum check")
+    ema_timeframe: str = Field(default="5min", description="Timeframe for EMA calculation")
+    ema_lookback_bars: int = Field(default=50, description="Number of bars to fetch for EMA")
+    rsi_period: int = Field(default=14, description="RSI lookback period")
+    rsi_overbought: int = Field(default=70, description="RSI overbought threshold")
+    rsi_oversold: int = Field(default=30, description="RSI oversold threshold")
+    candle_min_body_ratio: float = Field(
+        default=0.3, description="Min candle body/range ratio for directional quality"
+    )
+
+
+class TacticalRetryConfig(BaseModel):
+    """Retry parameters for WAIT results."""
+
+    interval_seconds: int = Field(default=300, description="Retry interval (5 min)")
+    max_retries: int = Field(default=12, description="Max retries (1 hour total)")
+    expire_action: Literal["degrade", "cancel"] = Field(
+        default="degrade", description="Action on expiry: degrade thresholds or cancel"
+    )
+    jitter_seconds: int = Field(default=10, description="Random jitter ±seconds on retry timing")
+
+
+class TacticalDecisionCacheConfig(BaseModel):
+    """Strategic decision cache settings."""
+
+    ttl_seconds: int = Field(default=14400, description="Cache TTL in seconds (4 hours)")
+
+
+class TacticalIntentDedupConfig(BaseModel):
+    """Intent deduplication settings."""
+
+    cooldown_after_close_seconds: int = Field(
+        default=1800, description="Cooldown after position close before allowing same-symbol intent"
+    )
+
+
+class TacticalConfig(BaseModel):
+    """v1.3.7: Tactical execution module configuration.
+
+    Controls the Hard/Soft dual-layer gate system that validates entry timing
+    using low-timeframe (5min/1H) data before executing strategic decisions.
+
+    Usage:
+        config = TacticalConfig(shadow_mode=True)
+        assert = config.hard_gates.spread_max_multiplier == 2.0
+    """
+
+    enabled: bool = Field(default=True, description="Enable tactical validation module")
+    shadow_mode: bool = Field(
+        default=True,
+        description="Shadow mode: log gate results but never block trades (Phase 1)",
+    )
+    hard_gates: TacticalHardGatesConfig = Field(default_factory=TacticalHardGatesConfig)
+    soft_gates: TacticalSoftGatesConfig = Field(default_factory=TacticalSoftGatesConfig)
+    retry: TacticalRetryConfig = Field(default_factory=TacticalRetryConfig)
+    decision_cache: TacticalDecisionCacheConfig = Field(default_factory=TacticalDecisionCacheConfig)
+    intent_dedup: TacticalIntentDedupConfig = Field(default_factory=TacticalIntentDedupConfig)
+
+
 class LoggingConfig(BaseModel):
     """Logging configuration."""
 
@@ -310,6 +396,7 @@ class AppConfig(BaseModel):
     instruments: dict[str, InstrumentConfig] = {}
     decision_store: DecisionStoreConfig = DecisionStoreConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
+    tactical: TacticalConfig = Field(default_factory=TacticalConfig)
 
 
 # ── Config Loading ──────────────────────────────────────────────────────────

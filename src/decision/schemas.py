@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 IntentStatus = Literal[
     "pending",
     "claimed",
+    "tactical_pending",  # v1.3.7: awaiting tactical entry validation
     "ready_for_exec",
     "executing",
     "opened",
@@ -38,7 +39,8 @@ IntentStatus = Literal[
 
 VALID_TRANSITIONS: dict[str, list[str]] = {
     "pending": ["claimed", "cancelled"],
-    "claimed": ["ready_for_exec", "cancelled", "timed_out"],
+    "claimed": ["ready_for_exec", "tactical_pending", "cancelled", "timed_out"],
+    "tactical_pending": ["ready_for_exec", "cancelled", "timed_out"],  # v1.3.7
     "ready_for_exec": ["executing"],
     "executing": ["opened", "rejected", "failed"],
     "opened": ["closed"],
@@ -57,7 +59,7 @@ class TradeIntent(BaseModel):
     """A trade opportunity discovered by the scanner, awaiting LLM evaluation.
 
     Flows through the decision state machine:
-        pending → claimed → ready_for_exec → executing → opened → closed
+        pending → claimed → tactical_pending → ready_for_exec → executing → opened → closed
 
     Usage:
         intent = TradeIntent(
