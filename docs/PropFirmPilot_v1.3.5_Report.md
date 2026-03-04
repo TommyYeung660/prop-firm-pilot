@@ -47,6 +47,15 @@
 27. [測試覆蓋（Bug Fix）](#27-測試覆蓋bug-fix)
 28. [Git Commit 記錄（Bug Fix）](#28-git-commit-記錄bug-fix)
 
+### Part F — Telegram 連線穩定性修復
+
+29. [Telegram 連線問題背景](#29-telegram-連線問題背景)
+30. [持久 HTTP 客戶端修復](#30-持久-http-客戶端修復)
+31. [Circuit Breaker 自動降級機制](#31-circuit-breaker-自動降級機制)
+32. [修復檔案清單（Telegram）](#32-修復檔案清單telegram)
+33. [測試覆蓋（Telegram）](#33-測試覆蓋telegram)
+34. [Git Commit 記錄（Telegram）](#34-git-commit-記錄telegram)
+
 ### Part D — 共用
 
 17. [已知限制與未來工作](#17-已知限制與未來工作)
@@ -972,4 +981,190 @@ logging:
 
 ---
 
-> **報告結束** — PropFirmPilot v1.3.5（含 Part E：18 小時生產運行評估與修復，共 9 commits across 2 repos）
+## Part F — Telegram 連線穩定性修復
+
+## 29. Telegram 連線問題背景
+
+部署 Part E 修復後，生產環境出現持續的 Telegram 連線失敗：
+
+```
+ERROR    | ConnectTimeout
+ERROR    | AlertService: failed to send Telegram message:
+ERROR    | getUpdates failed:
+```
+
+### 根因分析
+
+| 項目 | 說明 |
+|---|---|
+| **現象** | `AlertService.send()` 和 `TelegramBotHandler._poll_updates()` 每次呼叫都等待 10 秒後逾時 |
+| **錯誤訊息** | `ConnectTimeout` 無內容（httpcore 的 `ConnectTimeout` class 本身不帶 message body） |
+| **根因** | ISP/企業網路封鎖 Telegram IP 範圍 (`149.154.x.x`) |
+| **驗證** | Mac 伺服器和 Windows 開發機均無法 curl 到 `api.telegram.org`（IPv4/IPv6 皆逾時）；VPN 和 5G 行動網路正常 |
+| **影響** | 不影響交易流程（`AlertService.send()` 內部 catch 所有異常），但造成每次呼叫 10 秒延遲 + 日誌洪水 |
+
+### 三個層面的修復
+
+| # | 修復 | 目的 |
+|---|---|---|
+| 1 | 持久 HTTP 客戶端 | 消除每次請求重建連線的開銷 |
+| 2 | 錯誤診斷改進 | 讓 ConnectTimeout 顯示有意義的資訊而非空字串 |
+| 3 | Circuit Breaker 自動降級 | 網路不可達時立即跳過，避免 10 秒延遲和日誌洪水 |
+
+---
+
+## 30. 持久 HTTP 客戶端修復
+
+### 問題
+
+原始實作中，`AlertService` 和 `TelegramBotHandler` 每次發送請求時都建立新的 `httpx.AsyncClient`，並在請求完成後關閉。這導致：
+- 每次 HTTP 請求都需要重新建立 TCP 連線（熱路復用不可能）
+- 連線失敗時無法從連線池快速重試
+- `bot_handler.stop()` 未被 `await`，導致 `RuntimeWarning: coroutine 'stop' was never awaited`
+
+### 修復內容
+
+**TelegramBotHandler** (`src/monitor/telegram_bot.py`):
+- `start()` 時建立持久 `httpx.AsyncClient(timeout=30.0)`
+- `stop()` 改為 `async def`，關閉時清理客戶端
+- `_poll_updates()` 和 `_send_message()` 共用同一客戶端實例
+
+**AlertService** (`src/monitor/alert_service.py`):
+- 新增 `_get_client()` lazy init 方法，首次使用時建立 `httpx.AsyncClient(timeout=10.0)`
+- 新增 `async close()` 清理方法
+- `send()` 內的 `async with httpx.AsyncClient()` 替換為 `self._get_client()`
+
+**main.py** (`src/main.py`):
+- `await bot_handler.stop()`（原為 bare call）
+- `await alert_service.close()` 加入 shutdown 流程
+
+### 錯誤診斷改進
+
+```python
+# 修復前：ConnectTimeout 顯示空字串
+logger.error("failed: {}", e)  # 輸出: "failed: "
+
+# 修復後：顯示異常類型名稱
+logger.error("failed: {} - {}", type(e).__name__, e)  # 輸出: "failed: ConnectTimeout - "
+```
+
+---
+
+## 31. Circuit Breaker 自動降級機制
+
+### 設計理念
+
+當 Telegram API 不可達時，每次嘗試發送都會等待 10 秒才逾時。Circuit Breaker 模式在連續失敗後「斷開」電路，立即跳過發送，避免無謂的延遲和日誌雜訊。
+
+### 狀態機過渡
+
+```
+CLOSED (正常)
+  │
+  │ 連續 3 次失敗
+  ▼
+OPEN (降級)
+  │
+  │ 300秒後允許 1 次探針請求
+  ▼
+HALF-OPEN (探針)
+  │
+  ├─ 成功 → CLOSED
+  └─ 失敗 → OPEN
+```
+
+### AlertService Circuit Breaker
+
+```python
+# 新增欄位
+_consecutive_failures: int = 0
+_circuit_open: bool = False
+_circuit_opened_at: float = 0.0
+_CB_FAILURE_THRESHOLD: int = 3      # 連續失敗次數閾值
+_CB_RETRY_INTERVAL: float = 300.0   # 探針間隔（秒）
+```
+
+**`send()` 流程**:
+1. 檢查 circuit 狀態
+2. 若 OPEN 且未過探針間隔 → `return False`（無 HTTP、無延遲）
+3. 若已過探針間隔 → 允許一次請求（HALF-OPEN）
+4. 成功 → `_consecutive_failures = 0`, `_circuit_open = False`
+5. 失敗 → `_consecutive_failures += 1`，若遞增至閾值 → OPEN
+
+### TelegramBotHandler Circuit Breaker
+
+獨立於 AlertService，擁有自己的 circuit breaker 狀態：
+
+```python
+_cb_consecutive_failures: int = 0
+_cb_circuit_open: bool = False
+_cb_circuit_opened_at: float = 0.0
+_CB_FAILURE_THRESHOLD: int = 3
+_CB_RETRY_INTERVAL: float = 300.0
+```
+
+**行為差異**:
+- 當 circuit OPEN 時，sleep `_CB_RETRY_INTERVAL` 秒而非每秒輪詢
+- 409 Conflict 使用自己的指數退避機制，**不觸發** circuit breaker
+- 進入 OPEN 時 log `warning`，恢復時 log `info`
+
+### 409 Conflict 獨立性
+
+```python
+# 409 有專屬退避機制（Part E M1 修復），不計入 CB 失敗次數
+if response.status_code == 409:
+    self._conflict_backoff = min(self._conflict_backoff * 2, 120.0)
+    # 不增加 _cb_consecutive_failures
+    continue
+```
+
+這確保當另一個程序佔用 bot token 時（409），不會誤判為網路不可達而開啟 CB。
+
+---
+
+## 32. 修復檔案清單（Telegram）
+
+| 檔案 | 變更 |
+|---|---|
+| `src/monitor/alert_service.py` | 持久 httpx 客戶端 + circuit breaker |
+| `src/monitor/telegram_bot.py` | 持久 httpx 客戶端 + circuit breaker + 409 獨立性 |
+| `src/main.py` | `await bot_handler.stop()` + `await alert_service.close()` |
+| `tests/test_alert_service.py` | 6 持久客戶端測試 + 11 CB 測試 + 1 更新 |
+| `scripts/test_telegram_bot_live.py` | `await bot.stop()` |
+
+---
+
+## 33. 測試覆蓋（Telegram）
+
+### 新增測試統計
+
+| 測試類別 | 數量 | 涵蓋範圍 |
+|---|---|---|
+| `TestAlertServicePersistentClient` | 6 | lazy init、重用、清理、noop close、發送成功/失敗 |
+| `TestAlertServiceCircuitBreaker` | 7 | N 次失敗後開啟、開啟時跳過、探針間隔、成功恢復、non-200 失敗、重置計數、停用時忽略 |
+| `TestTelegramBotCircuitBreaker` | 4 | 失敗後開啟、sleep 取代 polling、成功恢復、409 不觸發 CB |
+| 更新測試 | 1 | `test_stop_sets_flag` 改為 `await` |
+| **總計** | **18** | |
+
+### 執行結果
+
+```
+tests/test_alert_service.py: 68 passed ✅
+（原 51 + 新增 17）
+```
+
+---
+
+## 34. Git Commit 記錄（Telegram）
+
+### prop-firm-pilot（3 commits）
+
+| Commit | Description |
+|---|---|
+| `7c8712c` | fix: use persistent httpx client for Telegram polling and improve error diagnostics |
+| `26eb06a` | fix: use persistent httpx client in AlertService and await bot_handler.stop() |
+| `7229b13` | feat: add circuit breaker auto-degradation for Telegram connectivity failures |
+
+---
+
+> **報告結束** — PropFirmPilot v1.3.5（含 Part E：18 小時生產運行評估與修復 9 commits + Part F：Telegram 連線穩定性修復 3 commits，共 12 commits across 2 repos）
