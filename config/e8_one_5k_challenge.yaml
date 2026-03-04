@@ -68,9 +68,11 @@ scheduler:
   ny_timezone: "America/New_York"
   # v1.2.0: 波動率觸發掃描
   volatility_trigger_enabled: true
-  volatility_threshold_pct: 0.3
+  volatility_threshold_pct: 0.2          # v1.3.6: 0.3→0.2 降低觸發門檻，提高敏感度
   volatility_window_minutes: 30
-  volatility_cooldown_seconds: 900
+  volatility_cooldown_seconds: 300        # v1.3.6: 900→300s 縮短冷卻期
+  volatility_poll_interval_seconds: 15    # v1.3.6: 60→15s 提高波動監控頻率
+  llm_poll_interval_seconds: 10           # v1.3.6: 30→10s 加快 LLM worker 回應
   # v1.3.0: 啟用多時間框架分析 — 日內數據已驗證，Alpha158 IC/IR 確認長週期因子優勢
   multi_timeframe_enabled: true
   entry_timeframe: "4h"

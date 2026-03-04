@@ -178,7 +178,7 @@ class SchedulerConfig(BaseModel):
     """Async scheduler cadences for the Hybrid EA+LLM pipeline."""
 
     scanner_interval_seconds: int = Field(default=14400, description="Scanner cycle interval (4h)")
-    llm_poll_interval_seconds: int = Field(default=30, description="LLM worker poll interval")
+    llm_poll_interval_seconds: int = Field(default=10, description="LLM worker poll (v1.3.6)")
     execution_poll_interval_seconds: int = Field(default=10, description="Execution engine poll")
     janitor_interval_seconds: int = Field(default=600, description="Janitor cleanup cycle (10min)")
     llm_worker_count: int = Field(default=2, description="Number of concurrent LLM workers")
@@ -245,16 +245,16 @@ class SchedulerConfig(BaseModel):
         default=False, description="Enable volatility-triggered scanner re-scans"
     )
     volatility_threshold_pct: float = Field(
-        default=0.3, description="Price change % to trigger re-scan (0.3 = 0.3%)"
+        default=0.2, description="Price change % to trigger re-scan (v1.3.6: 0.3→0.2%)"
     )
     volatility_window_minutes: int = Field(
         default=30, description="Rolling window for price change calculation (minutes)"
     )
     volatility_poll_interval_seconds: int = Field(
-        default=60, description="How often to check quote prices for volatility (seconds)"
+        default=15, description="How often to check quote prices for volatility (v1.3.6: 60→15s)"
     )
     volatility_cooldown_seconds: int = Field(
-        default=900, description="Min seconds between volatility-triggered scans (15min)"
+        default=300, description="Min seconds between volatility-triggered scans (v1.3.6: 5min)"
     )
 
     # v1.3.5: Compliance rejection cooldown

@@ -23,7 +23,7 @@ def test_e8_one_5k_session_aware_config():
     assert config.scheduler.session_aware_enabled is True
     assert config.scheduler.active_session_interval_seconds == 3600
     assert config.scheduler.volatility_trigger_enabled is True
-    assert config.scheduler.volatility_threshold_pct == 0.3
+    assert config.scheduler.volatility_threshold_pct == 0.2
 
 
 def test_default_config_includes_macro_analyst():
@@ -36,3 +36,23 @@ def test_scanner_config_max_signal_age_days_default():
     """v1.3.0: Default max_signal_age_days should be 2."""
     config = ScannerConfig()
     assert config.max_signal_age_days == 2
+
+
+def test_scheduler_config_v136_tuning_defaults():
+    """v1.3.6: Verify tuned parameter defaults."""
+    config = SchedulerConfig()
+    assert config.llm_poll_interval_seconds == 10
+    assert config.volatility_poll_interval_seconds == 15
+    assert config.volatility_cooldown_seconds == 300
+    assert config.volatility_threshold_pct == 0.2
+
+
+def test_e8_one_5k_v136_tuned_params():
+    """v1.3.6: e8_one_5k_challenge YAML should have tuned v1.3.6 values."""
+    from src.config import load_config
+
+    config = load_config("config/e8_one_5k_challenge.yaml")
+    assert config.scheduler.llm_poll_interval_seconds == 10
+    assert config.scheduler.volatility_poll_interval_seconds == 15
+    assert config.scheduler.volatility_cooldown_seconds == 300
+    assert config.scheduler.volatility_threshold_pct == 0.2
