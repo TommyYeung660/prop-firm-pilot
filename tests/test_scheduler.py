@@ -99,6 +99,7 @@ def mock_matchtrader() -> AsyncMock:
         margin=0.0,
         free_margin=50000.0,
     )
+    client.get_quote.return_value = {"ask": 1.0850, "bid": 1.0848}
     # Mock rate limiter for auto-throttle code in _position_monitor_loop
     rate_limiter = MagicMock()
     rate_limiter.remaining = 1800
@@ -2653,3 +2654,105 @@ class TestManualClosePnlFallback:
 
         updated = store.get_intent(opened.id)
         assert updated.realized_pnl == 22.10
+
+
+# ── v1.3.7: Tactical Integration ────────────────────────────────────────
+
+
+class TestTacticalIntegration:
+    """v1.3.7: Verify tactical validation in _process_claimed_intent."""
+
+    async def test_shadow_mode_always_marks_ready(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """In shadow mode (default), tactical validation runs but intent always proceeds."""
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD",
+            decision="BUY",
+            final_state={"test": True},
+            risk_report="test risk",
+        )
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.85,
+            scanner_confidence="high",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        await scheduler._process_claimed_intent("llm-0", claimed)
+
+        updated = store.get_intent(intent.id)
+        assert updated.status == "ready_for_exec"
+
+    async def test_tactical_enabled_fetches_quote(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        mock_matchtrader: AsyncMock,
+        store: DecisionStore,
+    ) -> None:
+        """When tactical is enabled, get_quote should be awaited for spread data."""
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD",
+            decision="BUY",
+            final_state={"test": True},
+            risk_report="test risk",
+        )
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.85,
+            scanner_confidence="high",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        await scheduler._process_claimed_intent("llm-0", claimed)
+
+        mock_matchtrader.get_quote.assert_awaited_once_with("EURUSD")
+
+    async def test_tactical_disabled_skips_validation(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """When tactical.enabled=False, no tactical validation is run."""
+        config.tactical.enabled = False
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD",
+            decision="SELL",
+            final_state={"test": True},
+            risk_report="test risk",
+        )
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.85,
+            scanner_confidence="high",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+
+        await sched._process_claimed_intent("llm-0", claimed)
+
+        updated = store.get_intent(intent.id)
+        assert updated.status == "ready_for_exec"

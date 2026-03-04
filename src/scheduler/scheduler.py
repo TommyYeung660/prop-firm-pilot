@@ -34,6 +34,7 @@ from src.config import AppConfig
 from src.decision.agent_bridge import AgentBridge
 from src.decision.decision_formatter import format_decision
 from src.decision.schemas import TradeIntent
+from src.decision.tactical_validator import TacticalData, TacticalResult, TacticalValidator
 from src.decision_store.janitor import Janitor
 from src.decision_store.sqlite_store import DecisionStore, InvalidTransitionError
 from src.execution.engine import ExecutionEngine
@@ -45,6 +46,7 @@ from src.monitor.memory_journal import MemoryJournal
 from src.monitor.trade_journal import TradeJournal
 from src.optimize.optimization_engine import OptimizationEngine
 from src.optimize.optimization_state import OptimizationState, Thresholds
+from src.scheduler.decision_cache import StrategicDecisionCache
 from src.scheduler.market_hours import MarketHoursChecker
 from src.scheduler.session_cadence import SessionCadence
 from src.scheduler.volatility_monitor import VolatilityMonitor
@@ -85,6 +87,8 @@ class Scheduler:
         optimization_engine: OptimizationEngine | None = None,
         memory_journal: MemoryJournal | None = None,
         trade_journal: TradeJournal | None = None,
+        tactical_validator: TacticalValidator | None = None,
+        decision_cache: StrategicDecisionCache | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -114,6 +118,12 @@ class Scheduler:
         self._optimization_state: OptimizationState | None = None
         self._memory_journal = memory_journal
         self._trade_journal = trade_journal
+
+        # v1.3.7: Tactical execution module (shadow mode)
+        self._tactical_validator = tactical_validator or TacticalValidator(config.tactical)
+        self._decision_cache = decision_cache or StrategicDecisionCache(
+            ttl_seconds=config.tactical.decision_cache.ttl_seconds
+        )
 
         # Dynamic drawdown HWM tracking
         self._hwm_tracker: HighWaterMarkTracker | None = None
@@ -604,6 +614,28 @@ class Scheduler:
                     risk_report=decision.risk_report,
                     state_json=json.dumps(decision.final_state, default=str),
                 )
+                # ── v1.3.7: Tactical validation (Shadow Mode) ──
+                if self._config.tactical.enabled:
+                    tactical_result = await self._run_tactical_validation(
+                        intent, side=decision.decision
+                    )
+                    self._log_trade_event(
+                        "TACTICAL_RESULT",
+                        {
+                            "intent_id": intent.id,
+                            "symbol": intent.symbol,
+                            "side": decision.decision,
+                            "action": tactical_result.action,
+                            "hard_gates": [
+                                {"gate": r.gate_name, "passed": r.passed, "detail": r.detail}
+                                for r in tactical_result.hard_gates
+                            ],
+                            "soft_score": tactical_result.soft_score,
+                            "shadow_mode": self._config.tactical.shadow_mode,
+                        },
+                    )
+
+                # In shadow mode or if tactical is disabled, always proceed
                 await asyncio.to_thread(self._store.mark_ready_for_exec, intent.id)
                 logger.info(
                     "LLM worker {}: intent {} → {} (ready for execution)",
@@ -645,6 +677,61 @@ class Scheduler:
                     worker_id,
                     intent.id,
                 )
+
+    async def _run_tactical_validation(self, intent: TradeIntent, side: str) -> TacticalResult:
+        """Fetch tactical data and run Hard/Soft gate validation.
+
+        Returns TacticalResult. In shadow mode, result is logged but not acted on.
+        """
+        try:
+            if side not in ("BUY", "SELL"):
+                return TacticalResult(
+                    action="PASS",
+                    detail=f"Unsupported side for tactical validation: {side}",
+                )
+            data = await self._fetch_tactical_data(intent.symbol)
+            result = self._tactical_validator.evaluate(side=side, data=data)
+        except Exception as e:
+            logger.warning(
+                "Tactical validation error for {} {}: {}",
+                intent.symbol,
+                side,
+                e,
+            )
+            result = TacticalResult(
+                action="PASS",
+                detail=f"Tactical validation error (pass-through): {e}",
+            )
+        return result
+
+    async def _fetch_tactical_data(self, symbol: str) -> TacticalData:
+        """Fetch current spread for tactical validation.
+
+        Uses MatchTrader get_quote() for spread data.
+        Bar data integration is a follow-up after shadow mode data collection.
+        """
+        data = TacticalData()
+
+        # Fetch current spread from MatchTrader
+        try:
+            quote = await self._matchtrader.get_quote(symbol)
+            if quote:
+                if isinstance(quote, dict):
+                    ask = quote.get("ask", 0)
+                    bid = quote.get("bid", 0)
+                else:
+                    ask = getattr(quote, "ask", 0)
+                    bid = getattr(quote, "bid", 0)
+                data.current_spread = abs(ask - bid)
+                # Use instrument config for typical spread
+                instrument = self._config.instruments.get(symbol)
+                if instrument:
+                    data.typical_spread = instrument.avg_spread_pips * instrument.pip_size
+        except Exception as e:
+            logger.debug("Failed to fetch quote for {}: {}", symbol, e)
+
+        data.latest_bar_time = datetime.now(timezone.utc)  # Best-effort
+        return data
 
     async def _cancel_intent_safe(
         self,
