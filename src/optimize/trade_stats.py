@@ -9,6 +9,7 @@ Usage:
 """
 
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 from loguru import logger
 
@@ -91,3 +92,49 @@ def build_pnl_feedback(
 
     logger.debug("TradeStats: aggregated pnl for {} symbols", len(pnl_by_symbol))
     return dict(pnl_by_symbol)
+
+
+def compute_inactive_days(store: DecisionStore, symbols: list[str]) -> dict[str, int]:
+    """Compute days since last closed trade for each symbol.
+
+    Args:
+        store: DecisionStore instance.
+        symbols: List of symbols to check.
+
+    Returns:
+        Dict mapping symbol to days since last closed trade.
+        Symbols with no trade history get 0 (no penalty for new symbols).
+    """
+    intents = store.get_closed_intents(days=90)
+    last_trade: dict[str, datetime] = {}
+
+    for intent in intents:
+        if intent.symbol not in symbols:
+            continue
+        if intent.created_at is None:
+            continue
+        if isinstance(intent.created_at, datetime):
+            created_at = intent.created_at
+        elif isinstance(intent.created_at, str):
+            created_at = datetime.fromisoformat(intent.created_at)
+        else:
+            continue
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        if intent.symbol not in last_trade or created_at > last_trade[intent.symbol]:
+            last_trade[intent.symbol] = created_at
+
+    now = datetime.now(timezone.utc)
+    day_seconds = int(timedelta(days=1).total_seconds())
+    inactive_days: dict[str, int] = {}
+
+    for symbol in symbols:
+        if symbol not in last_trade:
+            inactive_days[symbol] = 0
+            continue
+        delta = now - last_trade[symbol]
+        days = int(delta.total_seconds() // day_seconds)
+        inactive_days[symbol] = max(0, days)
+
+    logger.debug("TradeStats: computed inactive days for {} symbols", len(inactive_days))
+    return inactive_days

@@ -17,7 +17,7 @@ from src.decision_store.sqlite_store import DecisionStore
 from src.monitor.trade_journal import TradeJournal
 from src.optimize.optimization_state import ABTestState, OptimizationState, save_state
 from src.optimize.thresholds import compute_thresholds
-from src.optimize.trade_stats import build_pnl_feedback, compute_win_rates
+from src.optimize.trade_stats import build_pnl_feedback, compute_inactive_days, compute_win_rates
 
 # ── Exceptions ──────────────────────────────────────────────────────────────
 
@@ -64,9 +64,15 @@ class OptimizationEngine:
             OptimizationState containing latest metrics.
         """
         win_rates = compute_win_rates(self._store, days=self._win_days)
+        symbol_rates = {k: v for k, v in win_rates.items() if k != "global"}
+
+        # H3: Compute inactivity for threshold decay
+        inactive = compute_inactive_days(self._store, list(symbol_rates.keys()))
+
         thresholds = compute_thresholds(
             global_win_rate=win_rates.get("global", 0.0),
-            symbol_win_rates={k: v for k, v in win_rates.items() if k != "global"},
+            symbol_win_rates=symbol_rates,
+            inactive_days=inactive,
         )
 
         state = OptimizationState(

@@ -41,6 +41,7 @@ def compute_thresholds(
     *,
     global_win_rate: float,
     symbol_win_rates: dict[str, float],
+    inactive_days: dict[str, int] | None = None,
 ) -> dict[str, Thresholds]:
     """Compute global and per-symbol thresholds.
 
@@ -57,6 +58,22 @@ def compute_thresholds(
     for symbol, win_rate in symbol_win_rates.items():
         delta = win_rate - global_win_rate
         adj = 0.05 if delta >= 0.05 else -0.05 if delta <= -0.05 else 0.0
+
+        # H3: Decay per-symbol adjustment for inactive symbols.
+        # After N inactive days, the harmful adjustment (positive adj value, which
+        # raises thresholds via base - adj) decays toward zero.
+        # Decay rate: reduce |adj| by 50% per inactive day, fully zeroed at 3+ days.
+        if inactive_days and symbol in inactive_days:
+            days_inactive = inactive_days[symbol]
+            if days_inactive > 0 and adj < 0:
+                decay_factor = max(0.0, 1.0 - (days_inactive / 3.0))
+                adj = round(adj * decay_factor, 4)
+                if days_inactive >= 3:
+                    logger.info(
+                        "Threshold decay: {} inactive {}d, adjustment zeroed",
+                        symbol,
+                        days_inactive,
+                    )
         result[symbol] = Thresholds(
             min_confidence=global_threshold.min_confidence,
             min_blended_confidence=_adjust_blended(global_threshold.min_blended_confidence, adj),
