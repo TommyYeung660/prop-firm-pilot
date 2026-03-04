@@ -635,6 +635,26 @@ class Scheduler:
                         },
                     )
 
+                    if self._alert_service:
+                        hard_summary = " ".join(
+                            f"{'✅' if r.passed else '❌'}{r.gate_name}"
+                            for r in tactical_result.hard_gates
+                        )
+                        soft_summary = " ".join(
+                            f"{'✅' if r.passed else '❌'}{r.gate_name}"
+                            for r in tactical_result.soft_gates
+                        )
+                        shadow = "(Shadow)" if self._config.tactical.shadow_mode else ""
+                        await self._send_alert(
+                            f"🔬 <b>Tactical Gate {shadow}</b>\n"
+                            f"• {intent.symbol} {decision.decision}\n"
+                            f"• Action: <b>{tactical_result.action}</b>\n"
+                            f"• Hard: {hard_summary}\n"
+                            f"• Soft: {soft_summary}"
+                            f" ({tactical_result.soft_score}/{tactical_result.soft_required})\n"
+                            f"• {tactical_result.detail}"
+                        )
+
                 # In shadow mode or if tactical is disabled, always proceed
                 await asyncio.to_thread(self._store.mark_ready_for_exec, intent.id)
                 logger.info(

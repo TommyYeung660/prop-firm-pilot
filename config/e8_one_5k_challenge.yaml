@@ -110,3 +110,35 @@ instruments:
     pip_value: 10.0
     min_lot: 0.01
     max_lot: 5.0
+
+
+# v1.3.7: Tactical execution module — low-timeframe entry validation
+tactical:
+  enabled: true
+  shadow_mode: true                # Phase 1: log only, don't block trades
+  hard_gates:
+    spread_max_multiplier: 2.0
+    atr_min_ratio: 0.5
+    atr_max_ratio: 2.5
+    atr_period: 14
+    atr_timeframe: "1h"
+    data_max_age_seconds: 600
+  soft_gates:
+    min_score: 2
+    ema_fast: 8
+    ema_slow: 21
+    ema_timeframe: "5min"
+    ema_lookback_bars: 50
+    rsi_period: 14
+    rsi_overbought: 70
+    rsi_oversold: 30
+    candle_min_body_ratio: 0.3
+  retry:
+    interval_seconds: 300
+    max_retries: 12
+    expire_action: "degrade"
+    jitter_seconds: 10
+  decision_cache:
+    ttl_seconds: 14400
+  intent_dedup:
+    cooldown_after_close_seconds: 1800

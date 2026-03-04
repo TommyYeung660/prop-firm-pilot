@@ -64,6 +64,23 @@ class TacticalResult:
     soft_required: int = 2
     detail: str = ""
 
+    def to_log_dict(self) -> dict[str, Any]:
+        """Serialize to dict for JSONL/DuckDB logging."""
+        return {
+            "action": self.action,
+            "hard_gates": [
+                {"gate": r.gate_name, "passed": r.passed, "value": r.value, "detail": r.detail}
+                for r in self.hard_gates
+            ],
+            "soft_gates": [
+                {"gate": r.gate_name, "passed": r.passed, "value": r.value, "detail": r.detail}
+                for r in self.soft_gates
+            ],
+            "soft_score": self.soft_score,
+            "soft_required": self.soft_required,
+            "detail": self.detail,
+        }
+
 
 # ── Pure Indicator Functions ───────────────────────────────────────────────
 
