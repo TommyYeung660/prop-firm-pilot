@@ -501,7 +501,7 @@ async def _run_scheduler(config: AppConfig) -> None:
             await shutdown_event.wait()
         finally:
             logger.info("PropFirmPilot: initiating graceful shutdown")
-            bot_handler.stop()
+            await bot_handler.stop()
             await scheduler.stop()
             # Cancel tasks to interrupt long asyncio.sleep() in worker loops
             if not scheduler_task.done():
@@ -516,6 +516,7 @@ async def _run_scheduler(config: AppConfig) -> None:
                 )
             except asyncio.TimeoutError:
                 logger.warning("PropFirmPilot: shutdown timed out after 10s — forcing exit")
+            await alert_service.close()
             store.close()
             logger.info("PropFirmPilot: shutdown complete")
 

@@ -13,6 +13,7 @@ Tests cover:
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from src.monitor.alert_service import AlertService
@@ -123,6 +124,68 @@ class TestAlertServiceSend:
         result = await alert_disabled.send("test message")
         assert result is False
 
+
+# ── Persistent Client ─────────────────────────────────────────────────────
+
+
+class TestAlertServicePersistentClient:
+    """Test _get_client() lazy init and close() cleanup."""
+
+    async def test_get_client_creates_on_first_call(self, alert_basic: AlertService) -> None:
+        """_get_client() lazily creates an httpx.AsyncClient."""
+        assert alert_basic._http_client is None
+        client = await alert_basic._get_client()
+        assert client is not None
+        assert isinstance(client, httpx.AsyncClient)
+        assert alert_basic._http_client is client
+        # Cleanup
+        await alert_basic.close()
+
+    async def test_get_client_reuses_existing(self, alert_basic: AlertService) -> None:
+        """_get_client() returns the same client on subsequent calls."""
+        c1 = await alert_basic._get_client()
+        c2 = await alert_basic._get_client()
+        assert c1 is c2
+        await alert_basic.close()
+
+    async def test_close_cleans_up_client(self, alert_basic: AlertService) -> None:
+        """close() shuts down client and resets to None."""
+        await alert_basic._get_client()
+        assert alert_basic._http_client is not None
+        await alert_basic.close()
+        assert alert_basic._http_client is None
+
+    async def test_close_noop_when_no_client(self, alert_basic: AlertService) -> None:
+        """close() is safe to call when no client exists."""
+        assert alert_basic._http_client is None
+        await alert_basic.close()  # Should not raise
+        assert alert_basic._http_client is None
+
+    async def test_send_success_uses_persistent_client(
+        self, alert_basic: AlertService
+    ) -> None:
+        """send() uses _get_client() and makes a POST request."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        alert_basic._http_client = mock_client
+        result = await alert_basic.send("test message")
+        assert result is True
+        mock_client.post.assert_awaited_once()
+        # Reset
+        alert_basic._http_client = None
+
+    async def test_send_http_error_returns_false(
+        self, alert_basic: AlertService
+    ) -> None:
+        """send() catches httpx.HTTPError and returns False."""
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectTimeout("timeout"))
+        alert_basic._http_client = mock_client
+        result = await alert_basic.send("test message")
+        assert result is False
+        alert_basic._http_client = None
 
 # ── Trade Opened ────────────────────────────────────────────────────────────
 

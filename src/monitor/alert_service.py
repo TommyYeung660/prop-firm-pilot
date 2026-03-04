@@ -54,11 +54,25 @@ class AlertService:
         self._profit_target_pct = profit_target_pct
         self._daily_loss_pct = daily_loss_pct
         self._max_drawdown_pct = max_drawdown_pct
+        self._http_client: httpx.AsyncClient | None = None
         self._enabled = bool(bot_token and chat_id)
 
         if not self._enabled:
             logger.warning("AlertService: Telegram not configured (missing bot_token or chat_id)")
 
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Return persistent HTTP client, creating lazily on first use."""
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(15.0, connect=10.0)
+            )
+        return self._http_client
+
+    async def close(self) -> None:
+        """Close the persistent HTTP client."""
+        if self._http_client:
+            await self._http_client.aclose()
+            self._http_client = None
     # ── Computed Properties ─────────────────────────────────────────────
 
     @property
@@ -92,18 +106,22 @@ class AlertService:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(url, json=payload)
-                if response.status_code == 200:
-                    return True
-                logger.error(
-                    "AlertService: Telegram API error {}: {}",
-                    response.status_code,
-                    response.text[:200],
-                )
-                return False
+            client = await self._get_client()
+            response = await client.post(url, json=payload)
+            if response.status_code == 200:
+                return True
+            logger.error(
+                "AlertService: Telegram API error {}: {}",
+                response.status_code,
+                response.text[:200],
+            )
+            return False
         except httpx.HTTPError as e:
-            logger.error("AlertService: failed to send Telegram message: {}", e)
+            logger.error(
+                "AlertService: failed to send Telegram message: {} ({})",
+                type(e).__name__,
+                e or "no details",
+            )
             return False
 
     # ── Trade Notifications ─────────────────────────────────────────────
