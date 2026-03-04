@@ -13,7 +13,7 @@ Usage:
         trade_journal=trade_journal,
     )
     await bot.start()  # Runs until stopped
-    bot.stop()
+    await bot.stop()
 """
 
 import asyncio
@@ -61,6 +61,7 @@ class TelegramBotHandler:
         self._offset = 0
         self._conflict_backoff = 0.0
         self._running = False
+        self._http_client: httpx.AsyncClient | None = None
         self._enabled = bool(bot_token and chat_id)
 
     # ── Lifecycle ───────────────────────────────────────────────────────
@@ -75,6 +76,7 @@ class TelegramBotHandler:
             logger.warning("TelegramBotHandler: not configured, skipping start")
             return
 
+        self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
         self._running = True
         logger.info("TelegramBotHandler: started polling for commands")
 
@@ -119,9 +121,12 @@ class TelegramBotHandler:
 
         logger.info("TelegramBotHandler: stopped")
 
-    def stop(self) -> None:
-        """Signal the polling loop to stop."""
+    async def stop(self) -> None:
+        """Signal the polling loop to stop and close the HTTP client."""
         self._running = False
+        if self._http_client:
+            await self._http_client.aclose()
+            self._http_client = None
         logger.info("TelegramBotHandler: stop requested")
 
     @property
@@ -150,30 +155,37 @@ class TelegramBotHandler:
             f"{self.TELEGRAM_API}/bot{self._bot_token}/getUpdates?offset={self._offset}&timeout=10"
         )
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.get(url)
-                if response.status_code == 200:
-                    self._conflict_backoff = 0.0  # Reset on success
-                    data = response.json()
-                    return data.get("result", [])
-                if response.status_code == 409:
-                    # M1: Another instance is polling this bot token
-                    self._conflict_backoff = min(
-                        max(self._conflict_backoff * 2, 5.0), 120.0
-                    )
-                    logger.warning(
-                        "TelegramBotHandler: 409 Conflict — another instance is polling"
-                        " this bot token. Backing off {:.0f}s",
-                        self._conflict_backoff,
-                    )
-                    return []
+            client = self._http_client
+            if client is None:
+                logger.warning("TelegramBotHandler: HTTP client not initialized")
+                return []
+            response = await client.get(url)
+            if response.status_code == 200:
+                self._conflict_backoff = 0.0  # Reset on success
+                data = response.json()
+                return data.get("result", [])
+            if response.status_code == 409:
+                # M1: Another instance is polling this bot token
+                self._conflict_backoff = min(
+                    max(self._conflict_backoff * 2, 5.0), 120.0
+                )
                 logger.warning(
-                    "TelegramBotHandler: getUpdates returned {}",
-                    response.status_code,
+                    "TelegramBotHandler: 409 Conflict — another instance is polling"
+                    " this bot token. Backing off {:.0f}s",
+                    self._conflict_backoff,
                 )
                 return []
+            logger.warning(
+                "TelegramBotHandler: getUpdates returned {}",
+                response.status_code,
+            )
+            return []
         except httpx.HTTPError as e:
-            logger.warning("TelegramBotHandler: getUpdates failed: {}", e)
+            logger.warning(
+                "TelegramBotHandler: getUpdates failed: {} ({})",
+                type(e).__name__,
+                e or "no details",
+            )
             return []
 
     # ── Command Dispatch ────────────────────────────────────────────────

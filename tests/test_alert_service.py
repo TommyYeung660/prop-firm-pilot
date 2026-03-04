@@ -515,9 +515,9 @@ class TestTelegramBotHandler:
     def test_not_running_initially(self, bot_handler: TelegramBotHandler) -> None:
         assert bot_handler.is_running is False
 
-    def test_stop_sets_flag(self, bot_handler: TelegramBotHandler) -> None:
+    async def test_stop_sets_flag(self, bot_handler: TelegramBotHandler) -> None:
         bot_handler._running = True
-        bot_handler.stop()
+        await bot_handler.stop()
         assert bot_handler.is_running is False
 
     async def test_cmd_profit(

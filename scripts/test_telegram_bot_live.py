@@ -93,7 +93,7 @@ async def main() -> None:
         except asyncio.CancelledError:
             pass
         finally:
-            bot.stop()
+            await bot.stop()
             await alerts.send("🤖 <b>Bot Stopped</b>")
             print("\n🛑 Bot stopped.")
 
