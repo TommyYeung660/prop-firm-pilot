@@ -7,10 +7,11 @@ import asyncio
 import importlib
 import os
 import random
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from dotenv import dotenv_values
 from loguru import logger
@@ -39,6 +40,90 @@ class AgentDecision:
 
     def __repr__(self) -> str:
         return f"AgentDecision({self.symbol}, {self.decision})"
+
+
+# ── LLM Refusal Detection Patterns ──────────────────────────────────────────
+
+_REFUSAL_PATTERNS: list[re.Pattern[str]] = [
+    # Chinese refusal patterns
+    re.compile(r"我無法", re.IGNORECASE),
+    re.compile(r"無法提供.*(?:建議|指令|推薦)", re.IGNORECASE),
+    # English refusal patterns
+    re.compile(r"I(?:'m| am) unable to provide", re.IGNORECASE),
+    re.compile(r"I cannot (?:provide|give|offer|recommend)", re.IGNORECASE),
+    re.compile(r"(?:not|neither) a financial advisor", re.IGNORECASE),
+    re.compile(
+        r"cannot (?:give|provide|offer) (?:specific |)(?:trading |financial )",
+        re.IGNORECASE,
+    ),
+    re.compile(r"as an AI(?:\s+language)?\s+model", re.IGNORECASE),
+]
+
+# Regex to extract "FINAL TRANSACTION PROPOSAL: BUY/SELL/HOLD" from risk_report
+_PROPOSAL_RE = re.compile(
+    r"FINAL\s+TRANSACTION\s+PROPOSAL\s*:\s*(BUY|SELL|HOLD)",
+    re.IGNORECASE,
+)
+
+
+def validate_decision(
+    raw_decision: str | None,
+    risk_report: str,
+    symbol: str,
+) -> Literal["BUY", "SELL", "HOLD"]:
+    """Cross-validate LLM decision against risk_report content.
+
+    Applies three safety layers:
+    1. Normalize non-standard decision values → HOLD.
+    2. Detect LLM refusal patterns → force HOLD.
+    3. Extract FINAL TRANSACTION PROPOSAL from risk_report → override if mismatch.
+
+    Args:
+        raw_decision: Decision string from TradingAgents propagate() (may be None/garbage).
+        risk_report: Full risk report text from TradingAgents.
+        symbol: FX pair (for logging).
+
+    Returns:
+        Validated decision: "BUY", "SELL", or "HOLD".
+    """
+    # Layer 1: Normalize
+    normalized = str(raw_decision).upper().strip() if raw_decision else "HOLD"
+    if normalized not in ("BUY", "SELL", "HOLD"):
+        logger.warning(
+            "validate_decision: non-standard decision '{}' for {} → HOLD",
+            raw_decision,
+            symbol,
+        )
+        normalized = "HOLD"
+
+    # Layer 2: Refusal detection (highest priority — overrides everything)
+    for pattern in _REFUSAL_PATTERNS:
+        if pattern.search(risk_report):
+            if normalized != "HOLD":
+                logger.warning(
+                    "validate_decision: LLM refusal detected for {} "
+                    "(decision was '{}', pattern={}), forcing HOLD",
+                    symbol,
+                    normalized,
+                    pattern.pattern,
+                )
+            return "HOLD"
+
+    # Layer 3: Cross-validate with FINAL TRANSACTION PROPOSAL
+    match = _PROPOSAL_RE.search(risk_report)
+    if match:
+        proposal = match.group(1).upper()
+        if proposal != normalized:
+            logger.warning(
+                "validate_decision: decision/report mismatch for {} "
+                "(propagate='{}', report='{}'), using report value",
+                symbol,
+                normalized,
+                proposal,
+            )
+            return cast(Literal["BUY", "SELL", "HOLD"], proposal)  # type: ignore[return-value]
+
+    return cast(Literal["BUY", "SELL", "HOLD"], normalized)  # type: ignore[return-value]
 
 
 class MockTradingGraph:
@@ -231,9 +316,14 @@ class AgentBridge:
                 else:
                     risk_report = final_state.get("risk_report", "")
 
+            validated_decision = validate_decision(
+                raw_decision=decision,
+                risk_report=risk_report,
+                symbol=symbol,
+            )
             result = AgentDecision(
                 symbol=symbol,
-                decision=decision,
+                decision=validated_decision,
                 final_state=final_state if isinstance(final_state, dict) else {},
                 risk_report=risk_report,
             )
