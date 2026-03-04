@@ -804,6 +804,43 @@ class DecisionStore:
         ).fetchone()
         return row is not None
 
+    def has_recent_rejection(
+        self,
+        symbol: str,
+        trade_date: str,
+        cooldown_minutes: int = 60,
+    ) -> bool:
+        """Check if this symbol+date has a recently rejected intent.
+
+        Used by the scanner loop to avoid re-creating intents that will be
+        immediately rejected by compliance (e.g., Best Day Rule), preventing
+        infinite retry loops that burn LLM tokens.
+
+        Args:
+            symbol: FX pair (e.g. "EURUSD").
+            trade_date: Trading date string (e.g. "2026-03-03").
+            cooldown_minutes: Reject intents created within this many minutes
+                of the most recent rejection. 0 disables the cooldown.
+
+        Returns:
+            True if a rejected intent exists within the cooldown window.
+        """
+        if cooldown_minutes <= 0:
+            return False
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)
+        cutoff_str = cutoff.isoformat()
+        row = self._conn.execute(
+            """SELECT 1 FROM intents
+               WHERE symbol = :symbol
+                 AND trade_date = :td
+                 AND status = 'rejected'
+                 AND executed_at IS NOT NULL
+                 AND executed_at > :cutoff
+               LIMIT 1""",
+            {"symbol": symbol, "td": trade_date, "cutoff": cutoff_str},
+        ).fetchone()
+        return row is not None
+
     def count_pipeline_intents(self) -> int:
         """Count intents currently in the processing pipeline.
 

@@ -127,7 +127,6 @@ class OptimizationConfig(BaseModel):
     ab_ratio: float = 0.5
 
 
-
 class DecisionStoreConfig(BaseModel):
     """SQLite decision store settings for the Hybrid EA+LLM pipeline."""
 
@@ -256,6 +255,13 @@ class SchedulerConfig(BaseModel):
     )
     volatility_cooldown_seconds: int = Field(
         default=900, description="Min seconds between volatility-triggered scans (15min)"
+    )
+
+    # v1.3.5: Compliance rejection cooldown
+    rejection_cooldown_minutes: int = Field(
+        default=120,
+        description="Minutes to wait after a compliance rejection before retrying the same symbol. "
+        "Prevents infinite scanner → LLM → rejection loops.",
     )
 
     # v1.2.0: Multi-timeframe analysis

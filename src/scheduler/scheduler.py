@@ -226,8 +226,7 @@ class Scheduler:
                 # v1.3.0: Early exit when no fresh signals available
                 if not signals:
                     logger.warning(
-                        "Scanner loop: no signals returned for {} "
-                        "(may be stale or unavailable)",
+                        "Scanner loop: no signals returned for {} (may be stale or unavailable)",
                         today,
                     )
                     await self._send_alert(
@@ -235,9 +234,7 @@ class Scheduler:
                         f"No fresh signals for {today}. "
                         f"Skipping intent creation this cycle."
                     )
-                    await asyncio.sleep(
-                        self._session_cadence.get_scanner_interval(self._now_utc())
-                    )
+                    await asyncio.sleep(self._session_cadence.get_scanner_interval(self._now_utc()))
                     continue
                 # Per-symbol topk: pick the best signal per symbol, then take topk
                 best_per_symbol: dict[str, Any] = {}
@@ -290,6 +287,25 @@ class Scheduler:
                             logger.info(
                                 "Scanner loop: in-progress intent exists for {}, skipping",
                                 signal.instrument,
+                            )
+                            continue
+
+                        # C3 fix: Skip symbols with recent compliance rejection (cooldown)
+                        rejection_cooldown = getattr(
+                            self._config.scheduler, "rejection_cooldown_minutes", 120
+                        )
+                        recently_rejected = await asyncio.to_thread(
+                            self._store.has_recent_rejection,
+                            signal.instrument,
+                            today,
+                            cooldown_minutes=rejection_cooldown,
+                        )
+                        if recently_rejected:
+                            logger.warning(
+                                "Scanner loop: {} was rejected within {}min cooldown, "
+                                "skipping to avoid retry loop",
+                                signal.instrument,
+                                rejection_cooldown,
                             )
                             continue
 
