@@ -35,6 +35,18 @@
 
 16. [生產環境 Hotfixes](#16-生產環境-hotfixes)
 
+### Part E — 18 小時生產運行評估與修復
+
+20. [18 小時 Prod 運行評估](#20-18-小時-prod-運行評估)
+21. [問題清單與修復總覽](#21-問題清單與修復總覽)
+22. [Critical 修復 (C1–C3)](#22-critical-修復-c1c3)
+23. [High 修復 (H1–H3)](#23-high-修復-h1h3)
+24. [Medium 修復 (M1–M3)](#24-medium-修復-m1m3)
+25. [Low 項目 (L1–L2)](#25-low-項目-l1l2)
+26. [修復檔案清單](#26-修復檔案清單)
+27. [測試覆蓋（Bug Fix）](#27-測試覆蓋bug-fix)
+28. [Git Commit 記錄（Bug Fix）](#28-git-commit-記錄bug-fix)
+
 ### Part D — 共用
 
 17. [已知限制與未來工作](#17-已知限制與未來工作)
@@ -646,4 +658,318 @@ scheduler:
 
 ---
 
-> **報告結束** — PropFirmPilot v1.3.5（EODHD Intraday Dual-Timeframe: 1D Trend + 4H Entry）
+> **Part A–D 報告結束** — PropFirmPilot v1.3.5（EODHD Intraday Dual-Timeframe: 1D Trend + 4H Entry）
+
+---
+
+## 20. 18 小時 Prod 運行評估
+
+> **評估日期**: 2026-03-04
+> **評估範圍**: v1.3.5 於 E8 One Challenge 帳戶的首次 18 小時生產運行（2026-03-03 00:52 UTC → 2026-03-04 約 07:00 UTC）
+> **日誌來源**: `prod_log_results/03032026_to_04032026_v1_3_5/`
+
+v1.3.5 部署至 E8 One Challenge 帳戶後，首次連續運行 ~18 小時。透過全面分析生產日誌、交易記錄、與即時帳戶狀態，共識別出 **11 項問題**（3 Critical、3 High、3 Medium、2 Low）。本 Part E 記錄評估結果與所有修復。
+
+### 20.1 運行環境
+
+| 項目 | 值 |
+|---|---|
+| 目標帳戶 | E8 One Challenge (Account #950383) |
+| API | MatchTrader REST (`mtr.e8markets.com`) |
+| 運行模式 | Scheduler（24/7 async pipeline） |
+| 配置檔 | `config/e8_one_5k_challenge.yaml` |
+| Scanner 時間框架 | 1D（Qlib Alpha158） |
+| Agent 時間框架 | 4H（TradingAgents） |
+| 監控幣對 | EURUSD, GBPUSD, USDJPY |
+
+### 20.2 運行結果概要
+
+| 指標 | 值 |
+|---|---|
+| 總運行時間 | ~18 小時 |
+| Scanner 循環次數 | ~12 次（其中 11 次為冗餘） |
+| LLM 決策次數 | 多次 BUY/SELL 決策 |
+| 實際開倉 | 2 筆（USDJPY SELL、EURUSD SELL） |
+| 合規拒絕次數 | 多次（觸發 C3 無限重試） |
+| Telegram 409 錯誤 | 持續發生（M1） |
+
+---
+
+## 21. 問題清單與修復總覽
+
+| # | 優先級 | 問題 | 修復狀態 | 修復方式 |
+|---:|---|---|---|---|
+| C1 | **Critical** | HOLD 決策被錯誤映射為 BUY | ✅ 已修復 | risk_report 交叉驗證 |
+| C2 | **Critical** | LLM 拒絕回應被映射為 SELL | ✅ 已修復 | 拒絕模式檢測 |
+| C3 | **Critical** | 合規拒絕後無限重試循環 | ✅ 已修復 | 冷卻期機制 |
+| H1 | **High** | exit_reason 分類錯誤 | ✅ 已修復 | Broker API 重試 + PnL 推斷 |
+| H2 | **High** | Scanner 每次重跑浪費 ~10 分鐘 | ✅ 已修復 | Pipeline cache 智能跳過 |
+| H3 | **High** | 閾值正反饋死循環 | ✅ 已修復 | 不活躍符號閾值衰減 |
+| M1 | **Medium** | Telegram 409 Conflict 持續報錯 | ✅ 已修復 | 指數退避 |
+| M2 | **Medium** | 平倉記錄 PnL=0.0 | ✅ 由 H1 覆蓋 | 同 H1 |
+| M3 | **Medium** | LLM SELL 偏見 | 📋 已記錄 | 模型行為，非程式碼 bug |
+| L1 | **Low** | Log 噪音累積 | ✅ 已存在 | rotation 10 MB + retention 30 天 |
+| L2 | **Low** | Alpha158 因子頻率不適配 | 📋 已記錄 | 研究/配置問題 |
+
+---
+
+## 22. Critical 修復 (C1–C3)
+
+### 22.1 C1 — HOLD 決策被錯誤映射為 BUY
+
+**Root Cause**: TradingAgents 的 `propagate()` 回傳值可能與 `risk_report` 內容矛盾。Production 日誌中觀察到 risk_report 明確建議 HOLD，但 `propagate()` 回傳了 BUY。三個來源出現三種不同值：trader=SELL, risk_report=HOLD, propagate()=BUY。
+
+**修復**: 在 `AgentBridge` 新增 `validate_decision()` 方法，實施 risk_report 交叉驗證：
+
+1. 以正則表達式 `_PROPOSAL_RE` 從 risk_report 提取最終建議（HOLD/BUY/SELL）
+2. 當 risk_report 建議與 `propagate()` 回傳值矛盾時，**以 risk_report 為準**
+3. 若 risk_report 明確建議 HOLD，強制覆寫決策為 HOLD
+
+**核心程式碼**:
+
+```python
+# src/decision/agent_bridge.py
+_PROPOSAL_RE = re.compile(
+    r'(?:final\s+(?:trading\s+)?(?:proposal|recommendation|decision)|recommendation)\s*:?\s*(BUY|SELL|HOLD)',
+    re.IGNORECASE,
+)
+```
+
+### 22.2 C2 — LLM 拒絕回應被映射為 SELL
+
+**Root Cause**: GPT-5.2 偶爾回傳拒絕回應（如「我無法依照你的要求提供」），但 `propagate()` 仍回傳 SELL，系統將其視為有效決策。
+
+**修復**: 在 `validate_decision()` 中新增 LLM 拒絕模式檢測：
+
+```python
+# src/decision/agent_bridge.py
+_REFUSAL_PATTERNS = [
+    re.compile(r'(?:I\s+cannot|I\'m\s+unable|I\s+can\'t).*(?:provide|recommend|suggest)', re.I),
+    re.compile(r'(?:無法|不能).*(?:提供|建議|推薦)', re.I),
+    re.compile(r'(?:I\s+do\s+not|I\s+don\'t).*(?:have\s+enough|recommend)', re.I),
+]
+```
+
+當任一拒絕模式匹配 risk_report 時，強制決策為 HOLD 並記錄原因。
+
+### 22.3 C3 — 合規拒絕後無限重試循環
+
+**Root Cause**: Scanner 產生信號 → LLM 決策 BUY → 合規檢查拒絕 → 下一次循環重複同樣流程 → 永無止境地消耗 LLM API credits。
+
+**修復**:
+
+1. 在 `DecisionStore`（SQLite）新增 `has_recent_rejection(symbol, minutes)` 方法
+2. 在 `SchedulerConfig` 新增 `rejection_cooldown_minutes: int = 120`
+3. Scheduler 在處理信號前檢查該 symbol 是否在冷卻期內
+4. 冷卻期內的信號直接跳過，避免重複呼叫 LLM
+
+```python
+# src/config.py
+rejection_cooldown_minutes: int = Field(
+    default=120,
+    description="Minutes to wait after a compliance rejection before retrying the same symbol."
+)
+```
+
+---
+
+## 23. High 修復 (H1–H3)
+
+### 23.1 H1 — exit_reason 分類錯誤
+
+**Root Cause**: 當倉位被 TP/SL 觸發自動平倉後，Broker API 需要短暫時間處理。系統在 2 秒內查詢，若 API 尚未回傳已平倉的 position，則 `exit_reason` 預設為 `manual_close`。這不是真正的手動平倉，而是 API 延遲的假陽性。
+
+**修復**:
+
+1. **3 次重試機制**：以指數退避（2s → 4s → 8s）重試 Broker API 查詢
+2. **PnL 推斷**：若重試後仍未拿到 position 資料，根據 PnL 推斷：
+   - PnL > 0 → `tp_hit`（止盈觸發）
+   - PnL < 0 → `sl_hit`（止損觸發）
+   - PnL = 0 → `manual_close`（保留預設）
+3. **`_last_known_profit` 備援**：若 PnL 為 0，嘗試從最後已知利潤推斷
+4. **best_day / reevaluation 平倉路徑**也加入相同的 PnL 備援邏輯
+
+> **驗證**：透過 MatchTrader API 即時查詢 E8 One 帳戶，確認所有在倉倉位均有 SL 和 TP。H1 的「無 SL/TP」部分為**假陽性**。
+
+### 23.2 H2 — Scanner 冗餘重跑
+
+**Root Cause**: FX 使用 Qlib 1D（daily）模型，信號只在每日 K 線收盤（~17:00 UTC）後才更新。但 Scheduler 每 4 小時觸發一次 scanner pipeline（含 ~10 分鐘的 retrain），在日內重跑完全是浪費。
+
+**Production 證據**: 03-03 00:52–10:02 期間使用 02-27 信號（11 次冗餘運行）。新信號直到 17:39 才出現。
+
+**修復**: 新增 `_PipelineCache` dataclass：
+
+```python
+# src/signal/scanner_bridge.py
+@dataclass
+class _PipelineCache:
+    """Cache for pipeline results keyed by (request_date, interval)."""
+    request_date: str
+    interval: str
+    signals: list
+    timestamp: float
+```
+
+- Cache key 為 `(request_date, interval)`
+- 同一 key 命中時直接回傳快取結果，跳過 retrain
+- `load_signals_from_file()` 回傳型別改為 `tuple[list, bool]`（signals + is_cached flag）
+- ~18 個測試呼叫點同步更新
+
+### 23.3 H3 — 閾值正反饋死循環
+
+**Root Cause**: `OptimizationEngine.refresh_state()` → `compute_thresholds()` 中的 per-symbol 閾值調整形成正反饋死循環：
+
+1. 全局 win_rate < 0.45 → `min_blended_confidence = 0.65`
+2. Per-symbol win rate 更差 → `_adjust_blended()` 加 0.05 → 閾值升至 **0.70**
+3. Blended confidence ~0.516 < 0.70 → 信號永遠被過濾
+4. 無交易 → 無新資料 → 閾值維持高位 → **死循環**
+
+**修復**: 對不活躍符號的閾值調整引入時間衰減：
+
+```python
+# src/optimize/thresholds.py
+# 衰減公式：adj 在 3 天內線性歸零
+decay_factor = max(0.0, 1.0 - inactive_days / 3.0)
+adj_decayed = adj * decay_factor
+```
+
+- `trade_stats.py`: 新增 `compute_inactive_days()` 計算每個 symbol 距上次交易的天數
+- `optimization_engine.py`: 在 `refresh_state()` 中計算 `inactive_days` 並傳入 `compute_thresholds()`
+- 僅對 `adj < 0`（表現較差 → 閾值被抬高）的情況進行衰減
+- 3 天無交易後閾值調整完全歸零，恢復為全局基準值
+
+---
+
+## 24. Medium 修復 (M1–M3)
+
+### 24.1 M1 — Telegram 409 Conflict 持續報錯
+
+**Root Cause**: `TelegramBotHandler` 使用 `getUpdates` 長輪詢。當兩個 process 同時 poll 同一個 bot token 時，Telegram API 回傳 409 Conflict。這是部署層面問題（如同時運行兩個 scheduler 實例）。
+
+**修復**: 在 `_poll_updates()` 新增 409 專屬檢測與指數退避：
+
+```python
+# src/monitor/telegram_bot.py
+if response.status_code == 409:
+    self._conflict_backoff = min(max(self._conflict_backoff * 2, 5.0), 120.0)
+    logger.warning(
+        "TelegramBotHandler: 409 Conflict — another instance is polling"
+        " this bot token. Backing off {:.0f}s", self._conflict_backoff,
+    )
+    return []
+```
+
+- 初始退避 5 秒，每次翻倍，上限 120 秒
+- 成功後立即重置退避為 0
+
+### 24.2 M2 — 平倉記錄 PnL=0.0
+
+**已由 H1 修復覆蓋**。H1 的 3 次重試 + PnL 推斷 + `_last_known_profit` 備援邏輯解決了 PnL 為 0 的問題。不需要額外的程式碼修改。
+
+### 24.3 M3 — LLM SELL 偏見
+
+**已記錄，非程式碼 bug**。Production 觀察到 LLM（尤其 GPT-5.2）在 FX 分析時傾向於給出 SELL 建議。這屬於模型行為偏差，需要透過 prompt engineering 或模型選擇來處理，不在本次修復範圍。
+
+---
+
+## 25. Low 項目 (L1–L2)
+
+### 25.1 L1 — Log 噪音累積
+
+**已存在完整實現**。檢查發現 `setup_logging()` 函數（`src/main.py` 第 523–540 行）已配置完善的 loguru file handler：
+
+```python
+# src/main.py
+logger.add(
+    config.logging.file,         # logs/prop_firm_pilot.log
+    level=config.logging.level,   # INFO
+    rotation=config.logging.rotation,  # 10 MB
+    retention=config.logging.retention, # 30 days
+    encoding="utf-8",
+)
+```
+
+對應 YAML 配置：
+
+```yaml
+# config/default.yaml
+logging:
+  level: "INFO"
+  file: "logs/prop_firm_pilot.log"
+  rotation: "10 MB"
+  retention: "30 days"
+```
+
+不需要額外修改。
+
+### 25.2 L2 — Alpha158 因子頻率不適配
+
+**已記錄，研究/配置問題**。Qlib Alpha158 因子模型設計初衷偏向 daily equity，在 4H FX 上表現顯著下降（IR 從 1.179 降至 0.299）。這與第 15 節的分析一致：Scanner 應維持 1D，4H 僅作為 TradingAgents 的 entry timing context。
+
+---
+
+## 26. 修復檔案清單
+
+### prop-firm-pilot（Bug Fix commits）
+
+| 檔案 | 動作 | 修復項 | 說明 |
+|---|---|---|---|
+| `src/decision/agent_bridge.py` | **修改** | C1+C2 | `validate_decision()` + `_REFUSAL_PATTERNS` + `_PROPOSAL_RE` |
+| `src/decision_store/sqlite_store.py` | **修改** | C3 | `has_recent_rejection(symbol, minutes)` 方法 |
+| `src/scheduler/scheduler.py` | **修改** | C3, H1 | 拒絕冷卻期檢查 + exit_reason 重試與 PnL 推斷 |
+| `src/config.py` | **修改** | C3 | `rejection_cooldown_minutes` 欄位 |
+| `src/signal/scanner_bridge.py` | **修改** | H2 | `_PipelineCache` + `load_signals_from_file()` tuple 回傳 |
+| `src/optimize/thresholds.py` | **修改** | H3 | `compute_thresholds()` 不活躍符號衰減邏輯 |
+| `src/optimize/trade_stats.py` | **修改** | H3 | `compute_inactive_days()` 函數 |
+| `src/optimize/optimization_engine.py` | **修改** | H3 | `refresh_state()` 串接 inactive_days |
+| `src/monitor/telegram_bot.py` | **修改** | M1 | 409 Conflict 指數退避 |
+
+### TradingAgents（Encoding Fix）
+
+| 檔案 | 動作 | 修復項 | 說明 |
+|---|---|---|---|
+| `tradingagents/graph/trading_graph.py` | **修改** | Encoding | `_log_state()` 加入 `encoding="utf-8"` + `ensure_ascii=False` |
+
+---
+
+## 27. 測試覆蓋（Bug Fix）
+
+| 測試檔案 | 修復項 | 測試數 | 說明 |
+|---|---|---|---|
+| `tests/test_agent_bridge_decision_validation.py` | C1+C2 | 18 | risk_report 交叉驗證 + LLM 拒絕檢測 |
+| `tests/test_rejection_cooldown.py` | C3 | 8 | 冷卻期機制完整覆蓋 |
+| `tests/test_exit_reason_classification.py` | H1 | 12 | exit_reason 重試 + PnL 推斷 |
+| `tests/test_scheduler.py` | H1 | 2（更新） | 既有測試適配 H1 改動 |
+| `tests/test_scanner_bridge.py` | H2 | 8（新增）+ 18（更新） | Pipeline cache + load_signals_from_file 呼叫點 |
+| `tests/optimize/test_threshold_decay.py` | H3 | 12 | 不活躍符號衰減完整覆蓋 |
+| `tests/optimize/test_thresholds.py` | H3 | 24（通過） | 既有閾值測試回歸驗證 |
+| `tests/optimize/test_scheduler_thresholds.py` | H3 | 3（通過） | Scheduler 閾值整合測試 |
+
+---
+
+## 28. Git Commit 記錄（Bug Fix）
+
+本節列出 v1.3.5 生產評估後的 Bug Fix commits，按修復優先級排序。
+
+### prop-firm-pilot（8 commits）
+
+| Commit | Description |
+|---|---|
+| `be0263d` | fix(C1+C2): add risk_report cross-validation and LLM refusal detection in AgentBridge |
+| `2f3b8d2` | fix(C3): add compliance rejection cooldown to prevent infinite retry loops |
+| `64d9e9c` | chore: clean up unused imports in C1+C2 test file |
+| `959c91d` | chore: remove obsolete e8_trial and e8_signature config files |
+| `91e6e3e` | fix(H1): add broker API retry with exponential backoff and PnL-based exit_reason re-inference |
+| `6e08d8e` | fix(H2): add pipeline cache to skip redundant scanner reruns when daily candle unchanged |
+| `e634e2e` | fix(H3): add threshold decay for inactive symbols to break positive feedback dead loop |
+| `b76afb8` | fix(M1): add exponential backoff for Telegram 409 Conflict errors |
+
+### TradingAgents（1 commit）
+
+| Commit | Description |
+|---|---|
+| `74b394b` | fix: write JSON state logs with UTF-8 encoding and ensure_ascii=False |
+
+---
+
+> **報告結束** — PropFirmPilot v1.3.5（含 Part E：18 小時生產運行評估與修復，共 9 commits across 2 repos）
