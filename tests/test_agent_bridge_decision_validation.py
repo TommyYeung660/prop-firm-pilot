@@ -6,10 +6,7 @@ Guards against C1 (HOLD→BUY mapping) and C2 (LLM refusal→SELL mapping)
 production bugs found in v1.3.5 prod run (2026-03-03).
 """
 
-import pytest
-
-from src.decision.agent_bridge import AgentDecision, validate_decision
-
+from src.decision.agent_bridge import validate_decision
 
 # ── C1: Risk report says HOLD but decision says BUY/SELL ──────────────────
 
