@@ -1,14 +1,34 @@
 """
 Bridge to qlib_market_scanner — runs the scanner pipeline and
 converts its output into the format expected by TradingAgents.
+
+v1.4.0: Added pipeline caching to avoid redundant retrain runs when
+the daily candle hasn't closed yet (signals won't change intraday).
 """
 
 import csv
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
+
+
+@dataclass
+class _PipelineCache:
+    """Cached result from a scanner pipeline run.
+
+    When the scanner's daily model hasn't received today's candle yet,
+    re-running the pipeline produces identical signals.  Caching avoids
+    ~10 min of wasted retrain compute per redundant call.
+    """
+
+    request_date: str  # date param passed to run_pipeline
+    interval: str
+    signal_date: str  # actual date of the returned signals
+    signals: list = field(default_factory=list)
+    is_stale: bool = False  # True when signal_date < request_date
 
 
 class ScannerSignal:
@@ -68,6 +88,9 @@ class ScannerBridge:
     """Bridge to run qlib_market_scanner and parse its output.
 
     The scanner is run as a subprocess to avoid Python environment conflicts.
+
+    v1.4.0: Caches pipeline results within the same (date, interval) to skip
+    redundant retrain runs when the daily candle hasn't closed yet.
     """
 
     def __init__(
@@ -81,9 +104,58 @@ class ScannerBridge:
         self._topk = topk
         self._profile = profile
         self._entry_timeframe = entry_timeframe
+        self._cache: _PipelineCache | None = None
 
         if not self._scanner_path.exists():
             logger.warning("ScannerBridge: scanner path does not exist: {}", self._scanner_path)
+
+    # ── Pipeline cache helpers ──────────────────────────────────────────
+
+    def _get_cached(self, date: str | None, interval: str) -> list[ScannerSignal] | None:
+        """Return cached signals if a valid cache entry exists, else None."""
+        if self._cache is None:
+            return None
+        if self._cache.request_date != date or self._cache.interval != interval:
+            return None
+
+        logger.info(
+            "ScannerBridge: returning cached signals (signal_date={}, stale={}) "
+            "— skipping pipeline re-run for date={}",
+            self._cache.signal_date,
+            self._cache.is_stale,
+            date,
+        )
+        return list(self._cache.signals)  # defensive copy
+
+    def _update_cache(
+        self,
+        request_date: str | None,
+        interval: str,
+        signals: list[ScannerSignal],
+        signal_date: str,
+    ) -> None:
+        """Store pipeline result in cache."""
+        is_stale = request_date is not None and signal_date != request_date
+        self._cache = _PipelineCache(
+            request_date=request_date or "",
+            interval=interval,
+            signal_date=signal_date,
+            signals=list(signals),  # defensive copy
+            is_stale=is_stale,
+        )
+        if is_stale:
+            logger.info(
+                "ScannerBridge: cached stale signals (signal_date={} != request_date={}) "
+                "— subsequent calls for same date will skip pipeline",
+                signal_date,
+                request_date,
+            )
+
+    def invalidate_cache(self) -> None:
+        """Clear the pipeline cache.  Called externally when a cache bust is needed."""
+        self._cache = None
+
+    # ── Main pipeline ───────────────────────────────────────────────────
 
     def run_pipeline(
         self,
@@ -98,12 +170,21 @@ class ScannerBridge:
         Args:
             date: Override date for the pipeline (YYYY-MM-DD). None = today.
             tickers: Optional list of tickers to scan (comma separated string passed to CLI).
+            force_retrain: Force model retrain (avoids stale cached models across days).
             interval: Data interval for multi-timeframe scanning (e.g. '1d', '4h', '1h').
             max_signal_age_days: If provided, reject signals older than this many days.
 
         Returns:
             List of ScannerSignal sorted by rank (best first).
         """
+        # ── Cache check: skip expensive pipeline if signals won't change ──
+        # Daily models only produce new scores after the day's candle closes.
+        # Re-running the pipeline intraday yields identical results, wasting
+        # ~10 min of retrain compute per call.
+        cached = self._get_cached(date, interval)
+        if cached is not None:
+            return cached
+
         logger.info(
             "ScannerBridge: running pipeline (profile={}, date={})",
             self._profile,
@@ -164,11 +245,14 @@ class ScannerBridge:
                         "ScannerBridge: attempting fallback to existing signals file: {}",
                         signals_path,
                     )
-                    return self.load_signals_from_file(
+                    signals, signal_date = self.load_signals_from_file(
                         signals_path,
                         target_date=date,
                         max_signal_age_days=max_signal_age_days,
                     )
+                    if signals:
+                        self._update_cache(date, interval, signals, signal_date)
+                    return signals
 
                 return []
 
@@ -177,11 +261,14 @@ class ScannerBridge:
             # Read output file directly
             # Path: outputs/signals/signals.csv
             signals_path = self._scanner_path / "outputs" / "signals" / "signals.csv"
-            return self.load_signals_from_file(
+            signals, signal_date = self.load_signals_from_file(
                 signals_path,
                 target_date=date,
                 max_signal_age_days=max_signal_age_days,
             )
+            if signals:
+                self._update_cache(date, interval, signals, signal_date)
+            return signals
 
         except subprocess.TimeoutExpired:
             logger.error("ScannerBridge: pipeline timed out after 600s")
@@ -195,7 +282,7 @@ class ScannerBridge:
         path: str | Path,
         target_date: str | None = None,
         max_signal_age_days: int | None = None,
-    ) -> list[ScannerSignal]:
+    ) -> tuple[list[ScannerSignal], str]:
         """Load signals from a pre-existing signals.csv file.
 
         Args:
@@ -205,11 +292,16 @@ class ScannerBridge:
                          If None, returns only the latest date's signals.
             max_signal_age_days: If provided, reject signals older than this many days
                                  relative to target_date. None = no freshness check.
+
+        Returns:
+            Tuple of (signals, chosen_date).  chosen_date is the actual date of
+            the returned signals (may differ from target_date if data is stale).
+            Returns ([], "") if no signals are available.
         """
         path = Path(path)
         if not path.exists():
             logger.error("ScannerBridge: signals file not found: {}", path)
-            return []
+            return [], ""
 
         all_signals: dict[str, list[ScannerSignal]] = {}
         try:
@@ -240,15 +332,15 @@ class ScannerBridge:
                         all_signals[row_date].append(signal)
 
                     except (ValueError, TypeError) as e:
-                        logger.warning("ScannerBridge: skipping malformed了 row {}: {}", i, e)
+                        logger.warning("ScannerBridge: skipping malformed row {}: {}", i, e)
 
         except Exception as e:
             logger.error("ScannerBridge: failed to read CSV: {}", e)
-            return []
+            return [], ""
 
         if not all_signals:
             logger.warning("ScannerBridge: no signals found in {}", path)
-            return []
+            return [], ""
 
         # Pick the target date's signals, or fall back to latest date
         available_dates = sorted(all_signals.keys())
@@ -283,7 +375,7 @@ class ScannerBridge:
                         max_signal_age_days,
                         target_date,
                     )
-                    return []
+                    return [], ""
             except ValueError:
                 logger.warning(
                     "ScannerBridge: could not parse dates for freshness check "
@@ -294,10 +386,14 @@ class ScannerBridge:
 
         signals = all_signals[chosen_date]
         signals.sort(key=lambda s: s.rank)
+        is_stale = target_date is not None and chosen_date != target_date
         logger.info(
-            "ScannerBridge: loaded {} signals for date {} (total dates in file: {})",
+            "ScannerBridge: loaded {} signals for date {} (target={}, stale={}, "
+            "total dates in file: {})",
             len(signals),
             chosen_date,
+            target_date,
+            is_stale,
             len(available_dates),
         )
-        return signals
+        return signals, chosen_date
