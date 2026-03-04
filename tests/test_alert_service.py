@@ -717,3 +717,249 @@ class TestAlertServiceDynamicDrawdown:
         )
         # Should not raise
         assert alert.max_drawdown_amount == 300.0
+
+
+# ── Circuit Breaker Tests (AlertService) ─────────────────────────────────────
+
+
+class TestAlertServiceCircuitBreaker:
+    """Test circuit breaker pattern in AlertService.send()."""
+
+    def _make_alert(self) -> AlertService:
+        return AlertService(bot_token="fake:token", chat_id="123456")
+
+    async def test_circuit_opens_after_n_failures(self) -> None:
+        """Circuit opens after _CIRCUIT_OPEN_THRESHOLD consecutive failures."""
+        alert = self._make_alert()
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectTimeout("timeout"))
+        alert._http_client = mock_client
+
+        for _ in range(3):
+            await alert.send("test")
+
+        assert alert._circuit_open is True
+        assert alert._consecutive_failures == 3
+        # Cleanup
+        alert._http_client = None
+
+    async def test_circuit_skips_send_when_open(self) -> None:
+        """When circuit is open and retry interval not elapsed, send returns False without HTTP."""
+        alert = self._make_alert()
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectTimeout("timeout"))
+        alert._http_client = mock_client
+
+        # Open the circuit
+        for _ in range(3):
+            await alert.send("test")
+        assert alert._circuit_open is True
+
+        # Reset mock to track new calls
+        mock_client.post.reset_mock()
+
+        # Next send should skip entirely (no HTTP call)
+        result = await alert.send("should be skipped")
+        assert result is False
+        mock_client.post.assert_not_awaited()
+        alert._http_client = None
+
+    async def test_circuit_allows_probe_after_interval(self) -> None:
+        """After retry interval, circuit allows one probe request."""
+        import asyncio
+
+        alert = self._make_alert()
+        alert._CIRCUIT_RETRY_INTERVAL = 0.1  # Shorten for test
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectTimeout("timeout"))
+        alert._http_client = mock_client
+
+        # Open the circuit
+        for _ in range(3):
+            await alert.send("test")
+        assert alert._circuit_open is True
+
+        # Wait for retry interval
+        await asyncio.sleep(0.15)
+
+        # Reset mock to track new calls
+        mock_client.post.reset_mock()
+
+        # Probe should be attempted (will fail again)
+        result = await alert.send("probe")
+        assert result is False
+        mock_client.post.assert_awaited_once()  # HTTP call was made
+        alert._http_client = None
+
+    async def test_circuit_recovers_on_success(self) -> None:
+        """Circuit resets to closed when a send succeeds."""
+        import asyncio
+
+        alert = self._make_alert()
+        alert._CIRCUIT_RETRY_INTERVAL = 0.1  # Shorten for test
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectTimeout("timeout"))
+        alert._http_client = mock_client
+
+        # Open the circuit
+        for _ in range(3):
+            await alert.send("test")
+        assert alert._circuit_open is True
+
+        # Wait for retry interval
+        await asyncio.sleep(0.15)
+
+        # Now simulate success on probe
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        result = await alert.send("probe-success")
+        assert result is True
+        assert alert._circuit_open is False
+        assert alert._consecutive_failures == 0
+        alert._http_client = None
+
+    async def test_non_200_counts_as_failure(self) -> None:
+        """Non-200 HTTP responses also trigger circuit breaker."""
+        alert = self._make_alert()
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.text = "Internal Server Error"
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        alert._http_client = mock_client
+
+        for _ in range(3):
+            await alert.send("test")
+
+        assert alert._circuit_open is True
+        assert alert._consecutive_failures == 3
+        alert._http_client = None
+
+    async def test_success_resets_failure_count(self) -> None:
+        """A successful send resets the consecutive failure counter."""
+        alert = self._make_alert()
+        mock_client = AsyncMock()
+
+        # 2 failures (not enough to open circuit)
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectTimeout("timeout"))
+        alert._http_client = mock_client
+        await alert.send("fail1")
+        await alert.send("fail2")
+        assert alert._consecutive_failures == 2
+        assert alert._circuit_open is False
+
+        # 1 success resets counter
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_client.post = AsyncMock(return_value=mock_response)
+        await alert.send("ok")
+        assert alert._consecutive_failures == 0
+        alert._http_client = None
+
+    async def test_disabled_alert_ignores_circuit_breaker(self) -> None:
+        """Disabled AlertService (no token) returns False without touching circuit breaker."""
+        alert = AlertService(bot_token="", chat_id="")
+        result = await alert.send("test")
+        assert result is False
+        assert alert._consecutive_failures == 0
+        assert alert._circuit_open is False
+
+
+# ── Circuit Breaker Tests (TelegramBotHandler) ──────────────────────────────
+
+
+class TestTelegramBotCircuitBreaker:
+    """Test circuit breaker pattern in TelegramBotHandler._poll_updates()."""
+
+    def _make_bot(self) -> TelegramBotHandler:
+        return TelegramBotHandler(
+            bot_token="fake:token",
+            chat_id="123456",
+            alert_service=AsyncMock(),
+            trading_client=AsyncMock(),
+            trade_journal=MagicMock(),
+        )
+
+    async def test_circuit_opens_after_connection_failures(self) -> None:
+        """Circuit opens after _CIRCUIT_OPEN_THRESHOLD consecutive HTTPError failures."""
+        bot = self._make_bot()
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectTimeout("timeout"))
+        bot._http_client = mock_client
+
+        for _ in range(3):
+            await bot._poll_updates()
+
+        assert bot._circuit_open is True
+        assert bot._consecutive_failures == 3
+        bot._http_client = None
+
+    async def test_circuit_open_sleeps_instead_of_polling(self) -> None:
+        """When circuit is open, _poll_updates sleeps for retry interval then probes."""
+        bot = self._make_bot()
+        bot._CIRCUIT_RETRY_INTERVAL = 0.05  # Shorten for test
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectTimeout("timeout"))
+        bot._http_client = mock_client
+
+        # Open the circuit
+        for _ in range(3):
+            await bot._poll_updates()
+        assert bot._circuit_open is True
+
+        # Next poll should sleep then probe (will fail again)
+        mock_client.get.reset_mock()
+        await bot._poll_updates()
+        # Probe was attempted
+        mock_client.get.assert_awaited_once()
+        bot._http_client = None
+
+    async def test_circuit_recovers_on_successful_poll(self) -> None:
+        """Circuit resets when polling succeeds (status 200)."""
+        bot = self._make_bot()
+        bot._CIRCUIT_RETRY_INTERVAL = 0.05  # Shorten for test
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectTimeout("timeout"))
+        bot._http_client = mock_client
+
+        # Open the circuit
+        for _ in range(3):
+            await bot._poll_updates()
+        assert bot._circuit_open is True
+
+        # Simulate success
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json = MagicMock(return_value={"ok": True, "result": []})
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        result = await bot._poll_updates()
+        assert result == []
+        assert bot._circuit_open is False
+        assert bot._consecutive_failures == 0
+        bot._http_client = None
+
+    @patch("src.monitor.telegram_bot.asyncio.sleep", new_callable=AsyncMock)
+    async def test_409_does_not_trigger_circuit_breaker(self, mock_sleep: AsyncMock) -> None:
+        """409 Conflict uses its own backoff, not the circuit breaker."""
+        bot = self._make_bot()
+        mock_response = MagicMock()
+        mock_response.status_code = 409
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        bot._http_client = mock_client
+
+        for _ in range(5):
+            await bot._poll_updates()
+
+        # Circuit should NOT be open (409 uses conflict_backoff, not circuit breaker)
+        assert bot._circuit_open is False
+        assert bot._consecutive_failures == 0
+        assert bot._conflict_backoff > 0
+        bot._http_client = None

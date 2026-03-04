@@ -64,6 +64,13 @@ class TelegramBotHandler:
         self._http_client: httpx.AsyncClient | None = None
         self._enabled = bool(bot_token and chat_id)
 
+        # ── Circuit Breaker State ──────────────────────────────────────
+        self._consecutive_failures: int = 0
+        self._circuit_open: bool = False
+        self._circuit_opened_at: float = 0.0
+        self._CIRCUIT_OPEN_THRESHOLD: int = 3
+        self._CIRCUIT_RETRY_INTERVAL: float = 300.0  # seconds
+
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -142,7 +149,28 @@ class TelegramBotHandler:
         Uses long-polling with a 10-second timeout to minimize API calls.
         On 409 Conflict (another instance polling the same bot token),
         applies exponential backoff to avoid thrashing.
+
+        Circuit breaker: after ``_CIRCUIT_OPEN_THRESHOLD`` consecutive
+        connection failures, skips polling and sleeps for
+        ``_CIRCUIT_RETRY_INTERVAL`` seconds instead of hammering the
+        endpoint every poll interval.
         """
+        # ── Circuit Breaker: skip polling when open ───────────────
+        if self._circuit_open:
+            elapsed = time.monotonic() - self._circuit_opened_at
+            if elapsed < self._CIRCUIT_RETRY_INTERVAL:
+                logger.debug(
+                    "TelegramBotHandler: circuit open, sleeping {:.0f}s until probe",
+                    self._CIRCUIT_RETRY_INTERVAL - elapsed,
+                )
+                remaining = self._CIRCUIT_RETRY_INTERVAL - elapsed
+                await asyncio.sleep(remaining)
+            # Retry interval elapsed — allow one probe request
+            logger.info(
+                "TelegramBotHandler: circuit open for {:.0f}s, attempting probe poll",
+                time.monotonic() - self._circuit_opened_at,
+            )
+
         # M1: Back off when a 409 conflict was recently detected
         if self._conflict_backoff > 0:
             logger.debug(
@@ -162,6 +190,7 @@ class TelegramBotHandler:
             response = await client.get(url)
             if response.status_code == 200:
                 self._conflict_backoff = 0.0  # Reset on success
+                self._reset_circuit()  # Circuit breaker: success
                 data = response.json()
                 return data.get("result", [])
             if response.status_code == 409:
@@ -186,7 +215,38 @@ class TelegramBotHandler:
                 type(e).__name__,
                 e or "no details",
             )
+            self._record_failure()  # Circuit breaker: failure
             return []
+
+
+    # ── Circuit Breaker Helpers ─────────────────────────────────────────
+
+    def _record_failure(self) -> None:
+        """Increment failure counter and open circuit if threshold reached."""
+        self._consecutive_failures += 1
+        if (
+            not self._circuit_open
+            and self._consecutive_failures >= self._CIRCUIT_OPEN_THRESHOLD
+        ):
+            self._circuit_open = True
+            self._circuit_opened_at = time.monotonic()
+            logger.warning(
+                "TelegramBotHandler: circuit OPEN after {} consecutive failures "
+                "— polling will sleep for {:.0f}s between probes",
+                self._consecutive_failures,
+                self._CIRCUIT_RETRY_INTERVAL,
+            )
+
+    def _reset_circuit(self) -> None:
+        """Reset circuit breaker to closed state."""
+        if self._circuit_open:
+            logger.info(
+                "TelegramBotHandler: circuit CLOSED — Telegram recovered after {:.0f}s",
+                time.monotonic() - self._circuit_opened_at,
+            )
+        self._consecutive_failures = 0
+        self._circuit_open = False
+        self._circuit_opened_at = 0.0
 
     # ── Command Dispatch ────────────────────────────────────────────────
 

@@ -17,6 +17,7 @@ Usage:
     await alerts.trade_opened("EURUSD.", "BUY", 0.10, 1.08500, equity=5050.0)
 """
 
+import time
 from typing import Any
 
 import httpx
@@ -57,6 +58,13 @@ class AlertService:
         self._http_client: httpx.AsyncClient | None = None
         self._enabled = bool(bot_token and chat_id)
 
+        # ── Circuit Breaker State ──────────────────────────────────────
+        self._consecutive_failures: int = 0
+        self._circuit_open: bool = False
+        self._circuit_opened_at: float = 0.0
+        self._CIRCUIT_OPEN_THRESHOLD: int = 3
+        self._CIRCUIT_RETRY_INTERVAL: float = 300.0  # seconds
+
         if not self._enabled:
             logger.warning("AlertService: Telegram not configured (missing bot_token or chat_id)")
 
@@ -92,11 +100,32 @@ class AlertService:
     async def send(self, message: str) -> bool:
         """Send a text message via Telegram.
 
+        Uses a circuit breaker pattern: after ``_CIRCUIT_OPEN_THRESHOLD``
+        consecutive failures the circuit opens and subsequent calls return
+        ``False`` immediately (no HTTP request, no 10-second timeout wait).
+        Every ``_CIRCUIT_RETRY_INTERVAL`` seconds one probe request is
+        allowed through; on success the circuit resets to closed.
+
         Returns True if sent successfully, False otherwise.
         """
         if not self._enabled:
             logger.debug("AlertService: skipping (not configured): {}", message[:80])
             return False
+
+        # ── Circuit Breaker: fast-fail when open ─────────────────────
+        if self._circuit_open:
+            elapsed = time.monotonic() - self._circuit_opened_at
+            if elapsed < self._CIRCUIT_RETRY_INTERVAL:
+                logger.debug(
+                    "AlertService: circuit open, skipping send ({:.0f}s until probe)",
+                    self._CIRCUIT_RETRY_INTERVAL - elapsed,
+                )
+                return False
+            # Retry interval elapsed — allow one probe request
+            logger.info(
+                "AlertService: circuit open for {:.0f}s, attempting probe request",
+                elapsed,
+            )
 
         url = f"{self.TELEGRAM_API}/bot{self._bot_token}/sendMessage"
         payload = {
@@ -109,12 +138,14 @@ class AlertService:
             client = await self._get_client()
             response = await client.post(url, json=payload)
             if response.status_code == 200:
+                self._reset_circuit()
                 return True
             logger.error(
                 "AlertService: Telegram API error {}: {}",
                 response.status_code,
                 response.text[:200],
             )
+            self._record_failure()
             return False
         except httpx.HTTPError as e:
             logger.error(
@@ -122,7 +153,38 @@ class AlertService:
                 type(e).__name__,
                 e or "no details",
             )
+            self._record_failure()
             return False
+
+
+    # ── Circuit Breaker Helpers ─────────────────────────────────────────
+
+    def _record_failure(self) -> None:
+        """Increment failure counter and open circuit if threshold reached."""
+        self._consecutive_failures += 1
+        if (
+            not self._circuit_open
+            and self._consecutive_failures >= self._CIRCUIT_OPEN_THRESHOLD
+        ):
+            self._circuit_open = True
+            self._circuit_opened_at = time.monotonic()
+            logger.warning(
+                "AlertService: circuit OPEN after {} consecutive failures "
+                "— Telegram sends will be skipped for {:.0f}s",
+                self._consecutive_failures,
+                self._CIRCUIT_RETRY_INTERVAL,
+            )
+
+    def _reset_circuit(self) -> None:
+        """Reset circuit breaker to closed state."""
+        if self._circuit_open:
+            logger.info(
+                "AlertService: circuit CLOSED — Telegram recovered after {:.0f}s",
+                time.monotonic() - self._circuit_opened_at,
+            )
+        self._consecutive_failures = 0
+        self._circuit_open = False
+        self._circuit_opened_at = 0.0
 
     # ── Trade Notifications ─────────────────────────────────────────────
 
