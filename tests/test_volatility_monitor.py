@@ -121,6 +121,7 @@ class TestVolatilityMonitor:
         monitor.reset()
         assert len(monitor._quotes["EURUSD"]) == 0
         assert monitor._last_trigger_time is None
+        assert monitor._last_trigger_per_symbol == {}
 
     def test_single_quote_no_trigger(self):
         config = SchedulerConfig(
@@ -133,3 +134,58 @@ class TestVolatilityMonitor:
         monitor.record_quote("EURUSD", 1.0800, now)
         triggered, _, _ = monitor.check_triggers(now)
         assert not triggered  # Need at least 2 quotes
+
+
+    def test_per_symbol_cooldown_independent(self):
+        """Different symbols should have independent cooldowns (after global interval)."""
+        config = SchedulerConfig(
+            volatility_trigger_enabled=True,
+            volatility_threshold_pct=0.3,
+            volatility_window_minutes=30,
+            volatility_cooldown_seconds=1800,  # 30 min per-symbol
+        )
+        monitor = VolatilityMonitor(config, ["EURUSD", "XAUUSD"])
+        now = _utc_now()
+
+        # Trigger EURUSD first
+        monitor.record_quote("EURUSD", 1.0800, now - timedelta(minutes=10))
+        monitor.record_quote("EURUSD", 1.0850, now)  # +0.46%
+        triggered, sym, _ = monitor.check_triggers(now)
+        assert triggered
+        assert sym == "EURUSD"
+
+        # 16 min later — past global 15min but within EURUSD's 30min cooldown
+        t1 = now + timedelta(minutes=16)
+        # EURUSD still has a big move, but per-symbol cooldown blocks it
+        monitor.record_quote("EURUSD", 1.0800, now + timedelta(minutes=10))
+        monitor.record_quote("EURUSD", 1.0860, t1)
+        # XAUUSD also moves — it should trigger since no per-symbol cooldown
+        monitor.record_quote("XAUUSD", 2000.0, now)
+        monitor.record_quote("XAUUSD", 2010.0, t1)  # +0.5%
+        triggered2, sym2, _ = monitor.check_triggers(t1)
+        assert triggered2
+        assert sym2 == "XAUUSD"
+
+    def test_global_min_interval_blocks_all_symbols(self):
+        """Within global 15min interval, no symbol should trigger even if cooldown allows."""
+        config = SchedulerConfig(
+            volatility_trigger_enabled=True,
+            volatility_threshold_pct=0.3,
+            volatility_window_minutes=30,
+            volatility_cooldown_seconds=60,  # Very short per-symbol cooldown
+        )
+        monitor = VolatilityMonitor(config, ["EURUSD", "XAUUSD"])
+        now = _utc_now()
+
+        # Trigger EURUSD
+        monitor.record_quote("EURUSD", 1.0800, now - timedelta(minutes=10))
+        monitor.record_quote("EURUSD", 1.0850, now)
+        triggered, _, _ = monitor.check_triggers(now)
+        assert triggered
+
+        # 5 min later — past per-symbol cooldown (60s) but within global (900s)
+        t1 = now + timedelta(minutes=5)
+        monitor.record_quote("XAUUSD", 2000.0, now)
+        monitor.record_quote("XAUUSD", 2020.0, t1)  # +1.0% big move
+        triggered2, _, _ = monitor.check_triggers(t1)
+        assert not triggered2  # Global interval blocks it

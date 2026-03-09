@@ -1208,9 +1208,9 @@ class Scheduler:
                     e,
                 )
 
-        # v1.2.0: Signal scanner to re-scan immediately (slot freed)
-        self._rescan_event.set()
-        logger.info("Position closed → rescan event set for {}", symbol)
+        # v1.3.8: Removed auto-rescan on position close to reduce excessive rescans.
+        # Volatility monitor already handles re-entry timing based on market conditions.
+        logger.debug("Position closed for {} — skipping auto-rescan (v1.3.8)", symbol)
 
     async def _close_winning_positions(self, open_positions: list[Any]) -> None:
         """Close all winning (profitable) positions to protect Best Day Rule.
