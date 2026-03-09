@@ -114,6 +114,7 @@ class Scheduler:
         self._daily_summary_sent_date: str = ""  # Track last daily summary date
         self._best_day_close_positions: dict[str, float] = {}  # pos_id -> unrealized PnL
         self._best_day_tracker_date: str = self._today_str()  # UTC date for daily reset
+        self._best_day_paused_today: str | None = None  # Date when Best Day pause was activated
         self._optimization_engine = optimization_engine
         self._optimization_state: OptimizationState | None = None
         self._memory_journal = memory_journal
@@ -217,11 +218,17 @@ class Scheduler:
                 # Weekend check — pause during market closure
                 await self._wait_for_market_open("Scanner loop")
                 today = self._today_str()
+                # Best Day daily stop: once activated for today, skip scanning entirely
+                if self._best_day_paused_today == today:
+                    await asyncio.sleep(self._session_cadence.get_scanner_interval(self._now_utc()))
+                    continue
                 if self._should_pause_new_entries():
                     logger.warning(
-                        "Scanner loop: Best Day protection active ({}), pausing new intents",
+                        "Scanner loop: Best Day protection active ({}), "
+                        "pausing new intents FOR THE REST OF THE DAY",
                         self._best_day_tracker.summary(),
                     )
+                    self._best_day_paused_today = today
                     await asyncio.sleep(self._session_cadence.get_scanner_interval(self._now_utc()))
                     continue
                 logger.info("Scanner loop: starting scan for {}", today)
@@ -1201,9 +1208,9 @@ class Scheduler:
                     e,
                 )
 
-        # v1.2.0: Signal scanner to re-scan immediately (slot freed)
-        self._rescan_event.set()
-        logger.info("Position closed → rescan event set for {}", symbol)
+        # v1.3.8: Removed auto-rescan on position close to reduce excessive rescans.
+        # Volatility monitor already handles re-entry timing based on market conditions.
+        logger.debug("Position closed for {} — skipping auto-rescan (v1.3.8)", symbol)
 
     async def _close_winning_positions(self, open_positions: list[Any]) -> None:
         """Close all winning (profitable) positions to protect Best Day Rule.
@@ -1801,3 +1808,4 @@ class Scheduler:
         )
         self._best_day_tracker.reset()
         self._best_day_tracker_date = today
+        self._best_day_paused_today = None

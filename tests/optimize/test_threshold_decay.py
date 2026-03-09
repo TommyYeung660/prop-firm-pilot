@@ -59,7 +59,7 @@ def test_no_decay_when_inactive_days_none() -> None:
         symbol_win_rates={"EURUSD": 0.30},
         inactive_days=None,
     )
-    assert result["EURUSD"].min_blended_confidence == 0.70
+    assert result["EURUSD"].min_blended_confidence == 0.65
 
 
 def test_no_decay_when_zero_inactive_days() -> None:
@@ -68,7 +68,7 @@ def test_no_decay_when_zero_inactive_days() -> None:
         symbol_win_rates={"EURUSD": 0.30},
         inactive_days={"EURUSD": 0},
     )
-    assert result["EURUSD"].min_blended_confidence == 0.70
+    assert result["EURUSD"].min_blended_confidence == 0.65
 
 
 def test_decay_after_1_day_inactive() -> None:
@@ -77,7 +77,7 @@ def test_decay_after_1_day_inactive() -> None:
         symbol_win_rates={"EURUSD": 0.30},
         inactive_days={"EURUSD": 1},
     )
-    assert result["EURUSD"].min_blended_confidence == 0.68
+    assert result["EURUSD"].min_blended_confidence == 0.63
 
 
 def test_decay_after_2_days_inactive() -> None:
@@ -86,7 +86,7 @@ def test_decay_after_2_days_inactive() -> None:
         symbol_win_rates={"EURUSD": 0.30},
         inactive_days={"EURUSD": 2},
     )
-    assert result["EURUSD"].min_blended_confidence == 0.67
+    assert result["EURUSD"].min_blended_confidence == 0.62
 
 
 def test_full_decay_after_3_days_inactive() -> None:
@@ -95,7 +95,7 @@ def test_full_decay_after_3_days_inactive() -> None:
         symbol_win_rates={"EURUSD": 0.30},
         inactive_days={"EURUSD": 3},
     )
-    assert result["EURUSD"].min_blended_confidence == 0.65
+    assert result["EURUSD"].min_blended_confidence == 0.60
 
 
 def test_positive_adjustment_not_decayed() -> None:
@@ -104,7 +104,7 @@ def test_positive_adjustment_not_decayed() -> None:
         symbol_win_rates={"EURUSD": 0.50},
         inactive_days={"EURUSD": 3},
     )
-    assert result["EURUSD"].min_blended_confidence == 0.60
+    assert result["EURUSD"].min_blended_confidence == 0.55
 
 
 def test_no_adjustment_not_decayed() -> None:
@@ -113,7 +113,7 @@ def test_no_adjustment_not_decayed() -> None:
         symbol_win_rates={"EURUSD": 0.43},
         inactive_days={"EURUSD": 3},
     )
-    assert result["EURUSD"].min_blended_confidence == 0.65
+    assert result["EURUSD"].min_blended_confidence == 0.60
 
 
 def test_mixed_symbols_with_different_inactivity() -> None:
@@ -126,9 +126,9 @@ def test_mixed_symbols_with_different_inactivity() -> None:
         },
         inactive_days={"EURUSD": 1, "GBPUSD": 3, "USDJPY": 2},
     )
-    assert result["EURUSD"].min_blended_confidence == 0.68
-    assert result["GBPUSD"].min_blended_confidence == 0.65
-    assert result["USDJPY"].min_blended_confidence == 0.60
+    assert result["EURUSD"].min_blended_confidence == 0.63
+    assert result["GBPUSD"].min_blended_confidence == 0.60
+    assert result["USDJPY"].min_blended_confidence == 0.55
 
 
 # ── Tests: compute_inactive_days ───────────────────────────────────────────

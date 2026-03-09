@@ -23,8 +23,12 @@ class ThresholdsError(Exception):
 
 
 def _stepwise_threshold(win_rate: float) -> Thresholds:
+    # v1.3.8: Cold-start tier — relax thresholds for symbols with < 20% win rate
+    # (insufficient data to judge). Prevents over-filtering new/low-trade symbols.
+    if win_rate < 0.20:
+        return Thresholds(min_confidence="medium", min_blended_confidence=0.50)
     if win_rate < 0.45:
-        return Thresholds(min_confidence="high", min_blended_confidence=0.65)
+        return Thresholds(min_confidence="high", min_blended_confidence=0.60)
     if win_rate > 0.55:
         return Thresholds(min_confidence="low", min_blended_confidence=0.45)
     return Thresholds(min_confidence="medium", min_blended_confidence=0.55)

@@ -253,11 +253,12 @@ class TacticalValidator:
                     )
                 )
         else:
+            # v1.3.8: Pass-through when no 1H data — don't block trades due to missing data
             results.append(
                 GateResult(
                     gate_name="atr_regime",
-                    passed=False,
-                    detail="No 1H bar data available",
+                    passed=True,
+                    detail="ATR gate skipped — no 1H bar data available (pass-through)",
                 )
             )
 
@@ -282,10 +283,11 @@ class TacticalValidator:
     ) -> GateResult:
         """Check if short-term momentum aligns with strategic direction."""
         if bars_5min.empty or len(bars_5min) < self._config.soft_gates.ema_slow + 5:
+            # v1.3.8: Pass-through when insufficient data — don't penalize for missing bars
             return GateResult(
                 gate_name="ema_momentum",
-                passed=False,
-                detail="Insufficient 5min data for EMA",
+                passed=True,
+                detail="EMA gate skipped — insufficient 5min data (pass-through)",
             )
 
         closes = cast(pd.Series, bars_5min["close"])
@@ -317,10 +319,11 @@ class TacticalValidator:
     ) -> GateResult:
         """Check if RSI is not in extreme zone opposing the trade direction."""
         if bars_5min.empty or len(bars_5min) < self._config.soft_gates.rsi_period + 5:
+            # v1.3.8: Pass-through when insufficient data — don't penalize for missing bars
             return GateResult(
                 gate_name="rsi_state",
-                passed=False,
-                detail="Insufficient 5min data for RSI",
+                passed=True,
+                detail="RSI gate skipped — insufficient 5min data (pass-through)",
             )
 
         closes = cast(pd.Series, bars_5min["close"])

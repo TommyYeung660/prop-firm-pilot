@@ -39,8 +39,8 @@ def test_scheduler_has_rescan_event():
     assert isinstance(scheduler._rescan_event, asyncio.Event)
 
 
-async def test_handle_position_closed_sets_rescan_event():
-    """When a position closes, _rescan_event should be set."""
+async def test_handle_position_closed_does_not_set_rescan_event():
+    """v1.3.8: Position close no longer triggers auto-rescan (removed excessive rescanning)."""
     scheduler = _make_scheduler()
     # Ensure event is clear initially
     assert not scheduler._rescan_event.is_set()
@@ -59,7 +59,7 @@ async def test_handle_position_closed_sets_rescan_event():
     with patch.object(scheduler, "_send_alert", new_callable=AsyncMock):
         await scheduler._handle_position_closed(intent)
 
-    assert scheduler._rescan_event.is_set()
+    assert not scheduler._rescan_event.is_set()  # v1.3.8: auto-rescan removed
 
 
 async def test_rescan_event_clears_after_scanner_loop_reads():

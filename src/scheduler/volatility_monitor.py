@@ -34,6 +34,8 @@ class VolatilityMonitor:
         # Per-symbol quote history: deque of (timestamp, mid_price)
         self._quotes: dict[str, deque[tuple[datetime, float]]] = {sym: deque() for sym in symbols}
         self._last_trigger_time: datetime | None = None
+        self._last_trigger_per_symbol: dict[str, datetime] = {}
+        self._global_min_interval_seconds: int = 900  # 15 min between ANY trigger
 
     def record_quote(self, symbol: str, mid_price: float, now: datetime) -> None:
         """Record a price quote for a symbol.
@@ -60,15 +62,21 @@ class VolatilityMonitor:
             return False, "", 0.0
 
         # Cooldown check
+        # Global minimum interval check (prevents ANY trigger within 15 min)
         if self._last_trigger_time is not None:
-            elapsed = (now - self._last_trigger_time).total_seconds()
-            if elapsed < self._config.volatility_cooldown_seconds:
+            global_elapsed = (now - self._last_trigger_time).total_seconds()
+            if global_elapsed < self._global_min_interval_seconds:
                 return False, "", 0.0
 
         best_pct = 0.0
         best_symbol = ""
 
         for symbol in self._symbols:
+            # Per-symbol cooldown check
+            if symbol in self._last_trigger_per_symbol:
+                sym_elapsed = (now - self._last_trigger_per_symbol[symbol]).total_seconds()
+                if sym_elapsed < self._config.volatility_cooldown_seconds:
+                    continue
             pct = self._calculate_price_change_pct(symbol, now)
             if abs(pct) > abs(best_pct):
                 best_pct = pct
@@ -76,6 +84,7 @@ class VolatilityMonitor:
 
         if abs(best_pct) >= self._config.volatility_threshold_pct:
             self._last_trigger_time = now
+            self._last_trigger_per_symbol[best_symbol] = now
             logger.info(
                 "Volatility trigger: {} moved {:.2f}% in {}min window",
                 best_symbol,
@@ -117,3 +126,4 @@ class VolatilityMonitor:
         for sym in self._quotes:
             self._quotes[sym].clear()
         self._last_trigger_time = None
+        self._last_trigger_per_symbol.clear()
