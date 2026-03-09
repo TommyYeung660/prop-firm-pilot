@@ -111,3 +111,11 @@ class TestTacticalConfig:
 
         tc = TacticalConfig()
         assert tc.intent_dedup.cooldown_after_close_seconds == 1800
+
+
+def test_breakeven_activation_pct_from_config():
+    """v1.3.9: breakeven_activation_pct should be 0.3 in e8_one_5k_challenge."""
+    from src.config import load_config
+
+    config = load_config("config/e8_one_5k_challenge.yaml")
+    assert config.scheduler.breakeven_activation_pct == 0.3
