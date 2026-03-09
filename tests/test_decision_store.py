@@ -291,28 +291,28 @@ class TestStateTransitions:
         with pytest.raises(InvalidTransitionError):
             store.mark_executing(intent.id)
 
-    def test_cancel_from_ready_raises(self, store: DecisionStore) -> None:
-        """Cannot cancel from ready_for_exec state."""
+    def test_cancel_from_ready_succeeds(self, store: DecisionStore) -> None:
+        """v1.3.9: Cancel from ready_for_exec is now allowed (stale intent race fix)."""
         claimed = self._create_and_claim(store)
         store.update_intent_decision(claimed.id, "BUY", 40.0, 80.0, "report", "{}")
         store.mark_ready_for_exec(claimed.id)
 
-        with pytest.raises(InvalidTransitionError):
-            store.mark_cancelled(claimed.id, "Too late to cancel")
+        store.mark_cancelled(claimed.id, "superseded_by_hold")
+        updated = store.get_intent(claimed.id)
+        assert updated.status == "cancelled"
 
-    def test_invalid_cancel_does_not_poison_next_claim(self, store: DecisionStore) -> None:
-        """Invalid cancel should not leave an open transaction behind."""
+    def test_cancel_from_ready_does_not_poison_next_claim(self, store: DecisionStore) -> None:
+        """v1.3.9: Cancel from ready_for_exec should complete cleanly."""
         claimed = self._create_and_claim(store)
         pending = TradeIntent(trade_date="2026-02-16", symbol="GBPUSD")
         store.insert_intent(pending)
         store.update_intent_decision(claimed.id, "BUY", 40.0, 80.0, "report", "{}")
         store.mark_ready_for_exec(claimed.id)
 
-        with pytest.raises(InvalidTransitionError):
-            store.mark_cancelled(claimed.id, "Too late to cancel")
+        # Cancel should succeed now (v1.3.9: ready_for_exec is a valid cancel source)
+        store.mark_cancelled(claimed.id, "superseded_by_hold")
 
-        # If rollback is missing, this call raises:
-        # OperationalError("cannot start a transaction within a transaction")
+        # Next claim should still work fine
         claimed_next = store.claim_next_pending("llm-0")
         assert claimed_next is not None
         assert claimed_next.id == pending.id

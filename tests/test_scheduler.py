@@ -2817,3 +2817,135 @@ async def test_intraday_rescan_runs_for_non_daily_model(
 
     # Scanner SHOULD have been called for non-daily model
     mock_scanner.run_pipeline.assert_called_once()
+
+
+# ── Task 4: HOLD→BUY Stale Intent Race Fix (#9, P2) ────────────────────────
+
+
+async def test_hold_cancels_stale_ready_intents_for_same_symbol(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """When LLM decides HOLD, cancel all ready_for_exec intents for the same symbol."""
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    # Create stale intent A — pending → claimed → ready_for_exec (BUY)
+    intent_a = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent_a)
+    claimed_a = store.claim_next_pending("llm-0")
+    assert claimed_a is not None
+    store.update_intent_decision(
+        claimed_a.id, "BUY", sl_pips=30.0, tp_pips=50.0, risk_report="test", state_json="{}"
+    )
+    store.mark_ready_for_exec(claimed_a.id)
+
+    # Verify intent A is ready_for_exec
+    assert store.get_intent(intent_a.id).status == "ready_for_exec"
+
+    # Create newer intent B for same symbol — pending → claimed
+    intent_b = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.80,
+        scanner_confidence="medium",
+    )
+    store.insert_intent(intent_b)
+    claimed_b = store.claim_next_pending("llm-1")
+    assert claimed_b is not None
+
+    # Simulate LLM returning HOLD for intent B
+    mock_agents.decide.return_value = AgentDecision(
+        symbol="EURUSD",
+        decision="HOLD",
+        final_state={},
+        risk_report="no action",
+    )
+
+    await sched._process_claimed_intent("llm-1", claimed_b)
+
+    # Verify: stale intent A should also be cancelled (superseded by HOLD)
+    stale = store.get_intent(intent_a.id)
+    assert stale.status == "cancelled", (
+        f"Stale BUY intent should be cancelled after HOLD, got: {stale.status}"
+    )
+
+    # Verify: intent B is also cancelled (direct HOLD handling)
+    newer = store.get_intent(intent_b.id)
+    assert newer.status == "cancelled"
+
+
+async def test_hold_does_not_cancel_intents_for_different_symbol(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """When LLM decides HOLD for EURUSD, don't cancel GBPUSD ready intents."""
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    # Create intent for GBPUSD — ready_for_exec
+    intent_gbp = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="GBPUSD",
+        scanner_score=0.90,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent_gbp)
+    claimed_gbp = store.claim_next_pending("llm-0")
+    assert claimed_gbp is not None
+    store.update_intent_decision(
+        claimed_gbp.id, "BUY", sl_pips=30.0, tp_pips=50.0, risk_report="test", state_json="{}"
+    )
+    store.mark_ready_for_exec(claimed_gbp.id)
+
+    # Create intent for EURUSD — claimed (will get HOLD)
+    intent_eur = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.75,
+        scanner_confidence="medium",
+    )
+    store.insert_intent(intent_eur)
+    claimed_eur = store.claim_next_pending("llm-1")
+    assert claimed_eur is not None
+
+    # LLM returns HOLD for EURUSD
+    mock_agents.decide.return_value = AgentDecision(
+        symbol="EURUSD",
+        decision="HOLD",
+        final_state={},
+        risk_report="no action",
+    )
+
+    await sched._process_claimed_intent("llm-1", claimed_eur)
+
+    # GBPUSD intent should still be ready_for_exec
+    gbp = store.get_intent(intent_gbp.id)
+    assert gbp.status == "ready_for_exec", (
+        f"GBPUSD intent should NOT be cancelled by EURUSD HOLD, got: {gbp.status}"
+    )

@@ -564,7 +564,7 @@ class DecisionStore:
         logger.warning("Intent {} failed: {}", intent_id, error)
 
     def mark_cancelled(self, intent_id: str, reason: str) -> None:
-        """Cancel an intent from pending or claimed state."""
+        """Cancel an intent from pending, claimed, or ready_for_exec state."""
         now = datetime.now(timezone.utc)
         with self._write_lock:
             updated = self._conn.execute(
@@ -572,7 +572,9 @@ class DecisionStore:
                    SET status = 'cancelled',
                        execution_error = :reason,
                        executed_at = :executed_at
-                   WHERE id = :id AND status IN ('pending', 'claimed', 'tactical_pending')""",
+                   WHERE id = :id AND status IN
+                       ('pending', 'claimed',
+                        'tactical_pending', 'ready_for_exec')""",
                 {
                     "reason": reason,
                     "executed_at": _dt_to_str(now),
@@ -583,7 +585,7 @@ class DecisionStore:
                 self._conn.rollback()
                 raise InvalidTransitionError(
                     f"Cannot cancel {intent_id}: not in 'pending',"
-                    f" 'claimed', or 'tactical_pending' state"
+                    f" 'claimed', 'tactical_pending', or 'ready_for_exec' state"
                 )
             self._conn.execute(
                 """UPDATE decisions

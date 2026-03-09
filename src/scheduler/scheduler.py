@@ -705,6 +705,23 @@ class Scheduler:
                     intent.id,
                 )
 
+            # v1.3.9: Cancel any stale ready_for_exec intents for the same symbol
+            # This prevents the race where an older BUY intent executes after a newer HOLD
+            stale_intents = await asyncio.to_thread(self._store.get_ready_intents)
+            for stale in stale_intents:
+                if stale.symbol == intent.symbol and stale.id != intent.id:
+                    await self._cancel_intent_safe(
+                        worker_id=worker_id,
+                        intent_id=stale.id,
+                        reason="superseded_by_hold",
+                        context=f"Newer HOLD decision for {intent.symbol} cancels stale intent",
+                    )
+                    logger.info(
+                        "Cancelled stale ready_for_exec intent {} for {} (superseded by HOLD)",
+                        stale.id,
+                        intent.symbol,
+                    )
+
     async def _run_tactical_validation(self, intent: TradeIntent, side: str) -> TacticalResult:
         """Fetch tactical data and run Hard/Soft gate validation.
 
