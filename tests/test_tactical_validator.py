@@ -329,12 +329,14 @@ class TestPassThroughWhenNoData:
         config = TacticalConfig()
         validator = TacticalValidator(config)
         # Only 5 bars — way less than ema_slow (21) + 5 = 26 needed
-        bars = pd.DataFrame({
-            "open": [1.1] * 5,
-            "high": [1.11] * 5,
-            "low": [1.09] * 5,
-            "close": [1.1] * 5,
-        })
+        bars = pd.DataFrame(
+            {
+                "open": [1.1] * 5,
+                "high": [1.11] * 5,
+                "low": [1.09] * 5,
+                "close": [1.1] * 5,
+            }
+        )
         result = validator._check_ema_momentum_gate("BUY", bars)
         assert result.passed is True
         assert "pass-through" in result.detail.lower()
@@ -343,12 +345,29 @@ class TestPassThroughWhenNoData:
         """RSI gate should pass when data has fewer bars than needed."""
         config = TacticalConfig()
         validator = TacticalValidator(config)
-        bars = pd.DataFrame({
-            "open": [1.1] * 5,
-            "high": [1.11] * 5,
-            "low": [1.09] * 5,
-            "close": [1.1] * 5,
-        })
+        bars = pd.DataFrame(
+            {
+                "open": [1.1] * 5,
+                "high": [1.11] * 5,
+                "low": [1.09] * 5,
+                "close": [1.1] * 5,
+            }
+        )
         result = validator._check_rsi_state_gate("SELL", bars)
         assert result.passed is True
         assert "pass-through" in result.detail.lower()
+
+    def test_spread_gate_passthrough_when_no_data(self) -> None:
+        """Spread gate should pass-through when typical_spread is 0 (no data)."""
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+
+        data = TacticalData(current_spread=0.0, typical_spread=0.0)
+        results = validator.check_hard_gates(data)
+
+        spread_result = next(r for r in results if r.gate_name == "spread")
+        assert spread_result.passed is True
+        assert (
+            "pass-through" in spread_result.detail.lower()
+            or "skipped" in spread_result.detail.lower()
+        )

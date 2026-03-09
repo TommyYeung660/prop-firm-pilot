@@ -228,7 +228,17 @@ class TacticalValidator:
         results: list[GateResult] = []
 
         # 1. Spread gate
-        results.append(self._check_spread_gate(data.current_spread, data.typical_spread))
+        if data.typical_spread > 0 and data.current_spread > 0:
+            results.append(self._check_spread_gate(data.current_spread, data.typical_spread))
+        else:
+            # v1.3.9: Pass-through when no spread data — don't block trades
+            results.append(
+                GateResult(
+                    gate_name="spread",
+                    passed=True,
+                    detail="Spread gate skipped — no spread data available (pass-through)",
+                )
+            )
 
         # 2. ATR regime gate
         if not data.bars_1h.empty:
