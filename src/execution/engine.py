@@ -371,6 +371,15 @@ class ExecutionEngine:
                             abs(meta_fill_price - relevant_price) / meta_instrument.pip_size
                         )
 
+                # v1.3.9: Extract AB model_id from agent state
+                _ab_model_id = ""
+                if intent.agent_state_json:
+                    try:
+                        _state = json.loads(intent.agent_state_json)
+                        _ab_model_id = _state.get("_model_id", "")
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
+
                 execution_meta = self._build_execution_meta(
                     fill_price=meta_fill_price,
                     volume=trade_plan.volume,
@@ -386,6 +395,7 @@ class ExecutionEngine:
                     random_delay_seconds=delay,
                     compliance_passed=True,
                     order_raw_response=order.raw_response,
+                    model_id=_ab_model_id,
                 )
                 await asyncio.to_thread(
                     self._store.update_execution_meta, intent_id, execution_meta
@@ -562,6 +572,7 @@ class ExecutionEngine:
         random_delay_seconds: float,
         compliance_passed: bool,
         order_raw_response: dict[str, Any],
+        model_id: str = "",
     ) -> str:
         """Build execution metadata JSON string for persistence."""
         data: dict[str, Any] = {
@@ -580,6 +591,8 @@ class ExecutionEngine:
             "compliance_passed": compliance_passed,
             "order_raw_response": order_raw_response,
         }
+        if model_id:
+            data["model_id"] = model_id
         return json.dumps(data, default=str)
 
     # ── SL/TP Price Helpers ───────────────────────────────────────────────

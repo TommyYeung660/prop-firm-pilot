@@ -16,6 +16,9 @@ from typing import Any, Literal, cast
 from dotenv import dotenv_values
 from loguru import logger
 
+from src.optimize.ab_testing import choose_model
+from src.optimize.optimization_state import ABTestState
+
 LLM_ENV_PREFIXES = ("RIGHTCODE_", "VOLCENGINE_", "AIHUBMIX_", "LLM_")
 
 
@@ -28,11 +31,13 @@ class AgentDecision:
         decision: Literal["BUY", "SELL", "HOLD"],
         final_state: dict[str, Any],
         risk_report: str = "",
+        model_id: str = "",
     ) -> None:
         self.symbol = symbol
         self.decision = decision
         self.final_state = final_state
         self.risk_report = risk_report
+        self.model_id = model_id
 
     @property
     def is_actionable(self) -> bool:
@@ -181,6 +186,11 @@ class AgentBridge:
         self._config = config or {}
         self._graph: Any = None  # Lazy-loaded TradingAgentsGraph
         self._using_mock: bool = False
+        self._ab_state: ABTestState | None = None
+
+    def set_ab_state(self, state: ABTestState | None) -> None:
+        """Set AB test state for model routing."""
+        self._ab_state = state
 
     @property
     def using_mock(self) -> bool:
@@ -264,6 +274,7 @@ class AgentBridge:
         symbol: str,
         trade_date: str,
         qlib_data: dict[str, Any] | None = None,
+        intent_id: str = "",
     ) -> AgentDecision:
         """Run multi-agent decision for a single symbol.
 
@@ -321,11 +332,20 @@ class AgentBridge:
                 risk_report=risk_report,
                 symbol=symbol,
             )
+            model_id = ""
+            if self._ab_state is not None and intent_id:
+                model_id = choose_model(
+                    intent_id=intent_id,
+                    ratio=self._ab_state.ratio,
+                    model_a=self._ab_state.model_a,
+                    model_b=self._ab_state.model_b,
+                )
             result = AgentDecision(
                 symbol=symbol,
                 decision=validated_decision,
                 final_state=final_state if isinstance(final_state, dict) else {},
                 risk_report=risk_report,
+                model_id=model_id,
             )
 
             logger.info(
@@ -354,6 +374,7 @@ class AgentBridge:
         symbol: str,
         trade_date: str,
         qlib_data: dict[str, Any] | None = None,
+        intent_id: str = "",
     ) -> AgentDecision:
         """Async wrapper around decide() — runs synchronous LLM call in a thread.
 
@@ -363,11 +384,12 @@ class AgentBridge:
             symbol: FX pair (e.g. "EURUSD").
             trade_date: Date string (e.g. "2026-02-12").
             qlib_data: Scanner signal data dict for injection.
+            intent_id: Stable identifier for AB test routing.
 
         Returns:
             AgentDecision with BUY/SELL/HOLD and full state.
         """
-        return await asyncio.to_thread(self.decide, symbol, trade_date, qlib_data)
+        return await asyncio.to_thread(self.decide, symbol, trade_date, qlib_data, intent_id)
 
     def decide_batch(
         self,

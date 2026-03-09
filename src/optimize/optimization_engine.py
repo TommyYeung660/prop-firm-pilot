@@ -15,7 +15,12 @@ from loguru import logger
 
 from src.decision_store.sqlite_store import DecisionStore
 from src.monitor.trade_journal import TradeJournal
-from src.optimize.optimization_state import ABTestState, OptimizationState, save_state
+from src.optimize.optimization_state import (
+    ABTestState,
+    OptimizationState,
+    load_state,
+    save_state,
+)
 from src.optimize.thresholds import compute_thresholds
 from src.optimize.trade_stats import build_pnl_feedback, compute_inactive_days, compute_win_rates
 
@@ -83,12 +88,16 @@ class OptimizationEngine:
             feedback_pnl=build_pnl_feedback(self._store, self._journal, days=self._pnl_days),
         )
 
+        # v1.3.9: Preserve existing AB counts from persisted state
+        existing = load_state(self._state_path)
+        existing_ab = existing.ab_test if existing else ABTestState()
+
         state.ab_test = ABTestState(
             model_a=self._ab_model_a,
             model_b=self._ab_model_b,
             ratio=self._ab_ratio,
-            counts=state.ab_test.counts,
-            pnl_by_model=state.ab_test.pnl_by_model,
+            counts=existing_ab.counts,
+            pnl_by_model=existing_ab.pnl_by_model,
         )
 
         save_state(self._state_path, state)

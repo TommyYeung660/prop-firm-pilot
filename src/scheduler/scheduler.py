@@ -514,6 +514,7 @@ class Scheduler:
             symbol=intent.symbol,
             trade_date=intent.trade_date,
             qlib_data=qlib_data,
+            intent_id=intent.id,
         )
         self._log_trade_event(
             "LLM_DECISION",
@@ -612,6 +613,9 @@ class Scheduler:
                     )
                 return
             try:
+                # v1.3.9: Store AB model_id in final_state for engine.py
+                if decision.model_id:
+                    decision.final_state["_model_id"] = decision.model_id
                 await asyncio.to_thread(
                     self._store.update_intent_decision,
                     intent.id,
@@ -1065,11 +1069,8 @@ class Scheduler:
         # (persisted at trade open time by engine.py)
         if volume == 0.0 or close_price == 0.0:
             try:
-                decision = await asyncio.to_thread(
-                    self._store.get_decision, intent.id
-                )
+                decision = await asyncio.to_thread(self._store.get_decision, intent.id)
                 if decision and decision.execution_meta:
-
                     meta = json.loads(decision.execution_meta)
                     if volume == 0.0 and meta.get("volume"):
                         volume = meta["volume"]
@@ -1088,8 +1089,7 @@ class Scheduler:
                             close_price = meta["tp_price"]
                         if close_price != 0.0:
                             logger.info(
-                                "Position monitor: using execution_meta"
-                                " {} price={} for {}",
+                                "Position monitor: using execution_meta {} price={} for {}",
                                 exit_reason,
                                 close_price,
                                 position_id,
@@ -1147,11 +1147,8 @@ class Scheduler:
         if close_price != 0.0 and exit_reason in ("tp_hit", "sl_hit", "manual_close"):
             try:
                 if decision is None:
-                    decision = await asyncio.to_thread(
-                        self._store.get_decision, intent.id
-                    )
+                    decision = await asyncio.to_thread(self._store.get_decision, intent.id)
                 if decision and decision.execution_meta:
-
                     meta = json.loads(decision.execution_meta)
                     sl_price = meta.get("sl_price", 0.0)
                     tp_price = meta.get("tp_price", 0.0)
@@ -1227,6 +1224,24 @@ class Scheduler:
 
         # Update BestDayTracker with realized PnL
         self._best_day_tracker.record_trade_pnl(pnl)
+
+        # v1.3.9: Update AB test stats
+        if self._optimization_state is not None and pnl != 0.0:
+            try:
+                ab_decision = decision
+                if ab_decision is None:
+                    ab_decision = await asyncio.to_thread(self._store.get_decision, intent.id)
+                if ab_decision and ab_decision.execution_meta:
+                    ab_meta = json.loads(ab_decision.execution_meta)
+                    ab_model_id = ab_meta.get("model_id", "")
+                    if ab_model_id and self._optimization_state.ab_test:
+                        from src.optimize.ab_testing import update_ab_stats
+
+                        update_ab_stats(self._optimization_state.ab_test, ab_model_id, pnl)
+                        logger.info("AB test: recorded pnl={:.2f} for model={}", pnl, ab_model_id)
+            except Exception as e:
+                logger.debug("AB test stats update failed: {}", e)
+
         # Convert broker symbol to config symbol for display
         display_symbol = symbol
         if self._registry is not None:
@@ -1517,6 +1532,7 @@ class Scheduler:
                     symbol=intent.symbol,
                     trade_date=intent.trade_date,
                     qlib_data=qlib_data,
+                    intent_id=intent.id,
                 )
 
                 # Determine if the signal is a reversal of the current position
@@ -1698,6 +1714,9 @@ class Scheduler:
                 self._optimization_state = await asyncio.to_thread(
                     self._optimization_engine.refresh_state
                 )
+                # v1.3.9: Propagate AB test state to AgentBridge
+                if self._optimization_state:
+                    self._agents.set_ab_state(self._optimization_state.ab_test)
             except Exception as e:
                 logger.warning("Optimization refresh failed: {}", e)
 
@@ -1872,6 +1891,7 @@ class Scheduler:
         if instrument:
             return instrument.pip_size
         return 0.0001  # Default for major FX pairs
+
     @staticmethod
     def _confidence_score(confidence: str) -> float:
         """Map confidence label to numeric score."""
