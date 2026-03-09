@@ -22,17 +22,17 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ### Added
 - `tests/test_ab_routing.py` to cover AB routing behavior
-- `EodhdProvider` class in `src/data/fx_data_fetcher.py` — async intraday bar data provider supporting 5min/1h/15min/30min intervals via EODHD API
-- EODHD intraday wiring in `src/scheduler/scheduler.py` — `_fetch_tactical_data()` now fetches real 5min + 1h bars via `asyncio.gather()`, making ATR regime, EMA momentum, RSI state, candle quality, and data freshness tactical gates functional
-- `_apply_ab_model()` method in `src/decision/agent_bridge.py` — rebuilds TradingAgentsGraph with selected model, enabling real AB test model switching (not just metadata logging)
-- `tests/test_ab_model_switching.py` (NEW) — 10 tests covering `_apply_ab_model` behavior and `decide()` AB integration
+- `EodhdProvider` class in `src/data/fx_data_fetcher.py`, async intraday bar data provider supporting 5min/1h/15min/30min intervals via EODHD API
+- EODHD intraday wiring in `src/scheduler/scheduler.py`, `_fetch_tactical_data()` now fetches real 5min + 1h bars via `asyncio.gather()`, making ATR regime, EMA momentum, RSI state, candle quality, and data freshness tactical gates functional
+- `_apply_ab_model()` method in `src/decision/agent_bridge.py`, rebuilds TradingAgentsGraph with selected model, enabling real AB test model switching (not just metadata logging)
+- `tests/test_ab_model_switching.py` (NEW), 10 tests covering `_apply_ab_model` behavior and `decide()` AB integration
 - 8 new EODHD provider tests in `tests/test_fx_data_fetcher.py`
 
 ### Changed
 - DuckDB transaction handling now guards against nested `BEGIN TRANSACTION` calls
 - Breakeven threshold lowered from 0.5 to 0.3 in config
 - AB test model defaults updated: `ab_model_a: "rightcodes/gpt-5.4"`, `ab_model_b: "volcengine/kimi-k2.5"` in `src/config.py`, `src/optimize/optimization_engine.py`, `src/optimize/optimization_state.py`, `config/e8_one_5k_challenge.yaml`
-- `choose_model()` now called BEFORE `propagate()` in `agent_bridge.decide()` — AB test actually switches the LLM model used for decisions
+- `choose_model()` now called BEFORE `propagate()` in `agent_bridge.decide()`, AB test actually switches the LLM model used for decisions
 - LLM models upgraded in TradingAgents: `gpt-5.2` → `gpt-5.4`, `glm-4.7` → `kimi-k2.5` (5 files: `.env`, `.env.example`, `default_config.py`, 2 test files)
 
 ### Tested

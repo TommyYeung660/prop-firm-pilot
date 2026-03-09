@@ -932,6 +932,20 @@ scheduler:
 | `tests/test_scheduler_multi_timeframe.py` | 修改 | #10 | Daily model intraday skip 測試 |
 | `tests/test_tactical_validator.py` | 修改 | #2 | Spread gate pass-through 測試 |
 
+### v1.3.9 追加改動（Batch 1-3，9 files, +749/-24 lines）
+
+| 檔案 | 動作 | 修復項 | 說明 |
+|---|---|---|---|
+| `src/data/fx_data_fetcher.py` | 修改 | #2 | 新增 `EodhdProvider`，取得 5min/1h/15min/30min intraday bars |
+| `src/scheduler/scheduler.py` | 修改 | #2 | `_fetch_tactical_data()` 透過 `asyncio.gather()` 同時抓 spread + 5min/1h bars |
+| `src/decision/agent_bridge.py` | 修改 | #11 | 新增 `_apply_ab_model()`，rebuild TradingAgentsGraph 以套用選定 model |
+| `tests/test_ab_model_switching.py` | **新增** | #11 | `_apply_ab_model` 與 decide() AB integration 測試（10 tests） |
+| `tests/test_fx_data_fetcher.py` | 修改 | #2 | 新增 8 個 EODHD provider 測試 |
+| `src/config.py` | 修改 | #11 | 更新 AB test 預設模型（gpt-5.4 vs kimi-k2.5） |
+| `src/optimize/optimization_engine.py` | 修改 | #11 | 更新 AB test 預設模型（gpt-5.4 vs kimi-k2.5） |
+| `src/optimize/optimization_state.py` | 修改 | #11 | 更新 AB test 預設模型（gpt-5.4 vs kimi-k2.5） |
+| `config/e8_one_5k_challenge.yaml` | 修改 | #11 | 更新 AB model config（gpt-5.4 vs kimi-k2.5） |
+
 ### TradingAgents（4 files, LLM upgrade）
 
 | 檔案 | 動作 | 修復項 | 說明 |
@@ -1041,20 +1055,20 @@ scheduler:
 ### 修改檔案
 
 **TradingAgents 倉庫**：
-- `tradingagents/default_config.py` — default model strings
-- `.env` / `.env.example` — API endpoint and key references
-- `tests/test_recursion_limit.py` — test model references
-- `tests/test_telegram_model_switch.py` — test model references
+- `tradingagents/default_config.py`，default model strings
+- `.env` / `.env.example`，API endpoint and key references
+- `tests/test_recursion_limit.py`，test model references
+- `tests/test_telegram_model_switch.py`，test model references
 
 **prop-firm-pilot 倉庫**：
-- `src/config.py` — AB test defaults
-- `src/optimize/optimization_engine.py` — AB test defaults
-- `src/optimize/optimization_state.py` — AB test defaults
-- `config/e8_one_5k_challenge.yaml` — AB model config
+- `src/config.py`，AB test defaults
+- `src/optimize/optimization_engine.py`，AB test defaults
+- `src/optimize/optimization_state.py`，AB test defaults
+- `config/e8_one_5k_challenge.yaml`，AB model config
 
 ### Commits
 - prop-firm-pilot: `0d104c9` (included in EODHD + AB test commit)
-- TradingAgents: `2d7e9f9` — `chore: upgrade LLM models - gpt-5.2->gpt-5.4, glm-4.7->kimi-k2.5`
+- TradingAgents: `2d7e9f9`，`chore: upgrade LLM models - gpt-5.2->gpt-5.4, glm-4.7->kimi-k2.5`
 
 ## 26. 已知限制與未來工作
 
