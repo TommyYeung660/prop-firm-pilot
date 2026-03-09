@@ -363,3 +363,46 @@ async def test_eodhd_fetch_daily_bars_raises():
             await provider.fetch_daily_bars(
                 "EURUSD", date(2026, 3, 1), date(2026, 3, 1), client
             )
+
+
+@respx.mock
+async def test_eodhd_fetch_bars_volume_null():
+    """EODHD should handle volume=null (JSON null) without TypeError.
+
+    v1.3.9-fix: EODHD API sometimes returns {"volume": null} for certain bars.
+    dict.get("volume", 0) returns None (key exists), so int(None) would crash.
+    The fix uses `int(bar.get("volume") or 0)` which coerces None → 0.
+    """
+    provider = EodhdProvider(api_key="test_key")
+    route = respx.get("https://eodhd.com/api/intraday/EURUSD.FOREX").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "datetime": "2026-03-01 10:00:00",
+                    "open": 1.08,
+                    "high": 1.085,
+                    "low": 1.079,
+                    "close": 1.082,
+                    "volume": None,  # JSON null
+                },
+                {
+                    "datetime": "2026-03-01 10:05:00",
+                    "open": 1.082,
+                    "high": 1.086,
+                    "low": 1.081,
+                    "close": 1.084,
+                    "volume": 500,  # normal volume
+                },
+            ],
+        )
+    )
+    async with httpx.AsyncClient() as client:
+        df = await provider.fetch_bars(
+            "EURUSD", date(2026, 3, 1), date(2026, 3, 1), client, interval="5min"
+        )
+
+    assert route.called
+    assert len(df) == 2
+    assert df["volume"].iloc[0] == 0  # null → 0
+    assert df["volume"].iloc[1] == 500  # normal preserved

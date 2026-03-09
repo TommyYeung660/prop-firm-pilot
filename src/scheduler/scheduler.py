@@ -675,7 +675,38 @@ class Scheduler:
                             f"• {tactical_result.detail}"
                         )
 
-                # In shadow mode or if tactical is disabled, always proceed
+                    # v1.3.9: Enforce tactical gate when shadow_mode is off
+                    if (
+                        not self._config.tactical.shadow_mode
+                        and tactical_result.action != "PASS"
+                    ):
+                        await self._cancel_intent_safe(
+                            worker_id=worker_id,
+                            intent_id=intent.id,
+                            reason=(
+                                f"Tactical gate {tactical_result.action}: "
+                                f"{tactical_result.detail}"
+                            ),
+                            context="tactical_gate_block",
+                        )
+                        self._log_trade_event(
+                            "TACTICAL_BLOCKED",
+                            {
+                                "intent_id": intent.id,
+                                "symbol": intent.symbol,
+                                "side": decision.decision,
+                                "action": tactical_result.action,
+                                "detail": tactical_result.detail,
+                            },
+                        )
+                        logger.warning(
+                            "LLM worker {}: intent {} tactical {} \u2014 blocked from execution",
+                            worker_id,
+                            intent.id,
+                            tactical_result.action,
+                        )
+                        return
+
                 await asyncio.to_thread(self._store.mark_ready_for_exec, intent.id)
                 logger.info(
                     "LLM worker {}: intent {} → {} (ready for execution)",
@@ -827,8 +858,8 @@ class Scheduler:
                     "Failed to fetch EODHD intraday bars for {}: {}", symbol, e
                 )
 
-        if data.latest_bar_time is None:
-            data.latest_bar_time = datetime.now(timezone.utc)  # Best-effort fallback
+        # v1.3.9-fix: Do NOT fallback to now() — let data_freshness gate fail
+        # when no actual bar data was retrieved (EODHD fetch failure or empty response).
 
         return data
 

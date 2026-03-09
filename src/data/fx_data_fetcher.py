@@ -610,7 +610,7 @@ class EodhdProvider(FxDataProvider):
                         "high": float(bar["high"]),
                         "low": float(bar["low"]),
                         "close": float(bar["close"]),
-                        "volume": int(bar.get("volume", 0)),
+                        "volume": int(bar.get("volume") or 0),
                     })
 
                 return pd.DataFrame(rows)

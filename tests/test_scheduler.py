@@ -3102,3 +3102,147 @@ async def test_handle_position_closed_exit_reason_from_close_price(
     call_kwargs = sched._alert_service.sl_tp_hit.call_args[1]
     assert call_kwargs["hit_type"] == "TP"
     assert call_kwargs["trigger_price"] == 1.0951
+
+
+# ── v1.3.9: Tactical Gate Enforcement Tests ──────────────────────────────
+
+
+
+async def test_tactical_gate_blocks_intent_when_shadow_mode_off(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """v1.3.9-fix: When shadow_mode=False, tactical WAIT/REJECT must cancel the intent.
+
+    Previously the tactical result was only logged/alerted but never used to block.
+    """
+    from src.decision.tactical_validator import TacticalResult, TacticalValidator
+
+    # Enable tactical gate with shadow_mode=false
+    config.tactical.enabled = True
+    config.tactical.shadow_mode = False
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    # Create and claim an intent
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+
+    # Mock _run_tactical_validation to return WAIT
+    tactical_wait = TacticalResult(
+        action="WAIT",
+        detail="Spread too wide (0.0005 > 0.0003)",
+    )
+    with patch.object(sched, "_run_tactical_validation", new_callable=AsyncMock) as mock_tac:
+        mock_tac.return_value = tactical_wait
+        await sched._process_claimed_intent("llm-0", claimed)
+
+    # Verify: intent should be cancelled, NOT ready_for_exec
+    final = store.get_intent(claimed.id)
+    assert final.status == "cancelled"
+    assert "Tactical gate WAIT" in (final.execution_error or "")
+
+
+async def test_tactical_gate_passes_in_shadow_mode(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Shadow mode (default): tactical WAIT should NOT block — intent proceeds to ready_for_exec.
+
+    This verifies the shadow mode behavior was preserved when adding enforcement.
+    """
+    from src.decision.tactical_validator import TacticalResult, TacticalValidator
+
+    # Enable tactical gate with shadow_mode=true (default, shadow only)
+    config.tactical.enabled = True
+    config.tactical.shadow_mode = True
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+
+    tactical_wait = TacticalResult(
+        action="WAIT",
+        detail="Spread too wide (shadow)",
+    )
+    with patch.object(sched, "_run_tactical_validation", new_callable=AsyncMock) as mock_tac:
+        mock_tac.return_value = tactical_wait
+        await sched._process_claimed_intent("llm-0", claimed)
+
+    # Verify: intent should be ready_for_exec (NOT cancelled)
+    final = store.get_intent(claimed.id)
+    assert final.status == "ready_for_exec"
+
+
+async def test_fetch_tactical_data_no_fallback_on_eodhd_failure(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """v1.3.9-fix: When EODHD fetch fails, latest_bar_time must remain None.
+
+    Previously, a `datetime.now()` fallback was set, masking EODHD failures
+    and causing the data_freshness hard gate to always pass.
+    """
+    from src.decision.tactical_validator import TacticalData
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    # Inject a mock EODHD provider that raises
+    mock_eodhd = AsyncMock()
+    mock_eodhd.fetch_bars = AsyncMock(side_effect=Exception("EODHD API timeout"))
+    sched._eodhd = mock_eodhd
+
+    data = await sched._fetch_tactical_data("EURUSD")
+
+    # Verify: latest_bar_time must be None (no fallback to now())
+    assert data.latest_bar_time is None, (
+        f"Expected latest_bar_time=None after EODHD failure, got {data.latest_bar_time}"
+    )
