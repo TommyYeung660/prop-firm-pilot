@@ -187,6 +187,10 @@ class AgentBridge:
         self._graph: Any = None  # Lazy-loaded TradingAgentsGraph
         self._using_mock: bool = False
         self._ab_state: ABTestState | None = None
+        self._current_model_id: str = ""
+        self._graph_cls: Any = None  # Stored for AB test graph rebuild
+        self._default_config: dict[str, Any] = {}
+        self._merged_config: dict[str, Any] = {}
 
     def set_ab_state(self, state: ABTestState | None) -> None:
         """Set AB test state for model routing."""
@@ -252,6 +256,10 @@ class AgentBridge:
             if "data_dir" not in self._config:
                 merged_config["data_dir"] = str(self._agents_path / "data")
 
+            self._graph_cls = graph_cls
+            self._default_config = default_config
+            self._merged_config = merged_config
+
             self._graph = graph_cls(
                 selected_analysts=self._selected_analysts,
                 config=merged_config,
@@ -268,6 +276,49 @@ class AgentBridge:
             )
             self._graph = MockTradingGraph()
             self._using_mock = True
+
+    def _apply_ab_model(self, model_id: str) -> None:
+        """Rebuild the TradingAgentsGraph with a different LLM model for AB testing.
+
+        LLM instances are captured as closures inside the compiled LangGraph,
+        so the only reliable way to switch models is to rebuild the graph.
+
+        This method is a no-op when:
+        - model_id matches the currently active model.
+        - The graph class was not saved (import failed / using mock).
+
+        Args:
+            model_id: Model identifier in "provider/model" format.
+        """
+        if model_id == self._current_model_id:
+            return
+        if self._graph_cls is None or self._using_mock:
+            logger.debug("AB: skip model switch — graph_cls unavailable or using mock")
+            self._current_model_id = model_id
+            return
+
+        # Update the merged config with the chosen model for all LLM roles
+        self._merged_config["deep_think_llm"] = model_id
+        self._merged_config["quick_think_llm"] = model_id
+        self._merged_config["default_model"] = model_id
+
+        try:
+            self._graph = self._graph_cls(
+                selected_analysts=self._selected_analysts,
+                config=self._merged_config,
+            )
+            self._current_model_id = model_id
+            logger.info(
+                "AB: switched LLM model to '{}' (graph rebuilt)",
+                model_id,
+            )
+        except Exception as e:
+            logger.error(
+                "AB: failed to rebuild graph for model '{}': {}. "
+                "Keeping previous graph.",
+                model_id,
+                e,
+            )
 
     def decide(
         self,
@@ -298,6 +349,17 @@ class AgentBridge:
         logger.info("AgentBridge: deciding on {} for {}", symbol, normalized_trade_date)
 
         try:
+            # ── AB Test: choose and apply model BEFORE propagate ──────────
+            model_id = ""
+            if self._ab_state is not None and intent_id:
+                model_id = choose_model(
+                    intent_id=intent_id,
+                    ratio=self._ab_state.ratio,
+                    model_a=self._ab_state.model_a,
+                    model_b=self._ab_state.model_b,
+                )
+                self._apply_ab_model(model_id)
+
             # We don't pass market_type to propagate anymore as it's handled via __init__ config
             final_state, decision = self._graph.propagate(
                 company_name=symbol,
@@ -332,14 +394,6 @@ class AgentBridge:
                 risk_report=risk_report,
                 symbol=symbol,
             )
-            model_id = ""
-            if self._ab_state is not None and intent_id:
-                model_id = choose_model(
-                    intent_id=intent_id,
-                    ratio=self._ab_state.ratio,
-                    model_a=self._ab_state.model_a,
-                    model_b=self._ab_state.model_b,
-                )
             result = AgentDecision(
                 symbol=symbol,
                 decision=validated_decision,

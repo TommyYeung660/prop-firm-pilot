@@ -21,11 +21,13 @@ Usage:
 
 import asyncio
 import json
+import os
 from collections.abc import Coroutine
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from numbers import Real
 from typing import Any
 
+import httpx
 from loguru import logger
 
 from src.compliance.best_day_tracker import BestDayTracker
@@ -50,6 +52,7 @@ from src.scheduler.decision_cache import StrategicDecisionCache
 from src.scheduler.market_hours import MarketHoursChecker
 from src.scheduler.session_cadence import SessionCadence
 from src.scheduler.volatility_monitor import VolatilityMonitor
+from src.data.fx_data_fetcher import EodhdProvider
 from src.signal.scanner_bridge import ScannerBridge
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -125,6 +128,12 @@ class Scheduler:
         self._decision_cache = decision_cache or StrategicDecisionCache(
             ttl_seconds=config.tactical.decision_cache.ttl_seconds
         )
+
+        # v1.4.0: EODHD intraday provider for tactical bar data
+        eodhd_key = os.getenv("EODHD_API_KEY", "")
+        self._eodhd: EodhdProvider | None = EodhdProvider(api_key=eodhd_key) if eodhd_key else None
+        if not eodhd_key:
+            logger.warning("EODHD_API_KEY not set — tactical bar gates will be pass-through")
 
         # Dynamic drawdown HWM tracking
         self._hwm_tracker: HighWaterMarkTracker | None = None
@@ -753,14 +762,14 @@ class Scheduler:
         return result
 
     async def _fetch_tactical_data(self, symbol: str) -> TacticalData:
-        """Fetch current spread for tactical validation.
+        """Fetch spread and intraday bars for tactical validation.
 
-        Uses MatchTrader get_quote() for spread data.
-        Bar data integration is a follow-up after shadow mode data collection.
+        Uses MatchTrader get_quote() for spread and EODHD intraday API for
+        5-min and 1-hour OHLCV bars required by ATR, EMA, RSI, and candle gates.
         """
         data = TacticalData()
 
-        # Fetch current spread from MatchTrader
+        # ── Spread from MatchTrader ──────────────────────────────────────────
         try:
             quote = await self._matchtrader.get_quote(symbol)
             if quote:
@@ -778,7 +787,49 @@ class Scheduler:
         except Exception as e:
             logger.debug("Failed to fetch quote for {}: {}", symbol, e)
 
-        data.latest_bar_time = datetime.now(timezone.utc)  # Best-effort
+        # ── Intraday bars from EODHD ────────────────────────────────────────
+        if self._eodhd:
+            now = datetime.now(timezone.utc)
+            # 5min bars: need ~50 bars for EMA(21) + RSI(14) ≈ 5 hours lookback
+            start_5min = (now - timedelta(hours=6)).date()
+            # 1h bars: need ~20 bars for ATR(14) ≈ 24 hours lookback
+            start_1h = (now - timedelta(hours=30)).date()
+            end_date = now.date()
+
+            try:
+                async with httpx.AsyncClient() as client:
+                    bars_5min, bars_1h = await asyncio.gather(
+                        self._eodhd.fetch_bars(
+                            symbol, start_5min, end_date, client, interval="5min"
+                        ),
+                        self._eodhd.fetch_bars(
+                            symbol, start_1h, end_date, client, interval="1h"
+                        ),
+                    )
+                if not bars_5min.empty:
+                    data.bars_5min = bars_5min
+                    # Update latest_bar_time from actual 5min data
+                    max_ts = bars_5min["datetime"].max()
+                    if hasattr(max_ts, "to_pydatetime"):
+                        data.latest_bar_time = max_ts.to_pydatetime()
+                    logger.debug(
+                        "Tactical: fetched {} 5min bars for {}",
+                        len(bars_5min), symbol,
+                    )
+                if not bars_1h.empty:
+                    data.bars_1h = bars_1h
+                    logger.debug(
+                        "Tactical: fetched {} 1h bars for {}",
+                        len(bars_1h), symbol,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch EODHD intraday bars for {}: {}", symbol, e
+                )
+
+        if data.latest_bar_time is None:
+            data.latest_bar_time = datetime.now(timezone.utc)  # Best-effort fallback
+
         return data
 
     async def _cancel_intent_safe(

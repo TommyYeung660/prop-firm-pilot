@@ -45,6 +45,8 @@ monitor:
 
 optimization:
   state_path: data/optimization_state_e8_one_5k.json
+  ab_model_a: "rightcodes/gpt-5.4"
+  ab_model_b: "volcengine/kimi-k2.5"
 
 scheduler:
   market_hours:

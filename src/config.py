@@ -122,8 +122,8 @@ class OptimizationConfig(BaseModel):
     state_path: str = "data/optimization_state.json"
     pnl_lookback_days: int = 7
     winrate_lookback_days: int = 14
-    ab_model_a: str = "volcengine/glm-4.7"
-    ab_model_b: str = "gpt-5.2"
+    ab_model_a: str = "rightcodes/gpt-5.4"
+    ab_model_b: str = "volcengine/kimi-k2.5"
     ab_ratio: float = 0.5
 
 

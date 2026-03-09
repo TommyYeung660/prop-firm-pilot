@@ -49,8 +49,8 @@ class OptimizationEngine:
         state_path: str | Path,
         pnl_days: int = 7,
         win_days: int = 14,
-        ab_model_a: str = "volcengine/glm-4.7",
-        ab_model_b: str = "gpt-5.2",
+        ab_model_a: str = "rightcodes/gpt-5.4",
+        ab_model_b: str = "volcengine/kimi-k2.5",
         ab_ratio: float = 0.5,
     ) -> None:
         self._store = store

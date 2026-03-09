@@ -51,8 +51,8 @@ class Thresholds(BaseModel):
 class ABTestState(BaseModel):
     """A/B testing configuration and aggregated results."""
 
-    model_a: str = Field(default="volcengine/glm-4.7", description="Primary model ID")
-    model_b: str = Field(default="gpt-5.2", description="Challenger model ID")
+    model_a: str = Field(default="rightcodes/gpt-5.4", description="Primary model ID")
+    model_b: str = Field(default="volcengine/kimi-k2.5", description="Challenger model ID")
     ratio: float = Field(default=0.5, description="Traffic ratio for model_a")
     counts: dict[str, int] = Field(default_factory=dict, description="Decision counts")
     pnl_by_model: dict[str, float] = Field(
