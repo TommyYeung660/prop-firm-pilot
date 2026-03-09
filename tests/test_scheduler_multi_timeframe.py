@@ -43,7 +43,7 @@ def mock_scheduler():
     """Create a minimal Scheduler with mocked dependencies for intraday scan testing."""
     from src.scheduler.scheduler import Scheduler
 
-    config = AppConfig(scheduler={"multi_timeframe_enabled": True, "entry_timeframe": "4h"})
+    config = AppConfig(scheduler={"multi_timeframe_enabled": True, "entry_timeframe": "4h", "scanner_timeframe": "4h"})
 
     scanner = MagicMock()
     scanner.run_pipeline = MagicMock(return_value=[])
