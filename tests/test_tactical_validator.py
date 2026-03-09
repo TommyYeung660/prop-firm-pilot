@@ -284,3 +284,71 @@ class TestSoftGateScoring:
         results = validator.check_soft_gates("BUY", data)
         score = sum(1 for r in results if r.passed)
         assert score >= 2  # At least 2/3 pass
+
+
+# ── v1.3.8: Pass-through Tests (missing data should not block) ────────────
+
+
+class TestPassThroughWhenNoData:
+    """v1.3.8: Gates should pass-through when bar data is unavailable."""
+
+    def test_atr_gate_passes_when_no_1h_data(self) -> None:
+        """ATR regime gate should pass when bars_1h is empty (no data available)."""
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        data = TacticalData(
+            bars_1h=pd.DataFrame(),
+            current_spread=0.00015,
+            typical_spread=0.00015,
+            latest_bar_time=datetime.now(timezone.utc),
+        )
+        results = validator.check_hard_gates(data)
+        atr_results = [r for r in results if r.gate_name == "atr_regime"]
+        assert len(atr_results) == 1
+        assert atr_results[0].passed is True
+        assert "pass-through" in atr_results[0].detail.lower()
+
+    def test_ema_gate_passes_when_no_5min_data(self) -> None:
+        """EMA momentum gate should pass when bars_5min is empty."""
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        result = validator._check_ema_momentum_gate("BUY", pd.DataFrame())
+        assert result.passed is True
+        assert "pass-through" in result.detail.lower()
+
+    def test_rsi_gate_passes_when_no_5min_data(self) -> None:
+        """RSI state gate should pass when bars_5min is empty."""
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        result = validator._check_rsi_state_gate("BUY", pd.DataFrame())
+        assert result.passed is True
+        assert "pass-through" in result.detail.lower()
+
+    def test_ema_gate_passes_when_insufficient_data(self) -> None:
+        """EMA gate should pass when data has fewer bars than needed."""
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        # Only 5 bars — way less than ema_slow (21) + 5 = 26 needed
+        bars = pd.DataFrame({
+            "open": [1.1] * 5,
+            "high": [1.11] * 5,
+            "low": [1.09] * 5,
+            "close": [1.1] * 5,
+        })
+        result = validator._check_ema_momentum_gate("BUY", bars)
+        assert result.passed is True
+        assert "pass-through" in result.detail.lower()
+
+    def test_rsi_gate_passes_when_insufficient_data(self) -> None:
+        """RSI gate should pass when data has fewer bars than needed."""
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        bars = pd.DataFrame({
+            "open": [1.1] * 5,
+            "high": [1.11] * 5,
+            "low": [1.09] * 5,
+            "close": [1.1] * 5,
+        })
+        result = validator._check_rsi_state_gate("SELL", bars)
+        assert result.passed is True
+        assert "pass-through" in result.detail.lower()
