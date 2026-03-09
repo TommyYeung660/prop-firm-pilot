@@ -1059,6 +1059,47 @@ class Scheduler:
                 position_id,
                 e,
             )
+        decision = None  # May be loaded by execution_meta fallback below
+        # ── v1.3.9: execution_meta fallback for volume/prices ──────────
+        # When broker API didn't return data, read from execution_meta
+        # (persisted at trade open time by engine.py)
+        if volume == 0.0 or close_price == 0.0:
+            try:
+                decision = await asyncio.to_thread(
+                    self._store.get_decision, intent.id
+                )
+                if decision and decision.execution_meta:
+
+                    meta = json.loads(decision.execution_meta)
+                    if volume == 0.0 and meta.get("volume"):
+                        volume = meta["volume"]
+                        logger.info(
+                            "Position monitor: using execution_meta volume={} for {}",
+                            volume,
+                            position_id,
+                        )
+                    if open_price == 0.0 and meta.get("fill_price"):
+                        open_price = meta["fill_price"]
+                    # For close_price fallback: use SL/TP price based on exit_reason
+                    if close_price == 0.0:
+                        if exit_reason == "sl_hit" and meta.get("sl_price"):
+                            close_price = meta["sl_price"]
+                        elif exit_reason == "tp_hit" and meta.get("tp_price"):
+                            close_price = meta["tp_price"]
+                        if close_price != 0.0:
+                            logger.info(
+                                "Position monitor: using execution_meta"
+                                " {} price={} for {}",
+                                exit_reason,
+                                close_price,
+                                position_id,
+                            )
+            except Exception as e:
+                logger.debug(
+                    "Position monitor: could not read execution_meta for {}: {}",
+                    intent.id,
+                    e,
+                )
         # Override exit_reason if Best Day Rule triggered this close
         # and use recorded unrealized PnL as fallback when broker query returned 0
         if position_id in self._best_day_close_positions:
@@ -1101,6 +1142,28 @@ class Scheduler:
                 exit_reason,
                 position_id,
             )
+        # v1.3.9: Improved exit_reason — compare close_price vs SL/TP prices
+        # More accurate than PnL sign alone (handles manual close in profit)
+        if close_price != 0.0 and exit_reason in ("tp_hit", "sl_hit", "manual_close"):
+            try:
+                if decision is None:
+                    decision = await asyncio.to_thread(
+                        self._store.get_decision, intent.id
+                    )
+                if decision and decision.execution_meta:
+
+                    meta = json.loads(decision.execution_meta)
+                    sl_price = meta.get("sl_price", 0.0)
+                    tp_price = meta.get("tp_price", 0.0)
+                    pip_size = self._get_pip_size(symbol)
+                    tolerance = pip_size * 3  # 3-pip tolerance for slippage
+
+                    if tp_price and abs(close_price - tp_price) <= tolerance:
+                        exit_reason = "tp_hit"
+                    elif sl_price and abs(close_price - sl_price) <= tolerance:
+                        exit_reason = "sl_hit"
+            except Exception:
+                pass  # Keep existing exit_reason; decision stays as loaded
 
         # Clean up reevaluation tracking
         self._last_reevaluation.pop(position_id, None)
@@ -1803,6 +1866,12 @@ class Scheduler:
             return self._optimization_state.symbol_thresholds[symbol]
         return self._optimization_state.global_thresholds
 
+    def _get_pip_size(self, symbol: str) -> float:
+        """Look up pip size from instrument config, with safe default."""
+        instrument = self._config.instruments.get(symbol)
+        if instrument:
+            return instrument.pip_size
+        return 0.0001  # Default for major FX pairs
     @staticmethod
     def _confidence_score(confidence: str) -> float:
         """Map confidence label to numeric score."""

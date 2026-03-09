@@ -2949,3 +2949,156 @@ async def test_hold_does_not_cancel_intents_for_different_symbol(
     assert gbp.status == "ready_for_exec", (
         f"GBPUSD intent should NOT be cancelled by EURUSD HOLD, got: {gbp.status}"
     )
+
+
+# ── v1.3.9: execution_meta fallback tests ────────────────────────────────
+
+
+async def test_handle_position_closed_uses_execution_meta_fallback(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """When broker API returns 0 for volume/close_price, fall back to execution_meta."""
+    import json
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+    sched._alert_service = AsyncMock()
+
+    # Create and advance an intent to 'opened' state
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+    store.update_intent_decision(
+        claimed.id, "BUY", sl_pips=50.0, tp_pips=100.0,
+        risk_report="test", state_json="{}"
+    )
+    store.mark_ready_for_exec(claimed.id)
+    store.mark_executing(claimed.id)
+    store.mark_opened(claimed.id, position_id="pos-1")
+
+    # Save execution_meta to the decision record
+    meta = {
+        "fill_price": 1.085,
+        "volume": 0.05,
+        "side": "BUY",
+        "sl_price": 1.080,
+        "tp_price": 1.095,
+        "sl_pips": 50,
+        "tp_pips": 100,
+    }
+    store.update_execution_meta(claimed.id, json.dumps(meta))
+
+    # Broker API returns NO closed positions (simulates 0 values)
+    mock_matchtrader.get_closed_positions = AsyncMock(return_value=[])
+    mock_matchtrader.get_balance.return_value = MagicMock(
+        balance=50000.0, equity=50000.0, margin=0.0, free_margin=50000.0,
+    )
+
+    # Reload intent from store (now in 'opened' state with position_id)
+    opened_intent = store.get_intent(claimed.id)
+
+    await sched._handle_position_closed(opened_intent)
+
+    # Verify: store.mark_closed was called - check the intent is now 'closed'
+    closed_intent = store.get_intent(claimed.id)
+    assert closed_intent.status == "closed"
+
+    # Verify: alert was sent with execution_meta volume (0.05, not 0.0)
+    sched._alert_service.trade_closed.assert_called_once()
+    call_kwargs = sched._alert_service.trade_closed.call_args[1]
+    assert call_kwargs["volume"] == 0.05, (
+        f"Expected volume=0.05 from execution_meta, got {call_kwargs['volume']}"
+    )
+
+
+async def test_handle_position_closed_exit_reason_from_close_price(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """When close_price matches TP price within tolerance, exit_reason should be tp_hit."""
+    import json
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+    sched._alert_service = AsyncMock()
+
+    # Create and advance intent to 'opened' state
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+    store.update_intent_decision(
+        claimed.id, "BUY", sl_pips=50.0, tp_pips=100.0,
+        risk_report="test", state_json="{}"
+    )
+    store.mark_ready_for_exec(claimed.id)
+    store.mark_executing(claimed.id)
+    store.mark_opened(claimed.id, position_id="pos-2")
+
+    meta = {
+        "fill_price": 1.085,
+        "volume": 0.05,
+        "side": "BUY",
+        "sl_price": 1.080,
+        "tp_price": 1.095,
+    }
+    store.update_execution_meta(claimed.id, json.dumps(meta))
+
+    # Broker returns closed position with profit (close near TP)
+    closed_pos = MagicMock(
+        position_id="pos-2",
+        profit=50.0,
+        close_price=1.0951,  # Within 3-pip tolerance of TP=1.095
+        open_price=1.085,
+        volume=0.05,
+    )
+    mock_matchtrader.get_closed_positions = AsyncMock(return_value=[closed_pos])
+    mock_matchtrader.get_balance.return_value = MagicMock(
+        balance=50050.0, equity=50050.0, margin=0.0, free_margin=50050.0,
+    )
+
+    opened_intent = store.get_intent(claimed.id)
+    await sched._handle_position_closed(opened_intent)
+
+    # Verify: exit_reason should be tp_hit (confirmed by close_price proximity)
+    closed_intent = store.get_intent(claimed.id)
+    assert closed_intent.status == "closed"
+    assert closed_intent.exit_reason == "tp_hit"
+
+    # Verify: sl_tp_hit alert was sent (not trade_closed)
+    sched._alert_service.sl_tp_hit.assert_called_once()
+    call_kwargs = sched._alert_service.sl_tp_hit.call_args[1]
+    assert call_kwargs["hit_type"] == "TP"
+    assert call_kwargs["trigger_price"] == 1.0951
