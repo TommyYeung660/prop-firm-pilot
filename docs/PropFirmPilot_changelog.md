@@ -22,22 +22,33 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ### Added
 - `tests/test_ab_routing.py` to cover AB routing behavior
+- `EodhdProvider` class in `src/data/fx_data_fetcher.py` — async intraday bar data provider supporting 5min/1h/15min/30min intervals via EODHD API
+- EODHD intraday wiring in `src/scheduler/scheduler.py` — `_fetch_tactical_data()` now fetches real 5min + 1h bars via `asyncio.gather()`, making ATR regime, EMA momentum, RSI state, candle quality, and data freshness tactical gates functional
+- `_apply_ab_model()` method in `src/decision/agent_bridge.py` — rebuilds TradingAgentsGraph with selected model, enabling real AB test model switching (not just metadata logging)
+- `tests/test_ab_model_switching.py` (NEW) — 10 tests covering `_apply_ab_model` behavior and `decide()` AB integration
+- 8 new EODHD provider tests in `tests/test_fx_data_fetcher.py`
 
 ### Changed
 - DuckDB transaction handling now guards against nested `BEGIN TRANSACTION` calls
 - Breakeven threshold lowered from 0.5 to 0.3 in config
+- AB test model defaults updated: `ab_model_a: "rightcodes/gpt-5.4"`, `ab_model_b: "volcengine/kimi-k2.5"` in `src/config.py`, `src/optimize/optimization_engine.py`, `src/optimize/optimization_state.py`, `config/e8_one_5k_challenge.yaml`
+- `choose_model()` now called BEFORE `propagate()` in `agent_bridge.decide()` — AB test actually switches the LLM model used for decisions
+- LLM models upgraded in TradingAgents: `gpt-5.2` → `gpt-5.4`, `glm-4.7` → `kimi-k2.5` (5 files: `.env`, `.env.example`, `default_config.py`, 2 test files)
 
 ### Tested
-- 879 tests passed; +829/-35 lines changed across 16 files
+- 897 tests passed; +749/-24 lines changed across 9 files (Batch 1-3)
 
 ### Files
 - `src/data/fx_duckdb_store.py`, `src/decision/agent_bridge.py`, `src/decision/tactical_validator.py`
 - `src/decision_store/sqlite_store.py`, `src/execution/engine.py`, `src/main.py`
 - `src/optimize/optimization_engine.py`, `src/scheduler/scheduler.py`
+- `src/data/fx_data_fetcher.py`, `src/config.py`, `src/optimize/optimization_state.py`
 - `config/e8_one_5k_challenge.yaml`
 - `tests/test_ab_routing.py` (NEW), `tests/test_config.py`, `tests/test_decision_store.py`
 - `tests/test_fx_duckdb_store.py`, `tests/test_scheduler.py`, `tests/test_scheduler_multi_timeframe.py`
 - `tests/test_tactical_validator.py`
+- `tests/test_ab_model_switching.py` (NEW), `tests/test_fx_data_fetcher.py`
+- TradingAgents: `.env.example`, `tradingagents/default_config.py`, `tests/test_recursion_limit.py`, `tests/test_telegram_model_switch.py`
 
 ## [1.3.8] — 2026-03-09
 **v1.3.7 Production Bugfixes — Cross-Contamination, LLM Bias, Over-Filtering, Infinite Loops**

@@ -47,7 +47,8 @@
 22. [測試覆蓋](#22-測試覆蓋)
 23. [Git Commit 記錄 (v1.3.8)](#23-git-commit-記錄-v138)
 24. [Git Commit 記錄 (v1.3.9)](#24-git-commit-記錄-v139)
-25. [已知限制與未來工作](#25-已知限制與未來工作)
+25. [LLM 模型升級](#25-llm-模型升級)
+26. [已知限制與未來工作](#26-已知限制與未來工作)
 
 ---
 
@@ -60,7 +61,9 @@ v1.3.7 於 2026 年 3 月 4 日部署至 E8 Markets prop firm 生產帳戶，運
 - **v1.3.8**（P0/P1 修復）：修復 7 個高優先級問題，包括 TradingAgents 跨品種數據污染（P0）、LLM SELL 偏差、LLM 拒絕交易、EURUSD 過度取消、過度 Rescan、Best Day 無限循環、Tactical Gate 固定輸出
 - **v1.3.9**（P2/P3 修復）：修復 8 個問題（含 Issue #2 的第二部分），包括 TP/SL 通知異常、Scanner Score 日內不更新、HOLD 後仍開倉、AB Test 數據收集、Spread Gate 失敗、DuckDB 事務嵌套、Breakeven 門檻過高
 
-所有修復均已合併至 `main` 分支，**879 項測試全部通過**。
+- **v1.3.9 追加改動**：整合 EODHD Intraday API 填充戰術模塊的 5min/1h bar 數據（Issue #2 Part 1 完成）、實現 AB Test 真正的模型切換（Issue #11 完成）、升級 LLM 模型至 gpt-5.4 和 kimi-k2.5
+
+所有修復均已合併至 `main` 分支，**897 項測試全部通過**。
 
 ---
 
@@ -72,10 +75,11 @@ v1.3.7 於 2026 年 3 月 4 日部署至 E8 Markets prop firm 生產帳戶，運
 | 修復版本 | v1.3.8 (P0/P1) + v1.3.9 (P2/P3) |
 | 報告日期 | 2026-03-09 |
 | 跨倉庫 | prop-firm-pilot + TradingAgents |
-| 測試總數 | 879 tests passed |
+| 測試總數 | 897 tests passed |
 | v1.3.8 prop-firm-pilot 修改檔案 | 7 files |
 | v1.3.8 TradingAgents 修改檔案 | 2 files |
-| v1.3.9 prop-firm-pilot 修改檔案 | 16 files (+829/-35 lines) |
+| v1.3.9 prop-firm-pilot 修改檔案 | 25 files (+1,578/-59 lines) |
+| v1.3.9 TradingAgents 修改檔案 | 4 files (LLM upgrade) |
 | 生產運行時間 | ~5 天（Mar 4-9, 2026） |
 | 問題總數 | 15（P0:1, P1:6, P2:6, P3:2） |
 
@@ -161,7 +165,7 @@ v1.3.7 於 2026 年 3 月 4 日部署至 E8 Markets prop firm 生產帳戶，運
 - 針對數據完整性、LLM 決策品質、系統穩定性的根本修復
 
 **P2/P3（v1.3.9）重點**：
-- 修復 prop-firm-pilot 共 16 個文件（+829/-35 lines）
+- 修復 prop-firm-pilot 共 25 個文件（+1,578/-59 lines）
 - 針對通知品質、功能完整性、邊緣情況的改善
 
 ---
@@ -506,6 +510,19 @@ if data.bars_5min is None or (hasattr(data.bars_5min, 'empty') and data.bars_5mi
 - **Commit**: `2b9752c`
 - **預期效果**: 無 bar 數據時各 gate 回傳 pass-through，輸出因 spread 數據的變化而產生差異
 
+### v1.3.9 追加：EODHD Intraday 整合
+
+Issue #2 Part 1 的根本解決方案已在 v1.3.9 中實現。新增 `EodhdProvider` 類別，透過 EODHD API 取得 5min 和 1h K 線數據，填充 `TacticalData.bars_5min` 和 `TacticalData.bars_1h`。
+
+**實現細節**：
+- `EodhdProvider` 支持 5min/1h/15min/30min 區間，使用 `httpx.AsyncClient` 非同步請求
+- Symbol 轉換：`EURUSD` → `EURUSD.FOREX`
+- 整合至 `scheduler._fetch_tactical_data()`，透過 `asyncio.gather()` 同時取得 spread 和 bar 數據
+- 5min bars lookback 6 小時（50+ bars for EMA/RSI），1h bars lookback 30 小時（20+ bars for ATR-14）
+- 需設定 `EODHD_API_KEY` 環境變數；未設定時 gates 維持 pass-through
+
+**Tactical gates 現已可運作**：ATR regime、EMA momentum、RSI state、candle quality、data freshness 不再是 pass-through，將根據真實市場數據進行過濾。
+
 ---
 
 ## 13. P2 #4/#14 — TP/SL 通知顯示 0.00 lots
@@ -705,6 +722,21 @@ state.ab_test = ABTestState(
 - **Commit**: `8199467`
 - **預期效果**: 生產環境開始收集 AB 測試數據，model_id 記錄在 execution_meta 中，PnL 按模型累計
 
+### v1.3.9 追加：AB Test 真正的模型切換
+
+v1.3.9 初始修復僅連接了 `choose_model()` 到 `agent_bridge.decide()`，但選出的 `model_id` 僅作為 metadata 記錄，實際 LLM 呼叫仍使用初始化時的模型。
+
+**根本原因**：TradingAgentsGraph 的 LLM 實例在 `__init__` 時建立並作為 closure 被 compiled LangGraph 捕獲。修改 config 或 LLM 屬性**無法傳播**至已編譯的 graph。
+
+**修復方案**：
+
+1. 新增 `_apply_ab_model(model_id)` 方法，更新 `_merged_config` 的 `deep_think_llm`、`quick_think_llm`、`default_model`，然後重建整個 `TradingAgentsGraph` 實例
+2. 將 `choose_model()` 移至 `propagate()` **之前**，確保模型在決策前切換
+3. 追蹤 `_current_model_id` 避免不必要的重建（同模型不重建）
+4. Rebuild 失敗時保留前一個 graph 實例（graceful fallback）
+
+**測試覆蓋**：10 個新測試（`tests/test_ab_model_switching.py`）覆蓋 no-op、rebuild、mock skip、failure handling、call order、deterministic routing。
+
 ---
 
 ## 17. P2 #2 (Part 2) — Spread Gate 始終失敗
@@ -874,26 +906,40 @@ scheduler:
 
 ## 21. 修改檔案清單 (v1.3.9)
 
-### prop-firm-pilot（16 files, +829/-35 lines）
+### prop-firm-pilot（25 files (+1,578/-59 lines)）
 
 | 檔案 | 動作 | 修復項 | 說明 |
 |---|---|---|---|
 | `src/data/fx_duckdb_store.py` | 修改 | #13 | Transaction nesting guard |
+| `src/data/fx_data_fetcher.py` | 修改 | #2 | 新增 EODHD intraday provider（5min/1h/15min/30min） |
 | `src/decision/agent_bridge.py` | 修改 | #11 | Wire choose_model() 呼叫 |
 | `src/decision/tactical_validator.py` | 修改 | #2 | Spread gate pass-through |
 | `src/decision_store/sqlite_store.py` | 修改 | #11 | AB test model_id 儲存 |
 | `src/execution/engine.py` | 修改 | #11 | model_id 寫入 execution_meta |
 | `src/main.py` | 修改 | #11 | AB state 初始化注入 |
+| `src/config.py` | 修改 | #11 | 更新 AB test 預設模型（gpt-5.4 vs kimi-k2.5） |
 | `src/optimize/optimization_engine.py` | 修改 | #11 | Fix counts reset bug |
+| `src/optimize/optimization_state.py` | 修改 | #11 | 更新 AB test 預設模型（gpt-5.4 vs kimi-k2.5） |
 | `src/scheduler/scheduler.py` | 修改 | #4/#14, #9, #10 | execution_meta fallback + HOLD cancel + daily skip |
 | `config/e8_one_5k_challenge.yaml` | 修改 | #2, #5 | avg_spread_pips + breakeven 門檻 |
 | `tests/test_ab_routing.py` | **新增** | #11 | AB routing 端到端測試 |
+| `tests/test_ab_model_switching.py` | **新增** | #11 | AB model 真正切換與 rebuild 行為測試 |
 | `tests/test_config.py` | 修改 | #5 | breakeven config 驗證 |
 | `tests/test_decision_store.py` | 修改 | #11 | decision store AB test 欄位測試 |
 | `tests/test_fx_duckdb_store.py` | 修改 | #13 | Transaction guard 測試 |
+| `tests/test_fx_data_fetcher.py` | 修改 | #2 | EODHD provider intraday bar 測試（新增 8 tests） |
 | `tests/test_scheduler.py` | 修改 | #4/#14, #9, #10 | 多項 scheduler 場景測試 |
 | `tests/test_scheduler_multi_timeframe.py` | 修改 | #10 | Daily model intraday skip 測試 |
 | `tests/test_tactical_validator.py` | 修改 | #2 | Spread gate pass-through 測試 |
+
+### TradingAgents（4 files, LLM upgrade）
+
+| 檔案 | 動作 | 修復項 | 說明 |
+|---|---|---|---|
+| `.env.example` | 修改 | - | 升級預設模型字串（gpt-5.4, kimi-k2.5） |
+| `tradingagents/default_config.py` | 修改 | - | default model strings |
+| `tests/test_recursion_limit.py` | 修改 | - | test model references |
+| `tests/test_telegram_model_switch.py` | 修改 | - | test model references |
 
 ---
 
@@ -903,8 +949,8 @@ scheduler:
 
 | 指標 | 數值 |
 |---|---|
-| 測試總數 | 879 |
-| 通過 | 879 (100%) |
+| 測試總數 | 897 |
+| 通過 | 897 (100%) |
 | 失敗 | 0 |
 | Ruff 警告 | 3（pre-existing，非本次修復引入） |
 
@@ -921,9 +967,11 @@ scheduler:
 | 測試檔案 | 覆蓋項目 |
 |---|---|
 | `tests/test_ab_routing.py` (NEW) | choose_model 分流、update_ab_stats 累計、counts 持久化 |
+| `tests/test_ab_model_switching.py` (NEW) | `_apply_ab_model` rebuild 行為、failure fallback、decide() call order、deterministic routing |
 | `tests/test_scheduler.py` | execution_meta fallback、HOLD stale intent cancel、daily model skip |
 | `tests/test_scheduler_multi_timeframe.py` | 1D vs 4H model intraday rescan 行為差異 |
 | `tests/test_fx_duckdb_store.py` | Transaction nesting guard、連續 upsert 穩定性 |
+| `tests/test_fx_data_fetcher.py` | EODHD intraday provider（5min/1h/15min/30min）與 bar lookback 行為 |
 | `tests/test_tactical_validator.py` | Spread gate pass-through、有效數據正常計算 |
 | `tests/test_config.py` | breakeven_activation_pct 預設值驗證 |
 | `tests/test_decision_store.py` | AB test model_id 欄位存取 |
@@ -969,22 +1017,58 @@ scheduler:
 | `fa42821` | 2026-03-09 | fix(scheduler): cancel stale ready_for_exec intents when HOLD decided (#9) |
 | `2f5b2d7` | 2026-03-09 | fix(scheduler): use execution_meta fallback for TP/SL notification data (#4/#14) |
 | `8199467` | 2026-03-09 | fix(ab-test): wire AB model routing and stats collection (#11) |
+| `0d104c9` | 2026-03-09 | feat: integrate EODHD intraday data for tactical gates & implement AB test model switching |
+
+### TradingAgents
+
+| Commit | 日期 | 說明 |
+|---|---|---|
+| `2d7e9f9` | 2026-03-09 | chore: upgrade LLM models - gpt-5.2->gpt-5.4, glm-4.7->kimi-k2.5 |
 
 ---
 
-## 25. 已知限制與未來工作
+## 25. LLM 模型升級
+
+### 變更內容
+
+| 項目 | 舊版 | 新版 |
+|---|---|---|
+| Primary model (deep_think_llm) | rightcodes/gpt-5.2 | rightcodes/gpt-5.4 |
+| Secondary model (quick_think_llm) | volcengine/glm-4.7 | volcengine/kimi-k2.5 |
+| AB test model_a | rightcodes/gpt-5.2 | rightcodes/gpt-5.4 |
+| AB test model_b | volcengine/glm-4.7 | volcengine/kimi-k2.5 |
+
+### 修改檔案
+
+**TradingAgents 倉庫**：
+- `tradingagents/default_config.py` — default model strings
+- `.env` / `.env.example` — API endpoint and key references
+- `tests/test_recursion_limit.py` — test model references
+- `tests/test_telegram_model_switch.py` — test model references
+
+**prop-firm-pilot 倉庫**：
+- `src/config.py` — AB test defaults
+- `src/optimize/optimization_engine.py` — AB test defaults
+- `src/optimize/optimization_state.py` — AB test defaults
+- `config/e8_one_5k_challenge.yaml` — AB model config
+
+### Commits
+- prop-firm-pilot: `0d104c9` (included in EODHD + AB test commit)
+- TradingAgents: `2d7e9f9` — `chore: upgrade LLM models - gpt-5.2->gpt-5.4, glm-4.7->kimi-k2.5`
+
+## 26. 已知限制與未來工作
 
 ### 已知限制
 
-1. **Tactical Gate 仍為 shadow mode**：bar data（5min/1H）取得需要完整的 intraday API 整合。目前所有 bar-dependent gates 均為 pass-through，尚無法提供真正的市場微觀過濾
+1. **Tactical Gate 仍為 shadow mode**：EODHD Intraday API 已整合，bar data（5min/1H）可透過 `EODHD_API_KEY` 取得。Tactical gates 在有數據時已可運作。**限制**：EODHD free/basic plan 可能有 rate limit（5 req/min），需監控生產環境的 API 配額使用
 2. **LLM 選項隨機化的一致性影響**：隨機打亂 BUY/HOLD/SELL 順序消除了位置偏差，但可能引入決策噪音。需要長期 AB test 驗證隨機化 vs 固定順序的效果差異
 3. **Scanner 1D 模型日內限制**：使用 daily 模型時日內 rescan 被跳過，意味著日內的劇烈波動不會被即時捕捉。4H 模型的研究和部署可解決此限制
-4. **AB Test 樣本量不足**：模型選擇決策需要足夠的樣本量（建議每組 >30 筆交易）。在收集足夠數據前，AB test 僅作為數據收集機制
+4. **AB Test 樣本量不足**：模型選擇決策需要足夠的樣本量（建議每組 >30 筆交易）。AB test 現已實現真正的模型切換（gpt-5.4 vs kimi-k2.5），需要持續收集數據直至達到統計顯著性
 5. **Breakeven 門檻需生產驗證**：0.3 (30%) 的新門檻需要在生產環境中驗證其對整體 P&L 的影響。過低的門檻可能導致過早 BE 而錯失更大利潤
 
 ### 未來工作
 
-1. 完成 intraday bar data API 整合，啟用 Tactical Gate 的真正過濾功能
+1. 將 Tactical Gate 從 shadow mode 切換至 enforcement mode（需先驗證 EODHD 數據品質和 gate 過濾效果）
 2. 研究並部署 4H scanner 模型，解決 1D 模型的日內盲區
 3. 長期追蹤 LLM 決策分布，驗證隨機化的效果
 4. 設定 AB test 自動報告機制，達到樣本量後自動產生比較報告
