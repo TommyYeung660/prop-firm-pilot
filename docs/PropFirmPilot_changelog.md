@@ -65,6 +65,38 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - prop-firm-pilot: `src/config.py`, `src/optimize/thresholds.py`, `src/scheduler/scheduler.py`, `src/decision/tactical_validator.py`, `tests/test_config.py`, `tests/test_scheduler.py`, `tests/test_thresholds.py`
 - TradingAgents: `tradingagents/graph/trading_graph.py`, `tradingagents/agents/traders/trader.py`
 
+## [1.3.7] — 2026-03-04
+
+**Tactical Execution Module — Shadow Mode Entry Validation & Decision Caching**
+
+### Added
+- **TacticalValidator** module (`src/decision/tactical_validator.py`): low-timeframe entry validation with hard gates (spread, ATR regime) and soft gates (momentum, volatility rank, session quality)
+  - 5 technical indicator functions: SMA, EMA, RSI, ATR, Bollinger Bands
+  - Configurable gate weights and thresholds via `TacticalConfig`
+  - Shadow mode: logs gate results without blocking trades (preparation for future enforcement)
+- **StrategicDecisionCache** (`src/scheduler/decision_cache.py`): TTL-based LLM decision deduplication to prevent redundant LLM calls for the same symbol within a configurable window
+- **`tactical_pending` intent status**: new state in DecisionStore for intents awaiting tactical validation (between `claimed` and `ready_for_exec`)
+- **Consolidated changelog** (`docs/PropFirmPilot_changelog.md`): added v1.0.0-v1.3.6 history
+- **v1.3.7 roadmap** (`docs/PropFirmPilot_v1.3.5_road_map.md`): tactical execution module design and implementation plan
+
+### Changed
+- Scheduler pipeline extended: `claimed` -> `tactical_pending` -> `ready_for_exec` (new intermediate state)
+- `config/e8_one_5k_challenge.yaml`: added tactical execution configuration block (gate weights, thresholds, shadow mode flag)
+- `src/config.py`: added `TacticalConfig` Pydantic model with validation
+
+### Tested
+- 16 files changed, +2,473/-10 lines
+- New test files: `test_tactical_validator.py` (286 lines), `test_decision_cache.py` (83 lines), `test_tactical_integration.py`
+- Updated: `test_config.py`, `test_decision_store.py`, `test_scheduler.py`, `test_schemas.py`
+
+### Files
+- `src/decision/tactical_validator.py` (NEW), `src/scheduler/decision_cache.py` (NEW)
+- `src/config.py`, `src/decision/schemas.py`, `src/decision_store/sqlite_store.py`, `src/scheduler/scheduler.py`
+- `config/e8_one_5k_challenge.yaml`
+- `docs/PropFirmPilot_changelog.md`, `docs/PropFirmPilot_v1.3.5_road_map.md`
+- Tests: `test_tactical_validator.py`, `test_decision_cache.py`, `test_tactical_integration.py`, `test_config.py`, `test_decision_store.py`, `test_scheduler.py`, `test_schemas.py`
+
+
 ## [1.3.6] — 2026-03-04
 
 **Quick Config Tuning — Faster Volatility Response & LLM Pickup**
