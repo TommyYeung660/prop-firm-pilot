@@ -134,3 +134,26 @@ def test_upsert_intraday_empty_df(tmp_path):
     count = store.upsert_intraday("EURUSD", pd.DataFrame(), interval="4h")
     assert count == 0
     store.close()
+
+
+
+def test_upsert_no_transaction_nesting_error(tmp_path):
+    """upsert should not fail with cannot start a transaction error."""
+    store = FxDuckDbStore(str(tmp_path / "test.duckdb"))
+    df = pd.DataFrame({
+        "date": [pd.Timestamp("2026-03-01")],
+        "open": [1.08],
+        "high": [1.09],
+        "low": [1.07],
+        "close": [1.085],
+        "volume": [0],
+    })
+
+    # First upsert should work
+    count = store.upsert("EURUSD", df, provider="test")
+    assert count == 1
+
+    # Second upsert (same data) should also work without transaction error
+    count = store.upsert("EURUSD", df, provider="test")
+    assert count == 1
+    store.close()

@@ -118,7 +118,11 @@ class FxDuckDbStore:
         df = pd.DataFrame(df[cols])
 
         # Upsert using INSERT OR REPLACE
-        self._conn.execute("BEGIN TRANSACTION")
+        # v1.3.9: Guard against transaction nesting — DuckDB may auto-start transactions
+        try:
+            self._conn.execute("BEGIN TRANSACTION")
+        except duckdb.TransactionException:
+            pass  # Already in a transaction — proceed with existing one
         try:
             # Delete existing rows for this symbol+date range
             min_date = df["date"].min()
@@ -239,7 +243,11 @@ class FxDuckDbStore:
         ]
         df = pd.DataFrame(df[cols])
 
-        self._conn.execute("BEGIN TRANSACTION")
+        # v1.3.9: Guard against transaction nesting — DuckDB may auto-start transactions
+        try:
+            self._conn.execute("BEGIN TRANSACTION")
+        except duckdb.TransactionException:
+            pass  # Already in a transaction — proceed with existing one
         try:
             min_dt = df["datetime"].min()
             max_dt = df["datetime"].max()
