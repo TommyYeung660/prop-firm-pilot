@@ -3242,7 +3242,109 @@ async def test_fetch_tactical_data_no_fallback_on_eodhd_failure(
 
     data = await sched._fetch_tactical_data("EURUSD")
 
-    # Verify: latest_bar_time must be None (no fallback to now())
+    # Verify: latest_bar_time must be None — no EODHD data AND mock_matchtrader
+    # fixture returns a dict without timestampMs, so quote timestamp is also 0.
+    assert data.latest_bar_time is None, (
+        f"Expected latest_bar_time=None after EODHD failure, got {data.latest_bar_time}"
+    )
+
+
+async def test_fetch_tactical_data_uses_quote_timestamp(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """v1.3.9-fix: data_freshness gate should use MatchTrader quote timestamp.
+
+    EODHD intraday bars can lag 10+ hours during DST transitions.
+    The quote from MatchTrader is real-time (<1 min delay) and provides
+    a reliable timestamp for the data_freshness hard gate.
+    """
+    import time
+    from datetime import datetime, timezone
+
+    import pandas as pd
+
+    from src.decision.tactical_validator import TacticalData
+
+    # Set up quote with a recent timestampMs (30 seconds ago)
+    now_ms = int(time.time() * 1000)
+    quote_ts_ms = now_ms - 30_000  # 30 seconds ago
+    mock_matchtrader.get_quote.return_value = {
+        "ask": 1.0850,
+        "bid": 1.0848,
+        "timestampMs": quote_ts_ms,
+    }
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    # Inject a mock EODHD provider that returns EMPTY data (simulating DST lag)
+    mock_eodhd = AsyncMock()
+    empty_df = pd.DataFrame(
+        columns=["datetime", "open", "high", "low", "close", "volume"]
+    )
+    mock_eodhd.fetch_bars = AsyncMock(return_value=empty_df)
+    sched._eodhd = mock_eodhd
+
+    data = await sched._fetch_tactical_data("EURUSD")
+
+    # latest_bar_time should come from MatchTrader quote, NOT from EODHD bars
+    assert data.latest_bar_time is not None, (
+        "Expected latest_bar_time from MatchTrader quote, got None"
+    )
+    # Quote was 30s ago — age should be ~30s, well under data_max_age_seconds (600)
+    age = (datetime.now(timezone.utc) - data.latest_bar_time).total_seconds()
+    assert age < 120, f"Quote age {age:.0f}s too old — expected ~30s"
+    assert age >= 25, f"Quote age {age:.0f}s too fresh — expected ~30s"
+
+
+async def test_fetch_tactical_data_no_quote_timestamp_falls_through(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """When MatchTrader quote has no timestampMs AND EODHD fails, latest_bar_time stays None.
+
+    This ensures the data_freshness gate correctly rejects when there is no
+    reliable timestamp source at all.
+    """
+    from src.decision.tactical_validator import TacticalData
+
+    # Quote without timestampMs (older mock format)
+    mock_matchtrader.get_quote.return_value = {"ask": 1.0850, "bid": 1.0848}
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    # EODHD also fails
+    mock_eodhd = AsyncMock()
+    mock_eodhd.fetch_bars = AsyncMock(side_effect=Exception("EODHD down"))
+    sched._eodhd = mock_eodhd
+
+    data = await sched._fetch_tactical_data("EURUSD")
+
+    assert data.latest_bar_time is None, (
+        f"Expected None when no timestamp source available, got {data.latest_bar_time}"
+    )
     assert data.latest_bar_time is None, (
         f"Expected latest_bar_time=None after EODHD failure, got {data.latest_bar_time}"
     )

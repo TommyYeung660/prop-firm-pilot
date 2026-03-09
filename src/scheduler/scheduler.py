@@ -807,10 +807,25 @@ class Scheduler:
                 if isinstance(quote, dict):
                     ask = quote.get("ask", 0)
                     bid = quote.get("bid", 0)
+                    ts_ms = quote.get("timestampMs", 0)
                 else:
                     ask = getattr(quote, "ask", 0)
                     bid = getattr(quote, "bid", 0)
+                    ts_ms = getattr(quote, "timestamp_ms", 0)
                 data.current_spread = abs(ask - bid)
+                # v1.3.9-fix: Use quote timestamp for data_freshness gate instead
+                # of EODHD bar time.  EODHD intraday bars can lag 10+ hours during
+                # DST transitions; MatchTrader quotes are real-time (<1 min delay).
+                if ts_ms:
+                    data.latest_bar_time = datetime.fromtimestamp(
+                        ts_ms / 1000, tz=timezone.utc
+                    )
+                    logger.debug(
+                        "Tactical: quote timestamp for {} = {} (age {:.0f}s)",
+                        symbol,
+                        data.latest_bar_time,
+                        (datetime.now(timezone.utc) - data.latest_bar_time).total_seconds(),
+                    )
                 # Use instrument config for typical spread
                 instrument = self._config.instruments.get(symbol)
                 if instrument:
@@ -839,10 +854,9 @@ class Scheduler:
                     )
                 if not bars_5min.empty:
                     data.bars_5min = bars_5min
-                    # Update latest_bar_time from actual 5min data
-                    max_ts = bars_5min["datetime"].max()
-                    if hasattr(max_ts, "to_pydatetime"):
-                        data.latest_bar_time = max_ts.to_pydatetime()
+                    # Note: latest_bar_time is now set from MatchTrader quote above.
+                    # EODHD bar timestamps are NOT used for data_freshness due to
+                    # potential multi-hour delay during DST transitions.
                     logger.debug(
                         "Tactical: fetched {} 5min bars for {}",
                         len(bars_5min), symbol,
