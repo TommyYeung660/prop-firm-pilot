@@ -10,6 +10,61 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.9] — 2026-03-09
+**v1.3.7 Production Bugfixes (Part 2) — Notification Data, AB Testing, Race Conditions, DuckDB**
+
+### Fixed
+- **P2 #4/#14**: TP/SL notifications showed "0.00 lots" — fall back to `execution_meta` JSON for volume and prices
+- **P2 #10**: Scanner Score was identical all day — skip intraday rescans when `scanner_timeframe == "1d"` (daily model by design)
+- **P2 #9**: HOLD decision but position opened — cancel stale `ready_for_exec` intents when HOLD is decided
+- **P2 #11**: AB Test counts/pnl empty `{}` — wired `choose_model()` into `agent_bridge`, record stats on position close, fixed counts reset bug in optimization engine
+- **P2 #2 (remaining)**: Spread gate always failed — added per-instrument `avg_spread_pips` config and allow spread gate pass-through when data is missing
+
+### Added
+- `tests/test_ab_routing.py` to cover AB routing behavior
+
+### Changed
+- DuckDB transaction handling now guards against nested `BEGIN TRANSACTION` calls
+- Breakeven threshold lowered from 0.5 to 0.3 in config
+
+### Tested
+- 879 tests passed; +829/-35 lines changed across 16 files
+
+### Files
+- `src/data/fx_duckdb_store.py`, `src/decision/agent_bridge.py`, `src/decision/tactical_validator.py`
+- `src/decision_store/sqlite_store.py`, `src/execution/engine.py`, `src/main.py`
+- `src/optimize/optimization_engine.py`, `src/scheduler/scheduler.py`
+- `config/e8_one_5k_challenge.yaml`
+- `tests/test_ab_routing.py` (NEW), `tests/test_config.py`, `tests/test_decision_store.py`
+- `tests/test_fx_duckdb_store.py`, `tests/test_scheduler.py`, `tests/test_scheduler_multi_timeframe.py`
+- `tests/test_tactical_validator.py`
+
+## [1.3.8] — 2026-03-09
+**v1.3.7 Production Bugfixes — Cross-Contamination, LLM Bias, Over-Filtering, Infinite Loops**
+
+### Fixed
+- **P1 #1/#6**: EURUSD 98.7% cancellation rate — added a cold-start threshold tier (0.55 blended) in `thresholds.py`
+- **P1 #3**: 160 rescans in 5 days — raised volatility threshold to 0.5%, added a 30-minute cooldown, removed auto-rescan on position close
+- **P1 #7**: Best Day infinite retry loop — added `best_day_paused_today` daily stop flag in scheduler
+- **P1 #2 (partial)**: Tactical Gate always produced identical output — gate now pass-through when bar data is unavailable
+- **P0 #15**: EURUSD evaluation used AUDUSD data — fixed `self.ticker` race condition in `trading_graph.py` by passing ticker as a parameter
+- **P1 #8**: 95% SELL bias — randomized BUY/HOLD/SELL option order in the signal extraction prompt
+- **P1 #12**: LLM refused trading instructions — added explicit authorization and simulation context to trader agent prompt
+
+### Added
+- None.
+
+### Changed
+- None.
+
+### Tested
+- 879 tests passed (prop-firm-pilot)
+- TradingAgents tests passed
+
+### Files
+- prop-firm-pilot: `src/config.py`, `src/optimize/thresholds.py`, `src/scheduler/scheduler.py`, `src/decision/tactical_validator.py`, `tests/test_config.py`, `tests/test_scheduler.py`, `tests/test_thresholds.py`
+- TradingAgents: `tradingagents/graph/trading_graph.py`, `tradingagents/agents/traders/trader.py`
+
 ## [1.3.6] — 2026-03-04
 
 **Quick Config Tuning — Faster Volatility Response & LLM Pickup**
