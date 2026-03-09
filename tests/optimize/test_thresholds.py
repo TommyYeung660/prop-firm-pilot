@@ -8,7 +8,7 @@ from src.optimize.thresholds import compute_thresholds
 def test_stepwise_thresholds_low_winrate() -> None:
     result = compute_thresholds(global_win_rate=0.40, symbol_win_rates={})
     assert result["global"].min_confidence == "high"
-    assert result["global"].min_blended_confidence == 0.65
+    assert result["global"].min_blended_confidence == 0.60
 
 
 def test_stepwise_thresholds_high_winrate() -> None:

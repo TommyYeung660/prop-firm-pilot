@@ -23,7 +23,7 @@ def test_e8_one_5k_session_aware_config():
     assert config.scheduler.session_aware_enabled is True
     assert config.scheduler.active_session_interval_seconds == 3600
     assert config.scheduler.volatility_trigger_enabled is True
-    assert config.scheduler.volatility_threshold_pct == 0.2
+    assert config.scheduler.volatility_threshold_pct == 0.5
 
 
 def test_default_config_includes_macro_analyst():
@@ -53,9 +53,9 @@ def test_e8_one_5k_v136_tuned_params():
 
     config = load_config("config/e8_one_5k_challenge.yaml")
     assert config.scheduler.llm_poll_interval_seconds == 10
-    assert config.scheduler.volatility_poll_interval_seconds == 15
-    assert config.scheduler.volatility_cooldown_seconds == 300
-    assert config.scheduler.volatility_threshold_pct == 0.2
+    assert config.scheduler.volatility_poll_interval_seconds == 30
+    assert config.scheduler.volatility_cooldown_seconds == 1800
+    assert config.scheduler.volatility_threshold_pct == 0.5
 
 
 class TestTacticalConfig:
