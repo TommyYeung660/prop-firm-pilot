@@ -2756,3 +2756,64 @@ class TestTacticalIntegration:
 
         updated = store.get_intent(intent.id)
         assert updated.status == "ready_for_exec"
+
+
+# ── Task 2: Intraday Rescan Skip for Daily Model (#10, P2) ──────────────
+
+
+async def test_intraday_rescan_skipped_for_daily_model(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Intraday rescan should be skipped when scanner_timeframe is '1d'."""
+    config.scheduler.scanner_timeframe = "1d"
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    signals = [_make_mock_signal("EURUSD"), _make_mock_signal("GBPUSD")]
+    mock_scanner.run_pipeline.reset_mock()
+
+    await sched._run_intraday_scan(signals, "2026-03-09")
+
+    # Scanner should NOT have been called for intraday rescan
+    mock_scanner.run_pipeline.assert_not_called()
+
+
+async def test_intraday_rescan_runs_for_non_daily_model(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Intraday rescan should proceed when scanner_timeframe is not '1d'."""
+    config.scheduler.scanner_timeframe = "4h"
+    config.scheduler.entry_timeframe = "1h"
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    signals = [_make_mock_signal("EURUSD")]
+    mock_scanner.run_pipeline.reset_mock()
+    mock_scanner.run_pipeline.return_value = []
+
+    await sched._run_intraday_scan(signals, "2026-03-09")
+
+    # Scanner SHOULD have been called for non-daily model
+    mock_scanner.run_pipeline.assert_called_once()

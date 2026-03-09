@@ -1493,6 +1493,15 @@ class Scheduler:
         This provides entry timing — the daily scan sets direction,
         the intraday scan confirms the entry point is favorable.
         """
+        # v1.3.9: Skip intraday rescan for daily models — scores won't change
+        # until candle close, so rescanning is wasted compute + confusing logs
+        if self._config.scheduler.scanner_timeframe == "1d":
+            logger.info(
+                "Skipping intraday rescan — daily model scores unchanged until candle close"
+                " ({} symbols)",
+                len(daily_signals),
+            )
+            return
         entry_tf = self._config.scheduler.entry_timeframe
         symbols = [s.instrument for s in daily_signals]
         logger.info(
