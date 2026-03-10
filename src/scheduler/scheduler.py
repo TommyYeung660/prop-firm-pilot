@@ -23,7 +23,7 @@ import asyncio
 import json
 import os
 from collections.abc import Coroutine
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from numbers import Real
 from typing import Any
 
@@ -33,6 +33,7 @@ from loguru import logger
 from src.compliance.best_day_tracker import BestDayTracker
 from src.compliance.hwm_tracker import HighWaterMarkTracker
 from src.config import AppConfig
+from src.data.fx_data_fetcher import EodhdProvider
 from src.decision.agent_bridge import AgentBridge
 from src.decision.decision_formatter import format_decision
 from src.decision.schemas import TradeIntent
@@ -52,7 +53,6 @@ from src.scheduler.decision_cache import StrategicDecisionCache
 from src.scheduler.market_hours import MarketHoursChecker
 from src.scheduler.session_cadence import SessionCadence
 from src.scheduler.volatility_monitor import VolatilityMonitor
-from src.data.fx_data_fetcher import EodhdProvider
 from src.signal.scanner_bridge import ScannerBridge
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -676,16 +676,12 @@ class Scheduler:
                         )
 
                     # v1.3.9: Enforce tactical gate when shadow_mode is off
-                    if (
-                        not self._config.tactical.shadow_mode
-                        and tactical_result.action != "PASS"
-                    ):
+                    if not self._config.tactical.shadow_mode and tactical_result.action != "PASS":
                         await self._cancel_intent_safe(
                             worker_id=worker_id,
                             intent_id=intent.id,
                             reason=(
-                                f"Tactical gate {tactical_result.action}: "
-                                f"{tactical_result.detail}"
+                                f"Tactical gate {tactical_result.action}: {tactical_result.detail}"
                             ),
                             context="tactical_gate_block",
                         )
@@ -787,8 +783,8 @@ class Scheduler:
                 e,
             )
             result = TacticalResult(
-                action="PASS",
-                detail=f"Tactical validation error (pass-through): {e}",
+                action="WAIT",
+                detail=f"Tactical validation error (blocked, retry later): {e}",
             )
         return result
 
@@ -817,9 +813,7 @@ class Scheduler:
                 # of EODHD bar time.  EODHD intraday bars can lag 10+ hours during
                 # DST transitions; MatchTrader quotes are real-time (<1 min delay).
                 if ts_ms:
-                    data.latest_bar_time = datetime.fromtimestamp(
-                        ts_ms / 1000, tz=timezone.utc
-                    )
+                    data.latest_bar_time = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
                     logger.debug(
                         "Tactical: quote timestamp for {} = {} (age {:.0f}s)",
                         symbol,
@@ -848,9 +842,7 @@ class Scheduler:
                         self._eodhd.fetch_bars(
                             symbol, start_5min, end_date, client, interval="5min"
                         ),
-                        self._eodhd.fetch_bars(
-                            symbol, start_1h, end_date, client, interval="1h"
-                        ),
+                        self._eodhd.fetch_bars(symbol, start_1h, end_date, client, interval="1h"),
                     )
                 if not bars_5min.empty:
                     data.bars_5min = bars_5min
@@ -859,18 +851,18 @@ class Scheduler:
                     # potential multi-hour delay during DST transitions.
                     logger.debug(
                         "Tactical: fetched {} 5min bars for {}",
-                        len(bars_5min), symbol,
+                        len(bars_5min),
+                        symbol,
                     )
                 if not bars_1h.empty:
                     data.bars_1h = bars_1h
                     logger.debug(
                         "Tactical: fetched {} 1h bars for {}",
-                        len(bars_1h), symbol,
+                        len(bars_1h),
+                        symbol,
                     )
             except Exception as e:
-                logger.warning(
-                    "Failed to fetch EODHD intraday bars for {}: {}", symbol, e
-                )
+                logger.warning("Failed to fetch EODHD intraday bars for {}: {}", symbol, e)
 
         # v1.3.9-fix: Do NOT fallback to now() — let data_freshness gate fail
         # when no actual bar data was retrieved (EODHD fetch failure or empty response).
@@ -1246,7 +1238,7 @@ class Scheduler:
                     decision = await asyncio.to_thread(self._store.get_decision, intent.id)
                 if decision and decision.execution_meta:
                     meta = json.loads(decision.execution_meta)
-                    sl_price = meta.get("sl_price", 0.0)
+                    sl_price = meta.get("breakeven_sl") or meta.get("sl_price", 0.0)
                     tp_price = meta.get("tp_price", 0.0)
                     pip_size = self._get_pip_size(symbol)
                     tolerance = pip_size * 3  # 3-pip tolerance for slippage
@@ -1529,17 +1521,54 @@ class Scheduler:
                         tp=pos.tp_price,
                     )
                     if result.success:
-                        self._breakeven_applied.add(pos_id)
-                        logger.info(
-                            "Breakeven stop applied for position {} ({}) - SL moved to entry price",
-                            pos_id,
-                            pos.symbol,
+                        # Read-back verification: confirm SL was actually updated
+                        await asyncio.sleep(0.5)  # Brief delay for propagation
+                        verified = await self._matchtrader.verify_sl_tp(
+                            position_id=pos_id, expected_sl=pos.open_price
                         )
-                        await self._send_alert(
-                            f"🛡️ <b>Breakeven Stop Applied</b>\n"
-                            f"• Position: {pos_id} ({pos.symbol})\n"
-                            f"• SL moved to entry price: {pos.open_price}"
-                        )
+                        if not verified:
+                            # Retry once: re-send modify + verify
+                            logger.warning(
+                                "Breakeven SL verify failed for {}, retrying modify...",
+                                pos_id,
+                            )
+                            retry_result = await self._matchtrader.modify_position(
+                                position_id=pos_id,
+                                symbol=pos.symbol,
+                                side=pos.side,
+                                volume=pos.volume,
+                                sl=pos.open_price,
+                                tp=pos.tp_price,
+                            )
+                            if retry_result.success:
+                                await asyncio.sleep(0.5)
+                                verified = await self._matchtrader.verify_sl_tp(
+                                    position_id=pos_id, expected_sl=pos.open_price
+                                )
+                        if verified:
+                            self._breakeven_applied.add(pos_id)
+                            # Store the breakeven SL in execution_meta for exit_reason
+                            self._update_breakeven_sl_in_meta(intent, pos.open_price)
+                            logger.info(
+                                "Breakeven stop applied and verified for {} ({}) — SL to entry",
+                                pos_id,
+                                pos.symbol,
+                            )
+                            await self._send_alert(
+                                f"\U0001f6e1\ufe0f <b>Breakeven Stop Applied</b>\n"
+                                f"\u2022 Position: {pos_id} ({pos.symbol})\n"
+                                f"\u2022 SL moved to entry price: {pos.open_price}"
+                            )
+                        else:
+                            logger.error(
+                                "Breakeven SL UNVERIFIED for {} after retry!",
+                                pos_id,
+                            )
+                            await self._send_alert(
+                                f"\u26a0\ufe0f <b>Breakeven SL UNVERIFIED</b>\n"
+                                f"\u2022 Position: {pos_id} ({pos.symbol})\n"
+                                f"\u2022 Modify reported success but read-back failed"
+                            )
                     else:
                         logger.warning(
                             "Failed to apply breakeven stop for position {}: {}",
@@ -1552,6 +1581,23 @@ class Scheduler:
                     str(pos.position_id),
                     e,
                 )
+
+    def _update_breakeven_sl_in_meta(self, intent: TradeIntent, breakeven_sl: float) -> None:
+        """Persist breakeven SL into execution_meta so exit_reason can reference it."""
+        try:
+            decision = self._store.get_decision(intent.id)
+            if decision and decision.execution_meta:
+                meta = json.loads(decision.execution_meta)
+            else:
+                meta = {}
+            meta["breakeven_sl"] = breakeven_sl
+            self._store.update_execution_meta(intent.id, json.dumps(meta))
+        except Exception as e:
+            logger.warning(
+                "Failed to update breakeven_sl in meta for {}: {}",
+                intent.id,
+                e,
+            )
 
     async def _reevaluate_open_positions(
         self, open_positions: list[Any], opened_intents: list[TradeIntent]

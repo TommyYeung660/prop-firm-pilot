@@ -135,7 +135,6 @@ class TestVolatilityMonitor:
         triggered, _, _ = monitor.check_triggers(now)
         assert not triggered  # Need at least 2 quotes
 
-
     def test_per_symbol_cooldown_independent(self):
         """Different symbols should have independent cooldowns (after global interval)."""
         config = SchedulerConfig(

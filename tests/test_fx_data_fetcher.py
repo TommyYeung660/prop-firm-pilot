@@ -6,7 +6,12 @@ import httpx
 import pytest
 import respx
 
-from src.data.fx_data_fetcher import EodhdProvider, ITickProvider, TraderMadeProvider, _to_eodhd_symbol
+from src.data.fx_data_fetcher import (
+    EodhdProvider,
+    ITickProvider,
+    TraderMadeProvider,
+    _to_eodhd_symbol,
+)
 
 # ── TraderMade fetch_bars ────────────────────────────────────────────────────
 
@@ -360,9 +365,7 @@ async def test_eodhd_fetch_daily_bars_raises():
     provider = EodhdProvider(api_key="test_key")
     async with httpx.AsyncClient() as client:
         with pytest.raises(ValueError, match="intraday-only"):
-            await provider.fetch_daily_bars(
-                "EURUSD", date(2026, 3, 1), date(2026, 3, 1), client
-            )
+            await provider.fetch_daily_bars("EURUSD", date(2026, 3, 1), date(2026, 3, 1), client)
 
 
 @respx.mock

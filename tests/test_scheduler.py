@@ -2986,8 +2986,7 @@ async def test_handle_position_closed_uses_execution_meta_fallback(
     claimed = store.claim_next_pending("llm-0")
     assert claimed is not None
     store.update_intent_decision(
-        claimed.id, "BUY", sl_pips=50.0, tp_pips=100.0,
-        risk_report="test", state_json="{}"
+        claimed.id, "BUY", sl_pips=50.0, tp_pips=100.0, risk_report="test", state_json="{}"
     )
     store.mark_ready_for_exec(claimed.id)
     store.mark_executing(claimed.id)
@@ -3008,7 +3007,10 @@ async def test_handle_position_closed_uses_execution_meta_fallback(
     # Broker API returns NO closed positions (simulates 0 values)
     mock_matchtrader.get_closed_positions = AsyncMock(return_value=[])
     mock_matchtrader.get_balance.return_value = MagicMock(
-        balance=50000.0, equity=50000.0, margin=0.0, free_margin=50000.0,
+        balance=50000.0,
+        equity=50000.0,
+        margin=0.0,
+        free_margin=50000.0,
     )
 
     # Reload intent from store (now in 'opened' state with position_id)
@@ -3060,8 +3062,7 @@ async def test_handle_position_closed_exit_reason_from_close_price(
     claimed = store.claim_next_pending("llm-0")
     assert claimed is not None
     store.update_intent_decision(
-        claimed.id, "BUY", sl_pips=50.0, tp_pips=100.0,
-        risk_report="test", state_json="{}"
+        claimed.id, "BUY", sl_pips=50.0, tp_pips=100.0, risk_report="test", state_json="{}"
     )
     store.mark_ready_for_exec(claimed.id)
     store.mark_executing(claimed.id)
@@ -3086,7 +3087,10 @@ async def test_handle_position_closed_exit_reason_from_close_price(
     )
     mock_matchtrader.get_closed_positions = AsyncMock(return_value=[closed_pos])
     mock_matchtrader.get_balance.return_value = MagicMock(
-        balance=50050.0, equity=50050.0, margin=0.0, free_margin=50050.0,
+        balance=50050.0,
+        equity=50050.0,
+        margin=0.0,
+        free_margin=50050.0,
     )
 
     opened_intent = store.get_intent(claimed.id)
@@ -3107,7 +3111,6 @@ async def test_handle_position_closed_exit_reason_from_close_price(
 # ── v1.3.9: Tactical Gate Enforcement Tests ──────────────────────────────
 
 
-
 async def test_tactical_gate_blocks_intent_when_shadow_mode_off(
     config: AppConfig,
     store: DecisionStore,
@@ -3120,7 +3123,7 @@ async def test_tactical_gate_blocks_intent_when_shadow_mode_off(
 
     Previously the tactical result was only logged/alerted but never used to block.
     """
-    from src.decision.tactical_validator import TacticalResult, TacticalValidator
+    from src.decision.tactical_validator import TacticalResult
 
     # Enable tactical gate with shadow_mode=false
     config.tactical.enabled = True
@@ -3173,7 +3176,7 @@ async def test_tactical_gate_passes_in_shadow_mode(
 
     This verifies the shadow mode behavior was preserved when adding enforcement.
     """
-    from src.decision.tactical_validator import TacticalResult, TacticalValidator
+    from src.decision.tactical_validator import TacticalResult
 
     # Enable tactical gate with shadow_mode=true (default, shadow only)
     config.tactical.enabled = True
@@ -3224,7 +3227,6 @@ async def test_fetch_tactical_data_no_fallback_on_eodhd_failure(
     Previously, a `datetime.now()` fallback was set, masking EODHD failures
     and causing the data_freshness hard gate to always pass.
     """
-    from src.decision.tactical_validator import TacticalData
 
     sched = Scheduler(
         config=config,
@@ -3268,8 +3270,6 @@ async def test_fetch_tactical_data_uses_quote_timestamp(
 
     import pandas as pd
 
-    from src.decision.tactical_validator import TacticalData
-
     # Set up quote with a recent timestampMs (30 seconds ago)
     now_ms = int(time.time() * 1000)
     quote_ts_ms = now_ms - 30_000  # 30 seconds ago
@@ -3290,9 +3290,7 @@ async def test_fetch_tactical_data_uses_quote_timestamp(
 
     # Inject a mock EODHD provider that returns EMPTY data (simulating DST lag)
     mock_eodhd = AsyncMock()
-    empty_df = pd.DataFrame(
-        columns=["datetime", "open", "high", "low", "close", "volume"]
-    )
+    empty_df = pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
     mock_eodhd.fetch_bars = AsyncMock(return_value=empty_df)
     sched._eodhd = mock_eodhd
 
@@ -3321,7 +3319,6 @@ async def test_fetch_tactical_data_no_quote_timestamp_falls_through(
     This ensures the data_freshness gate correctly rejects when there is no
     reliable timestamp source at all.
     """
-    from src.decision.tactical_validator import TacticalData
 
     # Quote without timestampMs (older mock format)
     mock_matchtrader.get_quote.return_value = {"ask": 1.0850, "bid": 1.0848}

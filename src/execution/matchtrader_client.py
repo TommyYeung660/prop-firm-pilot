@@ -815,6 +815,69 @@ class MatchTraderClient:
                 raw_response={"error": str(e)},
             )
 
+    # ── SL/TP Read-Back Verification ────────────────────────────────────
+
+    async def verify_sl_tp(
+        self,
+        position_id: str,
+        expected_sl: float | None = None,
+        expected_tp: float | None = None,
+        tolerance: float = 1e-6,
+    ) -> bool:
+        """Read back open position and verify SL/TP match expected values.
+
+        Used after modify_position() to confirm the broker actually applied
+        the SL/TP change. Returns False if position not found or values mismatch.
+
+        Note: Calls get_open_positions (1 API call). Acceptable for breakeven
+        verification since it triggers at most once per position lifetime.
+
+        Args:
+            position_id: The position to verify.
+            expected_sl: Expected stop loss price (None = don't check).
+            expected_tp: Expected take profit price (None = don't check).
+            tolerance: Price comparison tolerance (broker may round).
+        """
+        try:
+            positions = await self.get_open_positions()
+            for pos in positions:
+                if str(pos.position_id) == position_id:
+                    if expected_sl is not None:
+                        actual_sl = pos.sl_price or 0.0
+                        if abs(actual_sl - expected_sl) > tolerance:
+                            logger.warning(
+                                "MatchTrader: verify_sl_tp MISMATCH for {} — "
+                                "expected SL={}, actual SL={}",
+                                position_id,
+                                expected_sl,
+                                actual_sl,
+                            )
+                            return False
+                    if expected_tp is not None:
+                        actual_tp = pos.tp_price or 0.0
+                        if abs(actual_tp - expected_tp) > tolerance:
+                            logger.warning(
+                                "MatchTrader: verify_sl_tp MISMATCH for {} — "
+                                "expected TP={}, actual TP={}",
+                                position_id,
+                                expected_tp,
+                                actual_tp,
+                            )
+                            return False
+                    return True
+            logger.warning(
+                "MatchTrader: verify_sl_tp — position {} not found (may be closed)",
+                position_id,
+            )
+            return False
+        except Exception as e:
+            logger.error(
+                "MatchTrader: verify_sl_tp error for {}: {}",
+                position_id,
+                e,
+            )
+            return False
+
     # HTTP method type alias for curl_cffi compatibility
     HttpMethod = Literal["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "TRACE"]
 

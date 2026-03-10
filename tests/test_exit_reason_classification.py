@@ -12,7 +12,6 @@ misclassified as "manual_close" because broker API didn't return them, but
 _last_known_profit had the correct PnL.
 """
 
-import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 

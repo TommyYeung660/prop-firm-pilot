@@ -98,6 +98,7 @@ def _get_primary_vendor() -> str:
         return "eodhd"
     return "alpha_vantage"
 
+
 def build_agent_config(
     output_language: str = "繁體中文",
 ) -> dict[str, Any]:

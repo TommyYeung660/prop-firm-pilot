@@ -191,6 +191,7 @@ class AgentBridge:
         self._graph_cls: Any = None  # Stored for AB test graph rebuild
         self._default_config: dict[str, Any] = {}
         self._merged_config: dict[str, Any] = {}
+        self._fallback_model: str = "volcengine/kimi-k2.5"
 
     def set_ab_state(self, state: ABTestState | None) -> None:
         """Set AB test state for model routing."""
@@ -314,8 +315,7 @@ class AgentBridge:
             )
         except Exception as e:
             logger.error(
-                "AB: failed to rebuild graph for model '{}': {}. "
-                "Keeping previous graph.",
+                "AB: failed to rebuild graph for model '{}': {}. Keeping previous graph.",
                 model_id,
                 e,
             )
@@ -410,17 +410,88 @@ class AgentBridge:
             )
             return result
 
-        except Exception as e:
+        except Exception as primary_error:
             import traceback
 
             logger.error(
-                "AgentBridge: propagate() failed for {}: {}\n{}", symbol, e, traceback.format_exc()
+                "AgentBridge: propagate() failed for {}: {}\n{}",
+                symbol,
+                primary_error,
+                traceback.format_exc(),
             )
+
+            # ── Fallback: retry with fallback model ──────────────────────
+            if (
+                not self._using_mock
+                and self._graph_cls is not None
+                and self._fallback_model
+                and self._fallback_model != self._current_model_id
+            ):
+                logger.info(
+                    "AgentBridge: retrying {} with fallback model '{}'",
+                    symbol,
+                    self._fallback_model,
+                )
+                try:
+                    self._apply_ab_model(self._fallback_model)
+                    final_state, decision = self._graph.propagate(
+                        company_name=symbol,
+                        trade_date=normalized_trade_date,
+                        qlib_data=qlib_data,
+                    )
+                    risk_report = ""
+                    if isinstance(final_state, dict):
+                        if (
+                            "trader_investment_plan" in final_state
+                            and final_state["trader_investment_plan"]
+                        ):
+                            risk_report = str(final_state["trader_investment_plan"])
+                        elif (
+                            "risk_debate_state" in final_state
+                            and "judge_decision" in final_state["risk_debate_state"]
+                        ):
+                            risk_report = str(final_state["risk_debate_state"]["judge_decision"])
+                        elif (
+                            "investment_debate_state" in final_state
+                            and "judge_decision" in final_state["investment_debate_state"]
+                        ):
+                            risk_report = str(
+                                final_state["investment_debate_state"]["judge_decision"]
+                            )
+                        else:
+                            risk_report = final_state.get("risk_report", "")
+
+                    validated = validate_decision(
+                        raw_decision=decision,
+                        risk_report=risk_report,
+                        symbol=symbol,
+                    )
+                    logger.info(
+                        "AgentBridge: fallback succeeded for {} → {} (model='{}')",
+                        symbol,
+                        validated,
+                        self._fallback_model,
+                    )
+                    return AgentDecision(
+                        symbol=symbol,
+                        decision=validated,
+                        final_state=final_state if isinstance(final_state, dict) else {},
+                        risk_report=risk_report,
+                        model_id=self._fallback_model,
+                    )
+                except Exception as fallback_error:
+                    logger.error(
+                        "AgentBridge: fallback model '{}' also failed for {}: {}",
+                        self._fallback_model,
+                        symbol,
+                        fallback_error,
+                    )
+
             return AgentDecision(
                 symbol=symbol,
                 decision="HOLD",
-                final_state={"error": str(e)},
-                risk_report=f"Error during agent decision: {e}",
+                final_state={"error": str(primary_error)},
+                risk_report=f"Error during agent decision: {primary_error}",
             )
 
     async def decide_async(
