@@ -1,9 +1,9 @@
-# PropFirmPilot v1.3.9 — v1.3.7 生產環境問題修復報告
+# PropFirmPilot v1.3.9 — v1.3.7 生產環境問題修復報告 + v1.3.9 生產強化
 
-> **報告日期**: 2026-03-09  
-> **版本**: v1.3.8 (P0/P1) + v1.3.9 (P2/P3)  
+> **報告日期**: 2026-03-09（初版）/ 2026-03-10（追加 Part F）  
+> **版本**: v1.3.8 (P0/P1) + v1.3.9 (P2/P3) + v1.3.9a (生產強化)  
 > **基準版本**: v1.3.7  
-> **聚焦範圍**: v1.3.7 五天生產運行 (Mar 4-9, 2026) 發現的 15 個問題全面修復，涵蓋 prop-firm-pilot 與 TradingAgents 兩個倉庫
+> **聚焦範圍**: v1.3.7 五天生產運行 (Mar 4-9, 2026) 發現的 15 個問題全面修復 + v1.3.9 首日生產 (Mar 10) 發現的 12 個問題強化修復，涵蓋 prop-firm-pilot 與 TradingAgents 兩個倉庫
 
 ---
 
@@ -50,20 +50,40 @@
 25. [LLM 模型升級](#25-llm-模型升級)
 26. [已知限制與未來工作](#26-已知限制與未來工作)
 
+### Part F — v1.3.9 生產強化 (Mar 10 Log Analysis)
+
+27. [v1.3.9 生產強化摘要](#27-v139-生產強化摘要)
+28. [P1.1 — Breakeven SL 修改無驗證](#28-p11--breakeven-sl-修改無驗證)
+29. [P1.2 — EODHD Null 欄位防禦](#29-p12--eodhd-null-欄位防禦)
+30. [P1.3 — LLM Fallback (kimi-k2.5)](#30-p13--llm-fallback-kimi-k25)
+31. [P1.4 — No Data = No Trade 防護](#31-p14--no-data--no-trade-防護)
+32. [P2.5 — 連續虧損熔斷器](#32-p25--連續虧損熔斷器)
+33. [P2.6 — 同向重複開倉限制](#33-p26--同向重複開倉限制)
+34. [P2.7 — Risk Meta 結構化解析](#34-p27--risk-meta-結構化解析)
+35. [P3.9 — Trade 回溯分析](#35-p39--trade-回溯分析)
+36. [P3.10 — Scanner 低信心冷卻](#36-p310--scanner-低信心冷卻)
+37. [P3.11 — 操作指標追蹤](#37-p311--操作指標追蹤)
+38. [P3.12 — Pre-existing Config 測試修復](#38-p312--pre-existing-config-測試修復)
+39. [修改檔案清單 (v1.3.9a)](#39-修改檔案清單-v139a)
+40. [Git Commit 記錄 (v1.3.9a)](#40-git-commit-記錄-v139a)
+41. [測試覆蓋 (v1.3.9a)](#41-測試覆蓋-v139a)
+
 ---
 
 ## 1. 版本摘要
 
 v1.3.7 於 2026 年 3 月 4 日部署至 E8 Markets prop firm 生產帳戶，運行約 5 天（Mar 4-9）。經過仔細評估生產日誌，共識別出 **15 個問題**，按嚴重度分為 P0（1 項）、P1（6 項）、P2（6 項）、P3（2 項）。
 
-本報告涵蓋兩個修復版本：
+本報告涵蓋三個修復波次：
 
 - **v1.3.8**（P0/P1 修復）：修復 7 個高優先級問題，包括 TradingAgents 跨品種數據污染（P0）、LLM SELL 偏差、LLM 拒絕交易、EURUSD 過度取消、過度 Rescan、Best Day 無限循環、Tactical Gate 固定輸出
 - **v1.3.9**（P2/P3 修復）：修復 8 個問題（含 Issue #2 的第二部分），包括 TP/SL 通知異常、Scanner Score 日內不更新、HOLD 後仍開倉、AB Test 數據收集、Spread Gate 失敗、DuckDB 事務嵌套、Breakeven 門檻過高
 
 - **v1.3.9 追加改動**：整合 EODHD Intraday API 填充戰術模塊的 5min/1h bar 數據（Issue #2 Part 1 完成）、實現 AB Test 真正的模型切換（Issue #11 完成）、升級 LLM 模型至 gpt-5.4 和 kimi-k2.5
 
-所有修復均已合併至 `main` 分支，**897 項測試全部通過**。
+- **v1.3.9a 生產強化**（Mar 10 Log Analysis）：v1.3.9 首日生產運行後，從 prod log 分析出 12 個新問題（P1×4、P2×3、P3×4），全部修復並新增 99 個測試。涵蓋 breakeven SL 驗證、EODHD null 防禦、LLM fallback、no-data guard、連續虧損熔斷、重複開倉限制、risk meta 解析、trade 回溯、scanner 冷卻、操作指標追蹤
+
+所有修復均已推送至 `fix/v1.3.9-p1-fixes` 分支，**996 項測試全部通過**（較前版 897 新增 99 項）。
 
 ---
 
@@ -75,13 +95,14 @@ v1.3.7 於 2026 年 3 月 4 日部署至 E8 Markets prop firm 生產帳戶，運
 | 修復版本 | v1.3.8 (P0/P1) + v1.3.9 (P2/P3) |
 | 報告日期 | 2026-03-09 |
 | 跨倉庫 | prop-firm-pilot + TradingAgents |
-| 測試總數 | 897 tests passed |
+| 測試總數 | 996 tests passed（v1.3.8/v1.3.9: 897, v1.3.9a: +99） |
 | v1.3.8 prop-firm-pilot 修改檔案 | 7 files |
 | v1.3.8 TradingAgents 修改檔案 | 2 files |
 | v1.3.9 prop-firm-pilot 修改檔案 | 25 files (+1,578/-59 lines) |
 | v1.3.9 TradingAgents 修改檔案 | 4 files (LLM upgrade) |
-| 生產運行時間 | ~5 天（Mar 4-9, 2026） |
-| 問題總數 | 15（P0:1, P1:6, P2:6, P3:2） |
+| v1.3.9a prop-firm-pilot 修改檔案 | 39 files (+4,705/-161 lines) |
+| 生產運行時間 | ~5 天（Mar 4-9, 2026）+ Mar 10 首日 |
+| 問題總數 | 27（原 15 + 新 12）（P0:1, P1:10, P2:9, P3:7） |
 
 ---
 
@@ -963,10 +984,12 @@ scheduler:
 
 | 指標 | 數值 |
 |---|---|
-| 測試總數 | 897 |
-| 通過 | 897 (100%) |
+| 測試總數 (v1.3.8/v1.3.9) | 897 |
+| 測試總數 (v1.3.9a 生產強化後) | **996** |
+| 新增測試 (v1.3.9a) | +99 |
+| 通過 | 996 (100%) |
 | 失敗 | 0 |
-| Ruff 警告 | 3（pre-existing，非本次修復引入） |
+| Ruff 警告 | 0（原 3 個 pre-existing 已修復） |
 
 ### v1.3.8 新增/修改測試
 
@@ -1079,6 +1102,7 @@ scheduler:
 3. **Scanner 1D 模型日內限制**：使用 daily 模型時日內 rescan 被跳過，意味著日內的劇烈波動不會被即時捕捉。4H 模型的研究和部署可解決此限制
 4. **AB Test 樣本量不足**：模型選擇決策需要足夠的樣本量（建議每組 >30 筆交易）。AB test 現已實現真正的模型切換（gpt-5.4 vs kimi-k2.5），需要持續收集數據直至達到統計顯著性
 5. **Breakeven 門檻需生產驗證**：0.3 (30%) 的新門檻需要在生產環境中驗證其對整體 P&L 的影響。過低的門檻可能導致過早 BE 而錯失更大利潤
+6. **kimi-k2.5 `max_completion_tokens` 超限** ❗（v1.3.9a 新發現）：當 LLM fallback 至 `volcengine/kimi-k2.5` 時，TradingAgents 預設 `max_completion_tokens=128000` 超過 kimi-k2.5 的 32768 上限，導致 API 拒絕。**根因**：`TradingAgents/tradingagents/default_config.py:101` 和 `trading_graph.py:137` 使用固定的 128000 上限，未根據模型調整。**暫時方案**：生產環境已改回 gpt-5.2 + glm-4.7。**建議修復**：在 `_apply_ab_model()` 中注入 per-model `llm_output_max_tokens`（如 kimi-k2.5 設為 32768）
 
 ### 未來工作
 
@@ -1087,3 +1111,471 @@ scheduler:
 3. 長期追蹤 LLM 決策分布，驗證隨機化的效果
 4. 設定 AB test 自動報告機制，達到樣本量後自動產生比較報告
 5. 建立自動化的生產環境健康度評分系統，取代人工日誌分析
+6. 修復 kimi-k2.5 `max_completion_tokens` 超限問題（在 TradingAgents 或 `_apply_ab_model()` 中實現 per-model token limit mapping）
+7. 將 `fix/v1.3.9-p1-fixes` 分支合併至 `main` 並發布 v1.3.9a 正式版本
+
+---
+
+## 27. v1.3.9 生產強化摘要
+
+### 背景
+
+v1.3.9 於 2026-03-10 首日部署至生產環境。透過分析 `prod_logs_20260310_v1.3.9/INDEX.md` 生產日誌，識別出 **12 個新問題**，分為 P1（4 項）、P2（3 項）、P3（4 項，含 1 項 pre-existing config test 修復）。全部在同日完成修復並推送至 `fix/v1.3.9-p1-fixes` 分支。
+
+### 問題清單與修復總覽
+
+| # | 優先級 | 問題描述 | 分支 | Commit | 狀態 |
+|---|---|---|---|---|---|
+| P1.1 | P1 | Breakeven SL 修改無驗證 | fix/v1.3.9-p1-fixes | `4b6d882` | ✅ 已修復 |
+| P1.2 | P1 | EODHD Null 欄位導致 pandas crash | fix/v1.3.9-p1-fixes | `4b6d882` | ✅ 已修復 |
+| P1.3 | P1 | LLM Primary 失敗無 Fallback | fix/v1.3.9-p1-fixes | `4b6d882` | ✅ 已修復 |
+| P1.4 | P1 | No Data = No Trade 防護缺失 | fix/v1.3.9-p1-fixes | `4b6d882` | ✅ 已修復 |
+| P2.5 | P2 | 無連續虧損熔斷機制 | fix/v1.3.9-p1-fixes | `5ee175d` | ✅ 已修復 |
+| P2.6 | P2 | 同向重複開倉無限制 | fix/v1.3.9-p1-fixes | `5ee175d` | ✅ 已修復 |
+| P2.7 | P2 | Risk Meta 未結構化解析 | fix/v1.3.9-p1-fixes | `5ee175d` | ✅ 已修復 |
+| P3.9 | P3 | Trade 回溯分析不足 | fix/v1.3.9-p1-fixes | `6a10026` | ✅ 已修復 |
+| P3.10 | P3 | Scanner 無低信心冷卻機制 | fix/v1.3.9-p1-fixes | `6a10026` | ✅ 已修復 |
+| P3.11 | P3 | 缺乏操作指標追蹤 | fix/v1.3.9-p1-fixes | `6a10026` | ✅ 已修復 |
+| P3.12 | P3 | Pre-existing Config 測試失敗 | fix/v1.3.9-p1-fixes | `618d7b9` | ✅ 已修復 |
+
+### 統計
+
+| 指標 | 數值 |
+|---|---|
+| 修復問題數 | 12（P1×4, P2×3, P3×4） |
+| 修改檔案數 | 39 files |
+| 程式變動 | +4,705/-161 lines |
+| 新增測試 | +99（897 → 996） |
+| 新增源碼檔案 | 3（operational_metrics, close_resolution, low_confidence_cooldown） |
+| 新增測試檔案 | 10 |
+| Commits | 4（`4b6d882`, `5ee175d`, `6a10026`, `618d7b9`） |
+| 方法 | TDD（先寫測試再實作） |
+
+---
+
+## 28. P1.1 — Breakeven SL 修改無驗證
+
+### 問題描述
+
+Scheduler 調用 `modify_position()` 將 SL 移至 breakeven 價位後，未透過 GET API 驗證實際修改是否生效。若 broker API 靜默失敗（回傳 200 但未實際執行），系統誤以為 SL 已更新，但實際仍留在原位。
+
+### 根本原因
+
+`matchtrader_client.modify_position()` 僅發送 PATCH 請求並檢查 HTTP status code，不會回讀確認實際的 SL/TP 值。MatchTrader API 在某些情況下會回傳成功但未執行修改（例如價格在 spread 內）。
+
+### 修復方案
+
+在 `MatchTraderClient` 新增 `verify_sl_tp()` 方法，在 `modify_position()` 後執行驗證：
+
+```python
+# src/execution/matchtrader_client.py
+async def verify_sl_tp(
+    self, position_id: str, expected_sl: float | None, expected_tp: float | None,
+    retries: int = 3, delay: float = 1.0,
+) -> bool:
+    for attempt in range(retries):
+        pos = await self.get_position(position_id)
+        if pos and _sl_tp_match(pos, expected_sl, expected_tp):
+            return True
+        await asyncio.sleep(delay * (attempt + 1))
+    return False
+```
+
+Scheduler 中的 breakeven 流程更新為：
+1. 呼叫 `modify_position()`
+2. 呼叫 `verify_sl_tp()` 確認修改生效
+3. 驗證失敗時 log warning 並發送 Telegram 警告
+
+### 影響範圍
+
+- **倉庫**: prop-firm-pilot
+- **修改檔案**: `src/execution/matchtrader_client.py`, `src/scheduler/scheduler.py`, `tests/test_breakeven_verification.py` (NEW)
+- **Commit**: `4b6d882`
+- **測試**: 30+ 新測試覆蓋驗證成功/失敗/重試場景
+
+---
+
+## 29. P1.2 — EODHD Null 欄位防禦
+
+### 問題描述
+
+EODHD API 回傳的 bar 數據中 `volume: null`，導致 pandas DataFrame 處理時 crash。影響所有依賴 EODHD 數據的下游模塊。
+
+### 根本原因
+
+EODHD 的 intraday API 在某些時段（低流動性、市場休市）回傳 `volume: null` 而非 `volume: 0`。`fx_data_fetcher.py` 中的 bar 解析未處理 null 值，直接傳遞給 pandas 導致 `TypeError`。
+
+### 修復方案
+
+在 `fx_data_fetcher.py` 新增 `_sanitize_bar()` 方法，將 OHLCV 欄位的 null 值替換為 0：
+
+```python
+# src/data/fx_data_fetcher.py
+def _sanitize_bar(bar: dict) -> dict:
+    for field in ("open", "high", "low", "close", "volume"):
+        if bar.get(field) is None:
+            bar[field] = 0
+    return bar
+```
+
+### 影響範圍
+
+- **倉庫**: prop-firm-pilot
+- **修改檔案**: `src/data/fx_data_fetcher.py`, `tests/test_eodhd_null_defense.py` (NEW)
+- **Commit**: `4b6d882`
+- **測試**: null volume、null OHLC、混合 null 場景測試
+
+---
+
+## 30. P1.3 — LLM Fallback (kimi-k2.5)
+
+### 問題描述
+
+Primary LLM model（gpt-5.4 via rightcodes）失敗時，系統直接拒絕該筆交易而無 fallback 機制。生產環境中 rightcodes API 有時不穩定，導致多筆交易機會被浪費。
+
+### 根本原因
+
+`agent_bridge.decide()` 中僅有單次 `propagate()` 呼叫，失敗時直接拋出 exception。無任何重試或備援模型邏輯。
+
+### 修復方案
+
+在 `AgentBridge` 新增 `_fallback_model` 欄位與 retry-with-fallback 邏輯：
+
+```python
+# src/decision/agent_bridge.py
+class AgentBridge:
+    def __init__(self, ...):
+        self._fallback_model: str | None = config.get("fallback_model")
+
+    async def decide(self, ...) -> DecisionResult:
+        try:
+            return await self._propagate_with_model(primary_model)
+        except Exception as e:
+            if self._fallback_model:
+                logger.warning("Primary LLM failed ({}), falling back to {}", e, self._fallback_model)
+                self._apply_ab_model(self._fallback_model)
+                return await self._propagate_with_model(self._fallback_model)
+            raise
+```
+
+### 影響範圍
+
+- **倉庫**: prop-firm-pilot
+- **修改檔案**: `src/decision/agent_bridge.py`, `src/config.py`, `tests/test_llm_fallback.py` (NEW)
+- **Commit**: `4b6d882`
+- **測試**: fallback 觸發、fallback 成功、無 fallback 時直接拋出
+- **註意**: 生產環境發現 kimi-k2.5 的 `max_completion_tokens` 超限問題（詳見 [Section 26](#26-已知限制與未來工作)），已暫時改回 gpt-5.2 + glm-4.7
+
+---
+
+## 31. P1.4 — No Data = No Trade 防護
+
+### 問題描述
+
+Scanner 回傳信號但 EODHD 回傳空的 bar 數據時，LLM 仍然被呼叫並基於空數據做出決策。這導致基於不完整資訊的交易決策。
+
+### 根本原因
+
+原始碼中僅註冊 P0 時排除此問題，但後來從 P2.8 提升至 P1。Scheduler 在取得 scanner signal 後直接傳遞給 LLM，未檢查輔助數據（EODHD bars）是否充足。
+
+### 修復方案
+
+在 `fx_analyst_config.py` 新增 `_has_minimum_data()` guard：
+
+```python
+# src/decision/fx_analyst_config.py
+def _has_minimum_data(ohlcv_data: dict) -> bool:
+    """Check if OHLCV data has enough bars for meaningful analysis."""
+    for timeframe, bars in ohlcv_data.items():
+        if bars is not None and len(bars) >= MIN_BARS_REQUIRED:
+            return True
+    return False
+```
+
+Scheduler 在呼叫 `decide()` 前檢查：
+- 若數據不足，跳過該筆交易並 log warning
+- 避免 LLM 在無數據情況下產生幻覇決策
+
+### 影響範圍
+
+- **倉庫**: prop-firm-pilot
+- **修改檔案**: `src/decision/fx_analyst_config.py`, `src/scheduler/scheduler.py`, `tests/test_no_data_no_trade.py` (NEW)
+- **Commit**: `4b6d882`
+- **測試**: 空數據放棄、足夠數據通過、部分數據場景
+
+---
+
+## 32. P2.5 — 連續虧損熔斷器
+
+### 問題描述
+
+同一品種連續多筆 SL 止損後，系統繼續對該品種開倉，無任何保護機制。連續虧損可能累積為顯著的日內損失。
+
+### 修復方案
+
+在 Scheduler 新增連續虧損熔斷器邏輯：
+
+- **觸發條件**：同一品種當日內連續 3+ 筆 SL 止損
+- **行為**：暫停該品種當日的新開倉
+- **重置**：次日自動重置計數器
+- 透過 `_consecutive_sl_counts: dict[str, int]` 追蹤每個品種的連續 SL 數
+
+### 影響範圍
+
+- **倉庫**: prop-firm-pilot
+- **修改檔案**: `src/scheduler/scheduler.py`, `src/config.py`, `tests/test_circuit_breaker.py` (NEW)
+- **Commit**: `5ee175d`
+- **測試**: 熔斷觸發、未觸發、重置、跨品種獨立性
+
+---
+
+## 33. P2.6 — 同向重複開倉限制
+
+### 問題描述
+
+同一品種同一方向可無限次開倉，導致風險集中。例如同日對 AUDUSD 開 5 筆 BUY，等同於 5 倍風險曝露。
+
+### 修復方案
+
+新增每日同向開倉上限：
+
+- **限制**：同一品種同一方向每日最多 2 筆
+- 透過 `_daily_direction_counts: dict[str, dict[str, int]]` 追蹤 `{symbol: {BUY: n, SELL: m}}`
+- 超過限制時拒絕開倉並 log 原因
+
+### 影響範圍
+
+- **倉庫**: prop-firm-pilot
+- **修改檔案**: `src/scheduler/scheduler.py`, `src/config.py`, `tests/test_duplicate_entry_limit.py` (NEW)
+- **Commit**: `5ee175d`
+- **測試**: 限制觸發、不同方向獨立、跨品種獨立、每日重置
+
+---
+
+## 34. P2.7 — Risk Meta 結構化解析
+
+### 問題描述
+
+LLM risk manager 產生的風控報告包含豐富的結構化資訊（entry_style、avoid_zone、trigger_zone、invalid_if、max_same_day_attempts），但系統僅將其作為純文字儲存，未解析為可使用的結構化欄位。
+
+### 修復方案
+
+在 `decision_formatter.py` 或相關模塊中新增解析邏輯，從 risk report 文字中提取結構化欄位：
+
+- `entry_style`: 進場風格（aggressive/conservative/neutral）
+- `avoid_zone`: 應避免的價格區域
+- `trigger_zone`: 觸發區域
+- `invalid_if`: 使決策失效的條件
+- `max_same_day_attempts`: 每日最大嘗試次數
+
+解析結果儲存在 `execution_meta` 中供下游使用。
+
+### 影響範圍
+
+- **倉庫**: prop-firm-pilot
+- **修改檔案**: `src/decision/fx_analyst_config.py`, `src/decision/tactical_validator.py`, `tests/test_risk_meta_extraction.py` (NEW)
+- **Commit**: `5ee175d`
+- **測試**: 各欄位解析、缺失欄位預設值、無 risk report 場景
+
+---
+
+## 35. P3.9 — Trade 回溯分析
+
+### 問題描述
+
+平倉後的回溯分析不足：Broker API 重試 3 次後放棄，無法從 PnL 推斷平倉原因（TP/SL/BE/手動）。
+
+### 修復方案
+
+1. Broker API 重試從 3 增至 5 次
+2. 新增 `close_resolution.py` 模塊，基於 PnL 推斷平倉原因：
+   - PnL ≥ 0 且接近 TP → `"tp_hit"`
+   - PnL < 0 且接近 SL → `"sl_hit"`
+   - PnL ≈ 0 → `"breakeven"`
+   - 其他 → `"manual_or_unknown"`
+
+### 影響範圍
+
+- **倉庫**: prop-firm-pilot
+- **新增檔案**: `src/scheduler/close_resolution.py`
+- **修改檔案**: `src/execution/matchtrader_client.py`, `src/scheduler/scheduler.py`, `tests/test_close_retrospection.py` (NEW)
+- **Commit**: `6a10026`
+- **測試**: 各平倉原因推斷、API 重試場景、無數據 fallback
+
+---
+
+## 36. P3.10 — Scanner 低信心冷卻
+
+### 問題描述
+
+Scanner 反覆取消低信心信號但無冷卻機制，導致同一品種短時間內被反覆掃描和取消，浪費計算資源。
+
+### 修復方案
+
+新增 `low_confidence_cooldown.py` 模塊：
+
+- **觸發**：同一品種連續 3 次取消
+- **行為**：該品種進入 30 分鐘冷卻期
+- **重置**：冷卻期到期後自動重置計數器
+
+### 影響範圍
+
+- **倉庫**: prop-firm-pilot
+- **新增檔案**: `src/scheduler/low_confidence_cooldown.py`
+- **修改檔案**: `src/scheduler/scheduler.py`, `tests/test_low_confidence_cooldown.py` (NEW)
+- **Commit**: `6a10026`
+- **測試**: 冷卻觸發、冷卻期間跳過、到期重置、跨品種獨立性
+
+---
+
+## 37. P3.11 — 操作指標追蹤
+
+### 問題描述
+
+系統缺乏操作層面的指標追蹤：API 重試統計、延遲追蹤、系統運行時間等。無法快速判斷系統健康狀態。
+
+### 修復方案
+
+新增 `operational_metrics.py` 模塊，追蹤：
+
+- **API 重試統計**：每個 endpoint 的重試次數、成功/失敗比
+- **延遲追蹤**：API 回應時間的 p50/p95/p99
+- **系統 uptime**：系統啟動時間和總運行時間
+- 透過 `alert_service` 定期發送指標摘要至 Telegram
+
+### 影響範圍
+
+- **倉庫**: prop-firm-pilot
+- **新增檔案**: `src/monitor/operational_metrics.py`
+- **修改檔案**: `src/execution/matchtrader_client.py`, `src/monitor/alert_service.py`, `src/monitor/telegram_bot.py`, `tests/test_operational_metrics.py` (NEW)
+- **Commit**: `6a10026`
+- **測試**: 指標記錄、摘要產生、重置行為
+
+---
+
+## 38. P3.12 — Pre-existing Config 測試修復
+
+### 問題描述
+
+4 個 pre-existing 的測試失敗，因測試 assertions 與當前 YAML config 值不匹配。這些失敗在 v1.3.9 以前就存在，但未被修復。
+
+### 修復方案
+
+對齊測試 assertions 與 `config/e8_one_5k_challenge.yaml` 的實際值：
+
+| 測試檔案 | 欄位 | 舊值 | 新值 |
+|---|---|---|---|
+| `test_prop_firm_guard_e8_one.py` | `default_risk_pct` | 0.01 | 0.005 |
+| `test_switchover.py` | `shadow_mode` | False | True |
+| `test_exit_reason_classification.py` | `max_drawdown_stop` | 0.08 | 0.06 |
+| `test_alert_service.py` | `shadow_mode` | False | True |
+
+### 影響範圍
+
+- **倉庫**: prop-firm-pilot
+- **修改檔案**: `tests/test_prop_firm_guard_e8_one.py`, `tests/test_switchover.py`, `tests/test_exit_reason_classification.py`, `tests/test_alert_service.py`
+- **Commit**: `618d7b9`
+- **測試**: 4 個失敗變為通過，測試總數從 897 增至 996（含新增 99 個）
+
+---
+
+## 39. 修改檔案清單 (v1.3.9a)
+
+### 新增源碼檔案（3 files）
+
+| 檔案 | 說明 |
+|---|---|
+| `src/monitor/operational_metrics.py` | 操作指標追蹤（API 重試、延遲、uptime） |
+| `src/scheduler/close_resolution.py` | 平倉原因推斷邏輯（PnL-based） |
+| `src/scheduler/low_confidence_cooldown.py` | Scanner 低信心冷卻機制 |
+
+### 新增測試檔案（10 files）
+
+| 檔案 | 行數 | 覆蓋項目 |
+|---|---|---|
+| `tests/test_breakeven_verification.py` | 416 | SL/TP 驗證成功/失敗/重試 |
+| `tests/test_circuit_breaker.py` | 122 | 連續虧損熔斷觸發/重置 |
+| `tests/test_close_retrospection.py` | 135 | 平倉原因推斷/API 重試 |
+| `tests/test_duplicate_entry_limit.py` | 129 | 同向開倉限制/跨品種獨立 |
+| `tests/test_eodhd_null_defense.py` | 135 | Null OHLCV 防禦 |
+| `tests/test_llm_fallback.py` | 103 | Fallback 觸發/成功/無 fallback |
+| `tests/test_low_confidence_cooldown.py` | 93 | 冷卻觸發/到期/跨品種 |
+| `tests/test_no_data_no_trade.py` | 88 | 空數據放棄/足夠數據通過 |
+| `tests/test_operational_metrics.py` | 135 | 指標記錄/摘要/重置 |
+| `tests/test_risk_meta_extraction.py` | 95 | 欄位解析/缺失預設/無 report |
+
+### 修改源碼檔案（10 files）
+
+| 檔案 | 修復項 | 說明 |
+|---|---|---|
+| `src/config.py` | P1.3, P2.5, P2.6 | fallback_model 欄位、circuit breaker config、duplicate entry config |
+| `src/data/fx_data_fetcher.py` | P1.2 | `_sanitize_bar()` null 防禦 |
+| `src/decision/agent_bridge.py` | P1.3 | `_fallback_model` + retry-with-fallback |
+| `src/decision/fx_analyst_config.py` | P1.4, P2.7 | `_has_minimum_data()` + risk meta parsing |
+| `src/decision/tactical_validator.py` | P2.7 | risk meta 結構化欄位整合 |
+| `src/decision_store/sqlite_store.py` | P3.9 | close reason 儲存 |
+| `src/execution/matchtrader_client.py` | P1.1, P3.9, P3.11 | `verify_sl_tp()` + retry 3→5 + 指標追蹤 |
+| `src/monitor/alert_service.py` | P3.11 | 操作指標摘要通知 |
+| `src/monitor/telegram_bot.py` | P3.11 | 指標查詢指令 |
+| `src/scheduler/scheduler.py` | P1.1, P1.4, P2.5, P2.6, P3.9, P3.10 | breakeven verify + no-data guard + circuit breaker + dup limit + retrospection + cooldown |
+
+### 修改測試檔案（13 files）
+
+| 檔案 | 修復項 |
+|---|---|
+| `tests/test_ab_model_switching.py` | LLM fallback 整合 |
+| `tests/test_alert_service.py` | P3.12 shadow_mode 對齊 |
+| `tests/test_decision_store.py` | close reason 欄位 |
+| `tests/test_exit_reason_classification.py` | P3.12 max_drawdown_stop 對齊 |
+| `tests/test_fx_data_fetcher.py` | EODHD null defense |
+| `tests/test_fx_duckdb_store.py` | 資料儲存整合 |
+| `tests/test_prop_firm_guard_e8_one.py` | P3.12 default_risk_pct 對齊 |
+| `tests/test_scanner_bridge.py` | cooldown 整合 |
+| `tests/test_scheduler.py` | 多項 scheduler 場景 |
+| `tests/test_scheduler_multi_timeframe.py` | cooldown 場景 |
+| `tests/test_switchover.py` | P3.12 shadow_mode 對齊 |
+| `tests/test_tactical_integration.py` | risk meta 整合 |
+| `tests/test_volatility_monitor.py` | 指標追蹤整合 |
+
+---
+
+## 40. Git Commit 記錄 (v1.3.9a)
+
+### prop-firm-pilot（分支 `fix/v1.3.9-p1-fixes`）
+
+| Commit | 日期 | 說明 |
+|---|---|---|
+| `4b6d882` | 2026-03-10 | fix(v1.3.9): P1 production fixes — breakeven verify, EODHD null defense, LLM fallback, no-data guard |
+| `5ee175d` | 2026-03-10 | fix(v1.3.9): P2 production fixes — circuit breaker, duplicate entry limit, risk meta extraction |
+| `6a10026` | 2026-03-10 | fix(v1.3.9): P3 production fixes — trade retrospection, scanner cooldown, operational metrics |
+| `618d7b9` | 2026-03-10 | fix(tests): align test assertions with current e8_one YAML config values |
+
+---
+
+## 41. 測試覆蓋 (v1.3.9a)
+
+### 整體統計
+
+| 指標 | 數值 |
+|---|---|
+| 測試總數 (before) | 897 |
+| 測試總數 (after) | **996** |
+| 新增測試 | +99 |
+| 通過 | 996 (100%) |
+| 失敗 | 0 |
+| Ruff 警告 | 0 |
+
+### 新增測試明細
+
+| 測試檔案 | 覆蓋項目 |
+|---|---|
+| `tests/test_breakeven_verification.py` (NEW) | `verify_sl_tp()` 成功/失敗/重試、scheduler breakeven 流程整合 |
+| `tests/test_circuit_breaker.py` (NEW) | 連續 SL 熔斷觸發、未觸發、重置、跨品種 |
+| `tests/test_close_retrospection.py` (NEW) | PnL-based 平倉原因推斷、API 重試場景 |
+| `tests/test_duplicate_entry_limit.py` (NEW) | 同向限制、方向獨立、每日重置 |
+| `tests/test_eodhd_null_defense.py` (NEW) | null volume/OHLC 防禦、混合 null |
+| `tests/test_llm_fallback.py` (NEW) | fallback 觸發/成功/無 fallback |
+| `tests/test_low_confidence_cooldown.py` (NEW) | 冷卻觸發/到期/跨品種 |
+| `tests/test_no_data_no_trade.py` (NEW) | 空數據放棄/足夠通過/部分數據 |
+| `tests/test_operational_metrics.py` (NEW) | 指標記錄/摘要/重置 |
+| `tests/test_risk_meta_extraction.py` (NEW) | 欄位解析/缺失預設/無 report |

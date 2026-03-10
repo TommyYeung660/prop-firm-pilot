@@ -10,6 +10,51 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.9a] — 2026-03-10
+**v1.3.9 Production Hardening — Breakeven Verify, LLM Fallback, Circuit Breaker, Operational Metrics**
+
+### Fixed
+- **P1.1**: Breakeven SL modification unverified — added `verify_sl_tp()` with retry logic to confirm broker actually applied SL changes
+- **P1.2**: EODHD `volume: null` crashes pandas — added `_sanitize_bar()` null-to-0 defense in `fx_data_fetcher.py`
+- **P1.3**: Primary LLM failure with no fallback — added `_fallback_model` field + retry-with-fallback in `decide()`
+- **P1.4**: No Data = No Trade guard missing — added `_has_minimum_data()` check before LLM calls when EODHD returns empty bars
+- **P2.5**: No consecutive loss circuit breaker — 3+ SL hits on same symbol pauses trading for that symbol for the day
+- **P2.6**: No duplicate entry limit — max 2 same-direction trades per symbol per day
+- **P2.7**: Risk meta not parsed — extract structured fields (entry_style, avoid_zone, trigger_zone, invalid_if, max_same_day_attempts) from LLM risk reports
+- **P3.9**: Trade retrospection insufficient — broker API retry 3→5 attempts + PnL-based close reason inference in new `close_resolution.py`
+- **P3.12**: 4 pre-existing config test assertions mismatched YAML values (`default_risk_pct`, `shadow_mode`, `max_drawdown_stop`)
+
+### Added
+- `src/monitor/operational_metrics.py` (NEW): API retry stats, latency tracking (p50/p95/p99), system uptime metrics
+- `src/scheduler/close_resolution.py` (NEW): PnL-based close reason inference (tp_hit/sl_hit/breakeven/manual_or_unknown)
+- `src/scheduler/low_confidence_cooldown.py` (NEW): per-symbol cancellation cooldown (3 cancels → 30min cooldown)
+- `verify_sl_tp()` method in `src/execution/matchtrader_client.py`: post-modification SL/TP verification with retry
+- `_sanitize_bar()` in `src/data/fx_data_fetcher.py`: null OHLCV field defense
+- `_has_minimum_data()` in `src/decision/fx_analyst_config.py`: minimum bar count guard
+- `_fallback_model` + retry-with-fallback in `src/decision/agent_bridge.py`
+- Consecutive loss circuit breaker + duplicate entry limit in `src/scheduler/scheduler.py`
+- Scanner low-confidence cooldown integration in `src/scheduler/scheduler.py`
+- Operational metrics summary via Telegram in `src/monitor/alert_service.py`
+- 10 new test files, 99 new tests total
+
+### Changed
+- `matchtrader_client.py`: broker API retry increased from 3 to 5 attempts
+- Test assertions aligned with current `config/e8_one_5k_challenge.yaml` values across 4 test files
+
+### Tested
+- **996 tests passed** (was 897; +99 new tests, 4 pre-existing failures fixed)
+- 39 files changed, +4,705/-161 lines
+- Branch: `fix/v1.3.9-p1-fixes`
+
+### Known Issue
+- **kimi-k2.5 `max_completion_tokens` exceeds limit**: When LLM falls back to `volcengine/kimi-k2.5`, TradingAgents sends `max_completion_tokens=128000` which exceeds the model's 32768 limit. **Workaround**: prod reverted to gpt-5.2 + glm-4.7. **Fix pending**: per-model token limit mapping in `_apply_ab_model()`
+
+### Files
+- New: `src/monitor/operational_metrics.py`, `src/scheduler/close_resolution.py`, `src/scheduler/low_confidence_cooldown.py`
+- Modified: `src/config.py`, `src/data/fx_data_fetcher.py`, `src/decision/agent_bridge.py`, `src/decision/fx_analyst_config.py`, `src/decision/tactical_validator.py`, `src/decision_store/sqlite_store.py`, `src/execution/matchtrader_client.py`, `src/monitor/alert_service.py`, `src/monitor/telegram_bot.py`, `src/scheduler/scheduler.py`
+- Tests (NEW): `test_breakeven_verification.py`, `test_circuit_breaker.py`, `test_close_retrospection.py`, `test_duplicate_entry_limit.py`, `test_eodhd_null_defense.py`, `test_llm_fallback.py`, `test_low_confidence_cooldown.py`, `test_no_data_no_trade.py`, `test_operational_metrics.py`, `test_risk_meta_extraction.py`
+- Tests (Modified): `test_ab_model_switching.py`, `test_alert_service.py`, `test_decision_store.py`, `test_exit_reason_classification.py`, `test_fx_data_fetcher.py`, `test_fx_duckdb_store.py`, `test_prop_firm_guard_e8_one.py`, `test_scanner_bridge.py`, `test_scheduler.py`, `test_scheduler_multi_timeframe.py`, `test_switchover.py`, `test_tactical_integration.py`, `test_volatility_monitor.py`
+
 ## [1.3.9] — 2026-03-09
 **v1.3.7 Production Bugfixes (Part 2) — Notification Data, AB Testing, Race Conditions, DuckDB**
 
