@@ -547,6 +547,23 @@ class EodhdProvider(FxDataProvider):
             .reset_index(drop=True)
         )
 
+        # ── Filter all-zero OHLC bars (EODHD weekend/DST artefacts) ──────────
+        zero_mask = (
+            (result["open"] == 0)
+            & (result["high"] == 0)
+            & (result["low"] == 0)
+            & (result["close"] == 0)
+        )
+        n_zeros = int(zero_mask.sum())
+        if n_zeros > 0:
+            logger.warning(
+                "EODHD: dropped {} all-zero OHLC bars for {} ({})",
+                n_zeros,
+                symbol,
+                interval,
+            )
+            result = result[~zero_mask].reset_index(drop=True)
+
         logger.info(
             "EODHD: fetched {} rows for {} ({} to {}, interval={})",
             len(result),
