@@ -335,6 +335,45 @@ class Scheduler:
                             )
                             continue
 
+                        # P2.5: Circuit breaker — daily SL hit limit
+                        daily_sl_limit = self._config.scheduler.daily_sl_hit_limit
+                        if daily_sl_limit > 0:
+                            daily_sl_count = await asyncio.to_thread(
+                                self._store.count_sl_hits_today, today
+                            )
+                            if daily_sl_count >= daily_sl_limit:
+                                logger.warning(
+                                    "Scanner loop: circuit breaker — {} daily SL hits >= {} "
+                                    "limit, blocking ALL new entries for today",
+                                    daily_sl_count,
+                                    daily_sl_limit,
+                                )
+                                await self._send_alert(
+                                    f"\U0001f6d1 <b>Circuit Breaker</b>\n"
+                                    f"\u2022 {daily_sl_count} SL hits today \u2265 "
+                                    f"{daily_sl_limit} limit\n"
+                                    f"\u2022 Blocking all new entries"
+                                )
+                                break  # Exit the entire signal loop
+
+                        # P2.5: Circuit breaker — per-symbol SL limit
+                        symbol_sl_limit = self._config.scheduler.symbol_loss_limit
+                        if symbol_sl_limit > 0:
+                            symbol_sl_count = await asyncio.to_thread(
+                                self._store.count_symbol_losses_today,
+                                signal.instrument,
+                                today,
+                            )
+                            if symbol_sl_count >= symbol_sl_limit:
+                                logger.warning(
+                                    "Scanner loop: circuit breaker — {} has {} SL hits "
+                                    "today >= {} limit, locking symbol",
+                                    signal.instrument,
+                                    symbol_sl_count,
+                                    symbol_sl_limit,
+                                )
+                                continue  # Skip this symbol, try next
+
                         intent = TradeIntent(
                             trade_date=today,
                             symbol=signal.instrument,
@@ -584,6 +623,54 @@ class Scheduler:
                     intent.symbol,
                 )
                 return
+
+            # P2.6: Same-symbol active position check
+            has_active = await asyncio.to_thread(
+                self._store.has_active_position_for_symbol,
+                intent.symbol,
+            )
+            if has_active:
+                await self._cancel_intent_safe(
+                    worker_id=worker_id,
+                    intent_id=intent.id,
+                    reason=f"Duplicate entry blocked: active {intent.symbol} position exists",
+                    context="duplicate_entry_guard",
+                )
+                logger.warning(
+                    "LLM worker {}: blocked {} — active position already exists",
+                    worker_id,
+                    intent.symbol,
+                )
+                return
+
+            # P2.6: Same-direction daily limit
+            max_same_dir = self._config.scheduler.max_same_direction_per_day
+            if max_same_dir > 0:
+                same_dir_count = await asyncio.to_thread(
+                    self._store.count_same_direction_today,
+                    intent.symbol,
+                    decision.decision,
+                    intent.trade_date,
+                )
+                if same_dir_count >= max_same_dir:
+                    await self._cancel_intent_safe(
+                        worker_id=worker_id,
+                        intent_id=intent.id,
+                        reason=(
+                            f"Same-direction limit: {intent.symbol} {decision.decision} "
+                            f"already attempted {same_dir_count}x today "
+                            f"(limit={max_same_dir})"
+                        ),
+                        context="same_direction_limit",
+                    )
+                    logger.warning(
+                        "LLM worker {}: blocked {} {} — already attempted {}x today",
+                        worker_id,
+                        intent.symbol,
+                        decision.decision,
+                        same_dir_count,
+                    )
+                    return
 
             # Use format_decision for proper SL/TP calculation
             formatted = format_decision(

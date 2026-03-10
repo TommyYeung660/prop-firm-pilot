@@ -713,6 +713,53 @@ class DecisionStore:
         ).fetchall()
         return [_row_to_intent(r) for r in rows]
 
+    def count_sl_hits_today(self, trade_date: str) -> int:
+        """Count closed intents with exit_reason='sl_hit' for a given trade date."""
+        row = self._conn.execute(
+            """SELECT COUNT(*) as cnt FROM intents
+               WHERE trade_date = :td AND status = 'closed'
+                 AND exit_reason = 'sl_hit'""",
+            {"td": trade_date},
+        ).fetchone()
+        return row["cnt"] if row else 0
+
+    def count_symbol_losses_today(self, symbol: str, trade_date: str) -> int:
+        """Count closed intents with exit_reason='sl_hit' for a specific symbol+date."""
+        row = self._conn.execute(
+            """SELECT COUNT(*) as cnt FROM intents
+               WHERE symbol = :symbol AND trade_date = :td
+                 AND status = 'closed' AND exit_reason = 'sl_hit'""",
+            {"symbol": symbol, "td": trade_date},
+        ).fetchone()
+        return row["cnt"] if row else 0
+
+    def has_active_position_for_symbol(self, symbol: str) -> bool:
+        """Check if there's a currently open position for this symbol."""
+        row = self._conn.execute(
+            "SELECT 1 FROM intents WHERE symbol = :symbol AND status = 'opened' LIMIT 1",
+            {"symbol": symbol},
+        ).fetchone()
+        return row is not None
+
+    def count_same_direction_today(
+        self,
+        symbol: str,
+        side: str,
+        trade_date: str,
+    ) -> int:
+        """Count intents that reached execution for this symbol+direction today.
+
+        Counts opened + closed intents (any that got past the 'executing' stage).
+        """
+        row = self._conn.execute(
+            """SELECT COUNT(*) as cnt FROM intents
+               WHERE symbol = :symbol AND trade_date = :td
+                 AND suggested_side = :side
+                 AND status IN ('opened', 'closed')""",
+            {"symbol": symbol, "td": trade_date, "side": side},
+        ).fetchone()
+        return row["cnt"] if row else 0
+
     def get_decision(self, intent_id: str) -> DecisionRecord | None:
         """Get the decision audit record for an intent."""
         row = self._conn.execute(

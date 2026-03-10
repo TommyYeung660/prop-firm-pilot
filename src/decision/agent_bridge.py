@@ -15,11 +15,51 @@ from typing import Any, Literal, cast
 
 from dotenv import dotenv_values
 from loguru import logger
+from pydantic import BaseModel, Field
 
 from src.optimize.ab_testing import choose_model
 from src.optimize.optimization_state import ABTestState
 
 LLM_ENV_PREFIXES = ("RIGHTCODE_", "VOLCENGINE_", "AIHUBMIX_", "LLM_")
+
+
+# ── Structured Risk Metadata (P2.7) ──────────────────────────────────────────
+
+
+class RiskMeta(BaseModel):
+    """Structured risk metadata extracted from LLM risk report."""
+
+    entry_style: str | None = Field(default=None, description="e.g. breakout, pullback, momentum")
+    avoid_zone: str | None = Field(default=None, description="Price range to avoid")
+    trigger_zone: str | None = Field(default=None, description="Price range that triggers entry")
+    invalid_if: str | None = Field(default=None, description="Condition that invalidates the trade")
+    max_same_day_attempts: int | None = Field(default=None, description="LLM-suggested max retries")
+
+
+_RISK_META_PATTERNS: dict[str, re.Pattern[str]] = {
+    "entry_style": re.compile(r"ENTRY\s+STYLE\s*:\s*(.+)", re.IGNORECASE),
+    "avoid_zone": re.compile(r"AVOID\s+ZONE\s*:\s*(.+)", re.IGNORECASE),
+    "trigger_zone": re.compile(r"TRIGGER\s+ZONE\s*:\s*(.+)", re.IGNORECASE),
+    "invalid_if": re.compile(r"INVALID\s+IF\s*:\s*(.+)", re.IGNORECASE),
+    "max_same_day_attempts": re.compile(r"MAX\s+SAME\s+DAY\s+ATTEMPTS\s*:\s*(\d+)", re.IGNORECASE),
+}
+
+
+def extract_risk_meta(risk_report: str) -> RiskMeta:
+    """Extract structured risk fields from LLM risk report text.
+
+    Best-effort parsing — returns default RiskMeta if no fields found.
+    """
+    fields: dict[str, str | int | None] = {}
+    for field_name, pattern in _RISK_META_PATTERNS.items():
+        match = pattern.search(risk_report)
+        if match:
+            value = match.group(1).strip()
+            if field_name == "max_same_day_attempts":
+                fields[field_name] = int(value)
+            else:
+                fields[field_name] = value
+    return RiskMeta(**fields)
 
 
 class AgentDecision:
@@ -32,12 +72,14 @@ class AgentDecision:
         final_state: dict[str, Any],
         risk_report: str = "",
         model_id: str = "",
+        risk_meta: RiskMeta | None = None,
     ) -> None:
         self.symbol = symbol
         self.decision = decision
         self.final_state = final_state
         self.risk_report = risk_report
         self.model_id = model_id
+        self.risk_meta = risk_meta or RiskMeta()
 
     @property
     def is_actionable(self) -> bool:
@@ -400,6 +442,7 @@ class AgentBridge:
                 final_state=final_state if isinstance(final_state, dict) else {},
                 risk_report=risk_report,
                 model_id=model_id,
+                risk_meta=extract_risk_meta(risk_report),
             )
 
             logger.info(

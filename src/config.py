@@ -264,6 +264,22 @@ class SchedulerConfig(BaseModel):
         "Prevents infinite scanner → LLM → rejection loops.",
     )
 
+    # v1.3.9: Consecutive loss circuit breaker
+    daily_sl_hit_limit: int = Field(
+        default=2,
+        description="Max SL hits per day before blocking new entries. 0=disabled.",
+    )
+    symbol_loss_limit: int = Field(
+        default=2,
+        description="Max SL hits per symbol per day before locking that symbol. 0=disabled.",
+    )
+
+    # v1.3.9: Same-symbol duplicate entry limit
+    max_same_direction_per_day: int = Field(
+        default=1,
+        description="Max times to attempt same symbol+direction per day. 0=disabled.",
+    )
+
     # v1.2.0: Multi-timeframe analysis
     multi_timeframe_enabled: bool = Field(
         default=False, description="Enable multi-timeframe entry timing"
