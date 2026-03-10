@@ -968,8 +968,12 @@ class TestTacticalPendingTransitions:
         store.insert_intent(sample_intent)
         store.claim_next_pending("worker-0")
         store.update_intent_decision(
-            sample_intent.id, "SELL", sl_pips=40, tp_pips=80,
-            risk_report="test", state_json="{}",
+            sample_intent.id,
+            "SELL",
+            sl_pips=40,
+            tp_pips=80,
+            risk_report="test",
+            state_json="{}",
         )
         store.mark_tactical_pending(sample_intent.id)
         intent = store.get_intent(sample_intent.id)
@@ -982,8 +986,12 @@ class TestTacticalPendingTransitions:
         store.insert_intent(sample_intent)
         store.claim_next_pending("worker-0")
         store.update_intent_decision(
-            sample_intent.id, "SELL", sl_pips=40, tp_pips=80,
-            risk_report="test", state_json="{}",
+            sample_intent.id,
+            "SELL",
+            sl_pips=40,
+            tp_pips=80,
+            risk_report="test",
+            state_json="{}",
         )
         store.mark_tactical_pending(sample_intent.id)
         store.mark_ready_for_exec_from_tactical(sample_intent.id)
@@ -997,8 +1005,12 @@ class TestTacticalPendingTransitions:
         store.insert_intent(sample_intent)
         store.claim_next_pending("worker-0")
         store.update_intent_decision(
-            sample_intent.id, "SELL", sl_pips=40, tp_pips=80,
-            risk_report="test", state_json="{}",
+            sample_intent.id,
+            "SELL",
+            sl_pips=40,
+            tp_pips=80,
+            risk_report="test",
+            state_json="{}",
         )
         store.mark_tactical_pending(sample_intent.id)
         store.mark_cancelled(sample_intent.id, reason="tactical_expired")
@@ -1013,8 +1025,12 @@ class TestTacticalPendingTransitions:
         store.insert_intent(sample_intent)
         store.claim_next_pending("worker-0")
         store.update_intent_decision(
-            sample_intent.id, "SELL", sl_pips=40, tp_pips=80,
-            risk_report="test", state_json="{}",
+            sample_intent.id,
+            "SELL",
+            sl_pips=40,
+            tp_pips=80,
+            risk_report="test",
+            state_json="{}",
         )
         store.mark_tactical_pending(sample_intent.id)
         assert store.intent_exists("EURUSD", "2026-02-16", "scanner")
@@ -1026,8 +1042,12 @@ class TestTacticalPendingTransitions:
         store.insert_intent(sample_intent)
         store.claim_next_pending("worker-0")
         store.update_intent_decision(
-            sample_intent.id, "SELL", sl_pips=40, tp_pips=80,
-            risk_report="test", state_json="{}",
+            sample_intent.id,
+            "SELL",
+            sl_pips=40,
+            tp_pips=80,
+            risk_report="test",
+            state_json="{}",
         )
         store.mark_tactical_pending(sample_intent.id)
         assert store.count_pipeline_intents() == 1

@@ -22,8 +22,18 @@ from loguru import logger
 
 _EODHD_API_BASE = "https://eodhd.com"
 _EODHD_FX_CURRENCIES = {
-    "AUD", "CAD", "CHF", "EUR", "GBP", "JPY", "NZD", "USD",
-    "XAU", "XAG", "HKD", "SGD",
+    "AUD",
+    "CAD",
+    "CHF",
+    "EUR",
+    "GBP",
+    "JPY",
+    "NZD",
+    "USD",
+    "XAU",
+    "XAG",
+    "HKD",
+    "SGD",
 }
 # ── Abstract Base ───────────────────────────────────────────────────────────
 
@@ -493,9 +503,7 @@ class EodhdProvider(FxDataProvider):
         client: httpx.AsyncClient,
     ) -> pd.DataFrame:
         """Not supported for intraday provider — raises ValueError."""
-        raise ValueError(
-            "EodhdProvider is intraday-only. Use TraderMade/iTick for daily bars."
-        )
+        raise ValueError("EodhdProvider is intraday-only. Use TraderMade/iTick for daily bars.")
 
     async def fetch_bars(
         self,
@@ -516,12 +524,8 @@ class EodhdProvider(FxDataProvider):
         current_start = start_date
 
         while current_start <= end_date:
-            chunk_end = min(
-                current_start + timedelta(days=self.MAX_DAYS_PER_CHUNK), end_date
-            )
-            df = await self._fetch_chunk(
-                symbol, current_start, chunk_end, client, api_interval
-            )
+            chunk_end = min(current_start + timedelta(days=self.MAX_DAYS_PER_CHUNK), end_date)
+            df = await self._fetch_chunk(symbol, current_start, chunk_end, client, api_interval)
             if not df.empty:
                 all_frames.append(df)
             current_start = chunk_end + timedelta(days=1)
@@ -529,7 +533,10 @@ class EodhdProvider(FxDataProvider):
         if not all_frames:
             logger.warning(
                 "EODHD: no data returned for {} ({} to {}, interval={})",
-                symbol, start_date, end_date, interval,
+                symbol,
+                start_date,
+                end_date,
+                interval,
             )
             return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
 
@@ -542,7 +549,11 @@ class EodhdProvider(FxDataProvider):
 
         logger.info(
             "EODHD: fetched {} rows for {} ({} to {}, interval={})",
-            len(result), symbol, start_date, end_date, interval,
+            len(result),
+            symbol,
+            start_date,
+            end_date,
+            interval,
         )
         return result
 
@@ -561,10 +572,15 @@ class EodhdProvider(FxDataProvider):
             .replace(tzinfo=timezone.utc)
             .timestamp()
         )
-        end_ts = int(
-            (datetime.combine(end_date, datetime.min.time())
-             .replace(tzinfo=timezone.utc) + timedelta(days=1)).timestamp()
-        ) - 1
+        end_ts = (
+            int(
+                (
+                    datetime.combine(end_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+                    + timedelta(days=1)
+                ).timestamp()
+            )
+            - 1
+        )
 
         url = f"{_EODHD_API_BASE}/api/intraday/{eodhd_sym}"
         params = {
@@ -580,19 +596,19 @@ class EodhdProvider(FxDataProvider):
                 response = await client.get(url, params=params, timeout=30.0)
 
                 if response.status_code == 429:
-                    wait = 2 ** attempt
-                    logger.warning(
-                        "EODHD: rate limited, waiting {}s (attempt {})", wait, attempt
-                    )
+                    wait = 2**attempt
+                    logger.warning("EODHD: rate limited, waiting {}s (attempt {})", wait, attempt)
                     await asyncio.sleep(wait)
                     continue
 
                 if response.status_code != 200:
                     logger.error(
                         "EODHD: HTTP {} for {}: {}",
-                        response.status_code, symbol, response.text[:300],
+                        response.status_code,
+                        symbol,
+                        response.text[:300],
                     )
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
                     continue
 
                 data = response.json()
@@ -604,28 +620,35 @@ class EodhdProvider(FxDataProvider):
 
                 rows = []
                 for bar in data:
-                    rows.append({
-                        "datetime": pd.Timestamp(bar["datetime"]),
-                        "open": float(bar["open"]),
-                        "high": float(bar["high"]),
-                        "low": float(bar["low"]),
-                        "close": float(bar["close"]),
-                        "volume": int(bar.get("volume") or 0),
-                    })
+                    rows.append(
+                        {
+                            "datetime": pd.Timestamp(bar.get("datetime", "")),
+                            "open": float(bar.get("open") or 0),
+                            "high": float(bar.get("high") or 0),
+                            "low": float(bar.get("low") or 0),
+                            "close": float(bar.get("close") or 0),
+                            "volume": int(bar.get("volume") or 0),
+                        }
+                    )
 
                 return pd.DataFrame(rows)
 
             except httpx.HTTPError as e:
-                wait = 2 ** attempt
+                wait = 2**attempt
                 logger.warning(
                     "EODHD: network error '{}', retry in {}s (attempt {})",
-                    e, wait, attempt,
+                    e,
+                    wait,
+                    attempt,
                 )
                 await asyncio.sleep(wait)
 
         logger.error(
             "EODHD: failed after {} retries for {} ({} to {})",
-            self._max_retries, symbol, start_date, end_date,
+            self._max_retries,
+            symbol,
+            start_date,
+            end_date,
         )
         return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
 

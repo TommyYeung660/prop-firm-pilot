@@ -15,11 +15,51 @@ from typing import Any, Literal, cast
 
 from dotenv import dotenv_values
 from loguru import logger
+from pydantic import BaseModel, Field
 
 from src.optimize.ab_testing import choose_model
 from src.optimize.optimization_state import ABTestState
 
 LLM_ENV_PREFIXES = ("RIGHTCODE_", "VOLCENGINE_", "AIHUBMIX_", "LLM_")
+
+
+# ── Structured Risk Metadata (P2.7) ──────────────────────────────────────────
+
+
+class RiskMeta(BaseModel):
+    """Structured risk metadata extracted from LLM risk report."""
+
+    entry_style: str | None = Field(default=None, description="e.g. breakout, pullback, momentum")
+    avoid_zone: str | None = Field(default=None, description="Price range to avoid")
+    trigger_zone: str | None = Field(default=None, description="Price range that triggers entry")
+    invalid_if: str | None = Field(default=None, description="Condition that invalidates the trade")
+    max_same_day_attempts: int | None = Field(default=None, description="LLM-suggested max retries")
+
+
+_RISK_META_PATTERNS: dict[str, re.Pattern[str]] = {
+    "entry_style": re.compile(r"ENTRY\s+STYLE\s*:\s*(.+)", re.IGNORECASE),
+    "avoid_zone": re.compile(r"AVOID\s+ZONE\s*:\s*(.+)", re.IGNORECASE),
+    "trigger_zone": re.compile(r"TRIGGER\s+ZONE\s*:\s*(.+)", re.IGNORECASE),
+    "invalid_if": re.compile(r"INVALID\s+IF\s*:\s*(.+)", re.IGNORECASE),
+    "max_same_day_attempts": re.compile(r"MAX\s+SAME\s+DAY\s+ATTEMPTS\s*:\s*(\d+)", re.IGNORECASE),
+}
+
+
+def extract_risk_meta(risk_report: str) -> RiskMeta:
+    """Extract structured risk fields from LLM risk report text.
+
+    Best-effort parsing — returns default RiskMeta if no fields found.
+    """
+    fields: dict[str, str | int | None] = {}
+    for field_name, pattern in _RISK_META_PATTERNS.items():
+        match = pattern.search(risk_report)
+        if match:
+            value = match.group(1).strip()
+            if field_name == "max_same_day_attempts":
+                fields[field_name] = int(value)
+            else:
+                fields[field_name] = value
+    return RiskMeta(**fields)
 
 
 class AgentDecision:
@@ -32,12 +72,14 @@ class AgentDecision:
         final_state: dict[str, Any],
         risk_report: str = "",
         model_id: str = "",
+        risk_meta: RiskMeta | None = None,
     ) -> None:
         self.symbol = symbol
         self.decision = decision
         self.final_state = final_state
         self.risk_report = risk_report
         self.model_id = model_id
+        self.risk_meta = risk_meta or RiskMeta()
 
     @property
     def is_actionable(self) -> bool:
@@ -191,6 +233,7 @@ class AgentBridge:
         self._graph_cls: Any = None  # Stored for AB test graph rebuild
         self._default_config: dict[str, Any] = {}
         self._merged_config: dict[str, Any] = {}
+        self._fallback_model: str = "volcengine/kimi-k2.5"
 
     def set_ab_state(self, state: ABTestState | None) -> None:
         """Set AB test state for model routing."""
@@ -314,8 +357,7 @@ class AgentBridge:
             )
         except Exception as e:
             logger.error(
-                "AB: failed to rebuild graph for model '{}': {}. "
-                "Keeping previous graph.",
+                "AB: failed to rebuild graph for model '{}': {}. Keeping previous graph.",
                 model_id,
                 e,
             )
@@ -400,6 +442,7 @@ class AgentBridge:
                 final_state=final_state if isinstance(final_state, dict) else {},
                 risk_report=risk_report,
                 model_id=model_id,
+                risk_meta=extract_risk_meta(risk_report),
             )
 
             logger.info(
@@ -410,17 +453,88 @@ class AgentBridge:
             )
             return result
 
-        except Exception as e:
+        except Exception as primary_error:
             import traceback
 
             logger.error(
-                "AgentBridge: propagate() failed for {}: {}\n{}", symbol, e, traceback.format_exc()
+                "AgentBridge: propagate() failed for {}: {}\n{}",
+                symbol,
+                primary_error,
+                traceback.format_exc(),
             )
+
+            # ── Fallback: retry with fallback model ──────────────────────
+            if (
+                not self._using_mock
+                and self._graph_cls is not None
+                and self._fallback_model
+                and self._fallback_model != self._current_model_id
+            ):
+                logger.info(
+                    "AgentBridge: retrying {} with fallback model '{}'",
+                    symbol,
+                    self._fallback_model,
+                )
+                try:
+                    self._apply_ab_model(self._fallback_model)
+                    final_state, decision = self._graph.propagate(
+                        company_name=symbol,
+                        trade_date=normalized_trade_date,
+                        qlib_data=qlib_data,
+                    )
+                    risk_report = ""
+                    if isinstance(final_state, dict):
+                        if (
+                            "trader_investment_plan" in final_state
+                            and final_state["trader_investment_plan"]
+                        ):
+                            risk_report = str(final_state["trader_investment_plan"])
+                        elif (
+                            "risk_debate_state" in final_state
+                            and "judge_decision" in final_state["risk_debate_state"]
+                        ):
+                            risk_report = str(final_state["risk_debate_state"]["judge_decision"])
+                        elif (
+                            "investment_debate_state" in final_state
+                            and "judge_decision" in final_state["investment_debate_state"]
+                        ):
+                            risk_report = str(
+                                final_state["investment_debate_state"]["judge_decision"]
+                            )
+                        else:
+                            risk_report = final_state.get("risk_report", "")
+
+                    validated = validate_decision(
+                        raw_decision=decision,
+                        risk_report=risk_report,
+                        symbol=symbol,
+                    )
+                    logger.info(
+                        "AgentBridge: fallback succeeded for {} → {} (model='{}')",
+                        symbol,
+                        validated,
+                        self._fallback_model,
+                    )
+                    return AgentDecision(
+                        symbol=symbol,
+                        decision=validated,
+                        final_state=final_state if isinstance(final_state, dict) else {},
+                        risk_report=risk_report,
+                        model_id=self._fallback_model,
+                    )
+                except Exception as fallback_error:
+                    logger.error(
+                        "AgentBridge: fallback model '{}' also failed for {}: {}",
+                        self._fallback_model,
+                        symbol,
+                        fallback_error,
+                    )
+
             return AgentDecision(
                 symbol=symbol,
                 decision="HOLD",
-                final_state={"error": str(e)},
-                risk_report=f"Error during agent decision: {e}",
+                final_state={"error": str(primary_error)},
+                risk_report=f"Error during agent decision: {primary_error}",
             )
 
     async def decide_async(

@@ -9,11 +9,10 @@ Covers:
 - decide() without AB state does not switch models
 """
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
-from src.decision.agent_bridge import AgentBridge, AgentDecision, MockTradingGraph
+from src.decision.agent_bridge import AgentBridge, MockTradingGraph
 from src.optimize.optimization_state import ABTestState
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

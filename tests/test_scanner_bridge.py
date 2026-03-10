@@ -454,8 +454,17 @@ class TestSignalFreshness:
         with open(fresh_csv, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(
-                ["datetime", "instrument", "score", "rank", "score_gap",
-                 "drop_distance", "topk_spread", "confidence", "weight"]
+                [
+                    "datetime",
+                    "instrument",
+                    "score",
+                    "rank",
+                    "score_gap",
+                    "drop_distance",
+                    "topk_spread",
+                    "confidence",
+                    "weight",
+                ]
             )
             writer.writerow([today, "EURUSD", "0.61", "1", "0.05", "0.18", "0.12", "high", "0.333"])
 

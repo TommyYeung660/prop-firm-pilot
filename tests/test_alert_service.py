@@ -161,9 +161,7 @@ class TestAlertServicePersistentClient:
         await alert_basic.close()  # Should not raise
         assert alert_basic._http_client is None
 
-    async def test_send_success_uses_persistent_client(
-        self, alert_basic: AlertService
-    ) -> None:
+    async def test_send_success_uses_persistent_client(self, alert_basic: AlertService) -> None:
         """send() uses _get_client() and makes a POST request."""
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -176,9 +174,7 @@ class TestAlertServicePersistentClient:
         # Reset
         alert_basic._http_client = None
 
-    async def test_send_http_error_returns_false(
-        self, alert_basic: AlertService
-    ) -> None:
+    async def test_send_http_error_returns_false(self, alert_basic: AlertService) -> None:
         """send() catches httpx.HTTPError and returns False."""
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(side_effect=httpx.ConnectTimeout("timeout"))
@@ -186,6 +182,7 @@ class TestAlertServicePersistentClient:
         result = await alert_basic.send("test message")
         assert result is False
         alert_basic._http_client = None
+
 
 # ── Trade Opened ────────────────────────────────────────────────────────────
 

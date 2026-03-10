@@ -23,7 +23,7 @@ import asyncio
 import json
 import os
 from collections.abc import Coroutine
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from numbers import Real
 from typing import Any
 
@@ -33,6 +33,7 @@ from loguru import logger
 from src.compliance.best_day_tracker import BestDayTracker
 from src.compliance.hwm_tracker import HighWaterMarkTracker
 from src.config import AppConfig
+from src.data.fx_data_fetcher import EodhdProvider
 from src.decision.agent_bridge import AgentBridge
 from src.decision.decision_formatter import format_decision
 from src.decision.schemas import TradeIntent
@@ -45,14 +46,16 @@ from src.execution.matchtrader_client import MatchTraderClient
 from src.monitor.alert_service import AlertService
 from src.monitor.equity_monitor import EquityMonitor
 from src.monitor.memory_journal import MemoryJournal
+from src.monitor.operational_metrics import OperationalMetrics
 from src.monitor.trade_journal import TradeJournal
 from src.optimize.optimization_engine import OptimizationEngine
 from src.optimize.optimization_state import OptimizationState, Thresholds
+from src.scheduler.close_resolution import determine_resolution_path
 from src.scheduler.decision_cache import StrategicDecisionCache
+from src.scheduler.low_confidence_cooldown import LowConfidenceCooldown
 from src.scheduler.market_hours import MarketHoursChecker
 from src.scheduler.session_cadence import SessionCadence
 from src.scheduler.volatility_monitor import VolatilityMonitor
-from src.data.fx_data_fetcher import EodhdProvider
 from src.signal.scanner_bridge import ScannerBridge
 
 # ── Constants ──────────────────────────────────────────────────────────────
@@ -164,6 +167,15 @@ class Scheduler:
 
         # v1.2.0: Volatility-triggered re-scans
         self._volatility_monitor = VolatilityMonitor(config.scheduler, config.symbols)
+
+        # v1.3.9: Low-confidence scanner cooldown (P3.10)
+        self._low_confidence_cooldown = LowConfidenceCooldown(
+            cooldown_minutes=config.scheduler.low_confidence_cooldown_minutes,
+            threshold=config.scheduler.low_confidence_threshold,
+        )
+
+        # v1.3.9: Operational metrics (P3.11 + P3.12)
+        self._metrics = OperationalMetrics()
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -334,6 +346,58 @@ class Scheduler:
                                 rejection_cooldown,
                             )
                             continue
+
+                        # P3.10: Low-confidence scanner cooldown
+                        if self._low_confidence_cooldown.is_cooled_down(
+                            signal.instrument, self._now_utc()
+                        ):
+                            count = self._low_confidence_cooldown.get_count(signal.instrument)
+                            logger.warning(
+                                "Scanner loop: {} in low-confidence cooldown "
+                                "({} consecutive cancels), skipping",
+                                signal.instrument,
+                                count,
+                            )
+                            continue
+
+                        # P2.5: Circuit breaker — daily SL hit limit
+                        daily_sl_limit = self._config.scheduler.daily_sl_hit_limit
+                        if daily_sl_limit > 0:
+                            daily_sl_count = await asyncio.to_thread(
+                                self._store.count_sl_hits_today, today
+                            )
+                            if daily_sl_count >= daily_sl_limit:
+                                logger.warning(
+                                    "Scanner loop: circuit breaker — {} daily SL hits >= {} "
+                                    "limit, blocking ALL new entries for today",
+                                    daily_sl_count,
+                                    daily_sl_limit,
+                                )
+                                await self._send_alert(
+                                    f"\U0001f6d1 <b>Circuit Breaker</b>\n"
+                                    f"\u2022 {daily_sl_count} SL hits today \u2265 "
+                                    f"{daily_sl_limit} limit\n"
+                                    f"\u2022 Blocking all new entries"
+                                )
+                                break  # Exit the entire signal loop
+
+                        # P2.5: Circuit breaker — per-symbol SL limit
+                        symbol_sl_limit = self._config.scheduler.symbol_loss_limit
+                        if symbol_sl_limit > 0:
+                            symbol_sl_count = await asyncio.to_thread(
+                                self._store.count_symbol_losses_today,
+                                signal.instrument,
+                                today,
+                            )
+                            if symbol_sl_count >= symbol_sl_limit:
+                                logger.warning(
+                                    "Scanner loop: circuit breaker — {} has {} SL hits "
+                                    "today >= {} limit, locking symbol",
+                                    signal.instrument,
+                                    symbol_sl_count,
+                                    symbol_sl_limit,
+                                )
+                                continue  # Skip this symbol, try next
 
                         intent = TradeIntent(
                             trade_date=today,
@@ -516,6 +580,8 @@ class Scheduler:
                     intent.scanner_confidence,
                     pre_blended,
                 )
+                self._low_confidence_cooldown.record_low_confidence(intent.symbol, self._now_utc())
+                self._metrics.record_llm_result("cancel")
             return
 
         decision = await asyncio.to_thread(
@@ -562,6 +628,7 @@ class Scheduler:
                 )
 
         if decision.is_actionable:
+            self._metrics.record_llm_result("success")
             if self._should_pause_new_entries():
                 await self._cancel_intent_safe(
                     worker_id=worker_id,
@@ -584,6 +651,54 @@ class Scheduler:
                     intent.symbol,
                 )
                 return
+
+            # P2.6: Same-symbol active position check
+            has_active = await asyncio.to_thread(
+                self._store.has_active_position_for_symbol,
+                intent.symbol,
+            )
+            if has_active:
+                await self._cancel_intent_safe(
+                    worker_id=worker_id,
+                    intent_id=intent.id,
+                    reason=f"Duplicate entry blocked: active {intent.symbol} position exists",
+                    context="duplicate_entry_guard",
+                )
+                logger.warning(
+                    "LLM worker {}: blocked {} — active position already exists",
+                    worker_id,
+                    intent.symbol,
+                )
+                return
+
+            # P2.6: Same-direction daily limit
+            max_same_dir = self._config.scheduler.max_same_direction_per_day
+            if max_same_dir > 0:
+                same_dir_count = await asyncio.to_thread(
+                    self._store.count_same_direction_today,
+                    intent.symbol,
+                    decision.decision,
+                    intent.trade_date,
+                )
+                if same_dir_count >= max_same_dir:
+                    await self._cancel_intent_safe(
+                        worker_id=worker_id,
+                        intent_id=intent.id,
+                        reason=(
+                            f"Same-direction limit: {intent.symbol} {decision.decision} "
+                            f"already attempted {same_dir_count}x today "
+                            f"(limit={max_same_dir})"
+                        ),
+                        context="same_direction_limit",
+                    )
+                    logger.warning(
+                        "LLM worker {}: blocked {} {} — already attempted {}x today",
+                        worker_id,
+                        intent.symbol,
+                        decision.decision,
+                        same_dir_count,
+                    )
+                    return
 
             # Use format_decision for proper SL/TP calculation
             formatted = format_decision(
@@ -620,6 +735,8 @@ class Scheduler:
                         intent.scanner_confidence,
                         formatted.confidence_score,
                     )
+                self._low_confidence_cooldown.record_low_confidence(intent.symbol, self._now_utc())
+                self._metrics.record_llm_result("cancel")
                 return
             try:
                 # v1.3.9: Store AB model_id in final_state for engine.py
@@ -676,16 +793,12 @@ class Scheduler:
                         )
 
                     # v1.3.9: Enforce tactical gate when shadow_mode is off
-                    if (
-                        not self._config.tactical.shadow_mode
-                        and tactical_result.action != "PASS"
-                    ):
+                    if not self._config.tactical.shadow_mode and tactical_result.action != "PASS":
                         await self._cancel_intent_safe(
                             worker_id=worker_id,
                             intent_id=intent.id,
                             reason=(
-                                f"Tactical gate {tactical_result.action}: "
-                                f"{tactical_result.detail}"
+                                f"Tactical gate {tactical_result.action}: {tactical_result.detail}"
                             ),
                             context="tactical_gate_block",
                         )
@@ -705,8 +818,10 @@ class Scheduler:
                             intent.id,
                             tactical_result.action,
                         )
+                        self._metrics.record_tactical_result(passed=False)
                         return
 
+                self._metrics.record_tactical_result(passed=True)
                 await asyncio.to_thread(self._store.mark_ready_for_exec, intent.id)
                 logger.info(
                     "LLM worker {}: intent {} → {} (ready for execution)",
@@ -728,6 +843,7 @@ class Scheduler:
                     return
                 raise
         else:
+            self._metrics.record_llm_result("cancel")
             cancelled = await self._cancel_intent_safe(
                 worker_id=worker_id,
                 intent_id=intent.id,
@@ -787,8 +903,8 @@ class Scheduler:
                 e,
             )
             result = TacticalResult(
-                action="PASS",
-                detail=f"Tactical validation error (pass-through): {e}",
+                action="WAIT",
+                detail=f"Tactical validation error (blocked, retry later): {e}",
             )
         return result
 
@@ -817,9 +933,7 @@ class Scheduler:
                 # of EODHD bar time.  EODHD intraday bars can lag 10+ hours during
                 # DST transitions; MatchTrader quotes are real-time (<1 min delay).
                 if ts_ms:
-                    data.latest_bar_time = datetime.fromtimestamp(
-                        ts_ms / 1000, tz=timezone.utc
-                    )
+                    data.latest_bar_time = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
                     logger.debug(
                         "Tactical: quote timestamp for {} = {} (age {:.0f}s)",
                         symbol,
@@ -848,9 +962,7 @@ class Scheduler:
                         self._eodhd.fetch_bars(
                             symbol, start_5min, end_date, client, interval="5min"
                         ),
-                        self._eodhd.fetch_bars(
-                            symbol, start_1h, end_date, client, interval="1h"
-                        ),
+                        self._eodhd.fetch_bars(symbol, start_1h, end_date, client, interval="1h"),
                     )
                 if not bars_5min.empty:
                     data.bars_5min = bars_5min
@@ -859,18 +971,18 @@ class Scheduler:
                     # potential multi-hour delay during DST transitions.
                     logger.debug(
                         "Tactical: fetched {} 5min bars for {}",
-                        len(bars_5min), symbol,
+                        len(bars_5min),
+                        symbol,
                     )
                 if not bars_1h.empty:
                     data.bars_1h = bars_1h
                     logger.debug(
                         "Tactical: fetched {} 1h bars for {}",
-                        len(bars_1h), symbol,
+                        len(bars_1h),
+                        symbol,
                     )
             except Exception as e:
-                logger.warning(
-                    "Failed to fetch EODHD intraday bars for {}: {}", symbol, e
-                )
+                logger.warning("Failed to fetch EODHD intraday bars for {}: {}", symbol, e)
 
         # v1.3.9-fix: Do NOT fallback to now() — let data_freshness gate fail
         # when no actual bar data was retrieved (EODHD fetch failure or empty response).
@@ -1126,7 +1238,7 @@ class Scheduler:
             now_ms = int(self._now_utc().timestamp() * 1000)
             day_ago_ms = now_ms - 86_400_000
             matched = False
-            for attempt, delay in enumerate((2.0, 4.0, 8.0), start=1):
+            for attempt, delay in enumerate((2.0, 4.0, 8.0, 12.0, 16.0), start=1):
                 await asyncio.sleep(delay)
                 closed_positions = await self._matchtrader.get_closed_positions(
                     from_ts=day_ago_ms, to_ts=now_ms
@@ -1148,7 +1260,7 @@ class Scheduler:
                     break
                 logger.debug(
                     "Position monitor: closed position {} not found in broker API"
-                    " (attempt {}/3, waited {}s)",
+                    " (attempt {}/5, waited {}s)",
                     position_id,
                     attempt,
                     delay,
@@ -1163,6 +1275,7 @@ class Scheduler:
         # ── v1.3.9: execution_meta fallback for volume/prices ──────────
         # When broker API didn't return data, read from execution_meta
         # (persisted at trade open time by engine.py)
+        used_execution_meta = False
         if volume == 0.0 or close_price == 0.0:
             try:
                 decision = await asyncio.to_thread(self._store.get_decision, intent.id)
@@ -1170,6 +1283,7 @@ class Scheduler:
                     meta = json.loads(decision.execution_meta)
                     if volume == 0.0 and meta.get("volume"):
                         volume = meta["volume"]
+                        used_execution_meta = True
                         logger.info(
                             "Position monitor: using execution_meta volume={} for {}",
                             volume,
@@ -1196,10 +1310,12 @@ class Scheduler:
                     intent.id,
                     e,
                 )
+        used_best_day = False
         # Override exit_reason if Best Day Rule triggered this close
         # and use recorded unrealized PnL as fallback when broker query returned 0
         if position_id in self._best_day_close_positions:
             exit_reason = "best_day_close"
+            used_best_day = True
             if pnl == 0.0:
                 pnl = self._best_day_close_positions[position_id]
                 logger.info(
@@ -1208,10 +1324,12 @@ class Scheduler:
                     position_id,
                 )
             self._best_day_close_positions.pop(position_id, None)
+        used_reeval = False
         # Override exit_reason if re-evaluation triggered this close
         # and use recorded unrealized PnL as fallback when broker query returned 0
         if position_id in self._reevaluation_close_positions:
             exit_reason = "reeval_close"
+            used_reeval = True
             if pnl == 0.0:
                 pnl = self._reevaluation_close_positions[position_id]
                 logger.info(
@@ -1221,8 +1339,10 @@ class Scheduler:
                 )
             self._reevaluation_close_positions.pop(position_id, None)
         # Fallback for unknown close: use last-known unrealized PnL from position monitor
+        used_last_known = False
         if pnl == 0.0 and position_id in self._last_known_profit:
             pnl = self._last_known_profit[position_id]
+            used_last_known = True
             logger.info(
                 "Position monitor: using last-known polled PnL ${:+.2f} for {}",
                 pnl,
@@ -1246,7 +1366,7 @@ class Scheduler:
                     decision = await asyncio.to_thread(self._store.get_decision, intent.id)
                 if decision and decision.execution_meta:
                     meta = json.loads(decision.execution_meta)
-                    sl_price = meta.get("sl_price", 0.0)
+                    sl_price = meta.get("breakeven_sl") or meta.get("sl_price", 0.0)
                     tp_price = meta.get("tp_price", 0.0)
                     pip_size = self._get_pip_size(symbol)
                     tolerance = pip_size * 3  # 3-pip tolerance for slippage
@@ -1258,6 +1378,14 @@ class Scheduler:
             except Exception:
                 pass  # Keep existing exit_reason; decision stays as loaded
 
+        # v1.3.9: Resolution path tracking for trade retrospection quality
+        resolution_path = determine_resolution_path(
+            matched=matched,
+            used_execution_meta=used_execution_meta,
+            used_best_day=used_best_day,
+            used_reeval=used_reeval,
+            used_last_known=used_last_known,
+        )
         # Clean up reevaluation tracking
         self._last_reevaluation.pop(position_id, None)
         self._last_known_profit.pop(position_id, None)
@@ -1305,8 +1433,13 @@ class Scheduler:
                 "position_id": position_id,
                 "pnl": pnl,
                 "reason": exit_reason,
+                "resolution_path": resolution_path,
             },
         )
+        # v1.3.9: Operational metrics — record trade close (P3.11)
+        self._metrics.record_trade_close(exit_reason)
+        # v1.3.9: Reset low-confidence cooldown on successful close (P3.10)
+        self._low_confidence_cooldown.reset_symbol(symbol)
         # Call LLM reflect for learning
         if pnl != 0.0:
             try:
@@ -1529,17 +1662,54 @@ class Scheduler:
                         tp=pos.tp_price,
                     )
                     if result.success:
-                        self._breakeven_applied.add(pos_id)
-                        logger.info(
-                            "Breakeven stop applied for position {} ({}) - SL moved to entry price",
-                            pos_id,
-                            pos.symbol,
+                        # Read-back verification: confirm SL was actually updated
+                        await asyncio.sleep(0.5)  # Brief delay for propagation
+                        verified = await self._matchtrader.verify_sl_tp(
+                            position_id=pos_id, expected_sl=pos.open_price
                         )
-                        await self._send_alert(
-                            f"🛡️ <b>Breakeven Stop Applied</b>\n"
-                            f"• Position: {pos_id} ({pos.symbol})\n"
-                            f"• SL moved to entry price: {pos.open_price}"
-                        )
+                        if not verified:
+                            # Retry once: re-send modify + verify
+                            logger.warning(
+                                "Breakeven SL verify failed for {}, retrying modify...",
+                                pos_id,
+                            )
+                            retry_result = await self._matchtrader.modify_position(
+                                position_id=pos_id,
+                                symbol=pos.symbol,
+                                side=pos.side,
+                                volume=pos.volume,
+                                sl=pos.open_price,
+                                tp=pos.tp_price,
+                            )
+                            if retry_result.success:
+                                await asyncio.sleep(0.5)
+                                verified = await self._matchtrader.verify_sl_tp(
+                                    position_id=pos_id, expected_sl=pos.open_price
+                                )
+                        if verified:
+                            self._breakeven_applied.add(pos_id)
+                            # Store the breakeven SL in execution_meta for exit_reason
+                            self._update_breakeven_sl_in_meta(intent, pos.open_price)
+                            logger.info(
+                                "Breakeven stop applied and verified for {} ({}) — SL to entry",
+                                pos_id,
+                                pos.symbol,
+                            )
+                            await self._send_alert(
+                                f"\U0001f6e1\ufe0f <b>Breakeven Stop Applied</b>\n"
+                                f"\u2022 Position: {pos_id} ({pos.symbol})\n"
+                                f"\u2022 SL moved to entry price: {pos.open_price}"
+                            )
+                        else:
+                            logger.error(
+                                "Breakeven SL UNVERIFIED for {} after retry!",
+                                pos_id,
+                            )
+                            await self._send_alert(
+                                f"\u26a0\ufe0f <b>Breakeven SL UNVERIFIED</b>\n"
+                                f"\u2022 Position: {pos_id} ({pos.symbol})\n"
+                                f"\u2022 Modify reported success but read-back failed"
+                            )
                     else:
                         logger.warning(
                             "Failed to apply breakeven stop for position {}: {}",
@@ -1552,6 +1722,23 @@ class Scheduler:
                     str(pos.position_id),
                     e,
                 )
+
+    def _update_breakeven_sl_in_meta(self, intent: TradeIntent, breakeven_sl: float) -> None:
+        """Persist breakeven SL into execution_meta so exit_reason can reference it."""
+        try:
+            decision = self._store.get_decision(intent.id)
+            if decision and decision.execution_meta:
+                meta = json.loads(decision.execution_meta)
+            else:
+                meta = {}
+            meta["breakeven_sl"] = breakeven_sl
+            self._store.update_execution_meta(intent.id, json.dumps(meta))
+        except Exception as e:
+            logger.warning(
+                "Failed to update breakeven_sl in meta for {}: {}",
+                intent.id,
+                e,
+            )
 
     async def _reevaluate_open_positions(
         self, open_positions: list[Any], opened_intents: list[TradeIntent]
@@ -1853,6 +2040,10 @@ class Scheduler:
                 max_dd_reference=max_dd_ref,
             )
             logger.info("Daily summary sent for {}", date_str)
+
+            # v1.3.9: Emit operational metrics snapshot (P3.11 + P3.12)
+            self._log_trade_event("METRICS_SNAPSHOT", self._metrics.get_summary())
+
         except Exception as e:
             logger.error("Failed to send daily summary: {}", e)
             await self._send_alert(f"⚠️ <b>Daily Summary Error</b>\n<code>{e}</code>")
@@ -2020,3 +2211,6 @@ class Scheduler:
         self._best_day_tracker.reset()
         self._best_day_tracker_date = today
         self._best_day_paused_today = None
+        # v1.3.9: Daily reset for operational metrics and low-confidence cooldown
+        self._metrics.reset()
+        self._low_confidence_cooldown.reset_all()

@@ -195,9 +195,7 @@ class TelegramBotHandler:
                 return data.get("result", [])
             if response.status_code == 409:
                 # M1: Another instance is polling this bot token
-                self._conflict_backoff = min(
-                    max(self._conflict_backoff * 2, 5.0), 120.0
-                )
+                self._conflict_backoff = min(max(self._conflict_backoff * 2, 5.0), 120.0)
                 logger.warning(
                     "TelegramBotHandler: 409 Conflict — another instance is polling"
                     " this bot token. Backing off {:.0f}s",
@@ -218,16 +216,12 @@ class TelegramBotHandler:
             self._record_failure()  # Circuit breaker: failure
             return []
 
-
     # ── Circuit Breaker Helpers ─────────────────────────────────────────
 
     def _record_failure(self) -> None:
         """Increment failure counter and open circuit if threshold reached."""
         self._consecutive_failures += 1
-        if (
-            not self._circuit_open
-            and self._consecutive_failures >= self._CIRCUIT_OPEN_THRESHOLD
-        ):
+        if not self._circuit_open and self._consecutive_failures >= self._CIRCUIT_OPEN_THRESHOLD:
             self._circuit_open = True
             self._circuit_opened_at = time.monotonic()
             logger.warning(

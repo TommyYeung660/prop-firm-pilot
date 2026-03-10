@@ -412,6 +412,17 @@ class TacticalValidator:
         Returns:
             TacticalResult with action (PASS/WAIT/REJECT) and gate details.
         """
+        # ── No-data guard: reject when ALL tactical signals are missing ──
+        has_spread = data.current_spread > 0 or data.typical_spread > 0
+        has_bars = not data.bars_5min.empty or not data.bars_1h.empty
+        has_freshness = data.latest_bar_time is not None
+        if not has_spread and not has_bars and not has_freshness:
+            logger.warning("Tactical REJECT: no data — spread, bars, freshness all missing")
+            return TacticalResult(
+                action="REJECT",
+                detail="No tactical data available — spread, bars, and freshness all missing",
+            )
+
         hard_results = self.check_hard_gates(data)
         hard_passed = all(r.passed for r in hard_results)
 
