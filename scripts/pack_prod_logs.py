@@ -2,7 +2,7 @@
 Pack production logs, data artifacts, and LLM summaries for PropFirmPilot.
 
 Collects raw production outputs, exports Telegram messages, generates
-LLM-optimized summaries via kimi-k2.5, builds an INDEX, and zips
+LLM-optimized summaries via gpt-5.4, builds an INDEX, and zips
 everything into a single archive.
 
 Usage:
@@ -30,8 +30,8 @@ from loguru import logger
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-BASE_URL = "https://ark.cn-beijing.volces.com/api/coding/v3"
-MODEL_NAME = "kimi-k2.5"
+BASE_URL = "https://right.codes/codex/v1"
+MODEL_NAME = "gpt-5.4"
 MAX_LOG_CHARS = 100_000
 
 
@@ -265,7 +265,7 @@ async def _call_llm(
     system_prompt: str,
     user_content: str,
 ) -> str:
-    """Call kimi-k2.5 via volcengine OpenAI-compatible API."""
+    """Call gpt-5.4 via rightcodes OpenAI-compatible API."""
     url = f"{base_url}/chat/completions"
     payload = {
         "model": MODEL_NAME,
@@ -303,9 +303,9 @@ async def _summarize_all(
     memory_content: str,
     telegram_content: str,
 ) -> None:
-    api_key = os.getenv("VOLCENGINE_API_KEY")
+    api_key = os.getenv("RIGHTCODE_API_KEY")
     if not api_key:
-        logger.warning("VOLCENGINE_API_KEY not set; skipping LLM summaries")
+        logger.warning("RIGHTCODE_API_KEY not set; skipping LLM summaries")
         return
 
     async with httpx.AsyncClient() as client:
