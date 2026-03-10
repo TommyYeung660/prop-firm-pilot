@@ -280,6 +280,18 @@ class SchedulerConfig(BaseModel):
         description="Max times to attempt same symbol+direction per day. 0=disabled.",
     )
 
+    # v1.3.9: Low-confidence scanner cooldown
+    low_confidence_cooldown_minutes: int = Field(
+        default=240,
+        description=(
+            "Cooldown minutes after consecutive low-confidence LLM cancellations. 0=disabled."
+        ),
+    )
+    low_confidence_threshold: int = Field(
+        default=2,
+        description="Number of consecutive low-confidence cancellations to trigger cooldown.",
+    )
+
     # v1.2.0: Multi-timeframe analysis
     multi_timeframe_enabled: bool = Field(
         default=False, description="Enable multi-timeframe entry timing"

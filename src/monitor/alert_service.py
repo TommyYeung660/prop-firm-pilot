@@ -18,6 +18,7 @@ Usage:
 """
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -47,6 +48,7 @@ class AlertService:
         profit_target_pct: float = 0.0,
         daily_loss_pct: float = 0.0,
         max_drawdown_pct: float = 0.0,
+        on_send_failure: Callable[[], None] | None = None,
     ) -> None:
         self._bot_token = bot_token
         self._chat_id = chat_id
@@ -57,6 +59,7 @@ class AlertService:
         self._max_drawdown_pct = max_drawdown_pct
         self._http_client: httpx.AsyncClient | None = None
         self._enabled = bool(bot_token and chat_id)
+        self._on_send_failure = on_send_failure
 
         # ── Circuit Breaker State ──────────────────────────────────────
         self._consecutive_failures: int = 0
@@ -160,6 +163,8 @@ class AlertService:
     def _record_failure(self) -> None:
         """Increment failure counter and open circuit if threshold reached."""
         self._consecutive_failures += 1
+        if self._on_send_failure:
+            self._on_send_failure()
         if not self._circuit_open and self._consecutive_failures >= self._CIRCUIT_OPEN_THRESHOLD:
             self._circuit_open = True
             self._circuit_opened_at = time.monotonic()

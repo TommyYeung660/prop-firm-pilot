@@ -14,6 +14,7 @@ API Reference:
 
 import asyncio
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -93,6 +94,7 @@ class ClosedPosition(BaseModel):
     profit: float = 0.0
     open_time: str = Field(default="", alias="openTime")
     close_time: str = Field(default="", alias="closeTime")
+    close_reason: str = Field(default="", alias="closeReason")
 
     model_config = {"populate_by_name": True}
 
@@ -331,6 +333,7 @@ class MatchTraderClient:
         daily_request_limit: int = 2000,
         max_retries: int = 3,
         store: Any = None,
+        on_retry: Callable[[], None] | None = None,
     ):
         self._base_url = base_url.rstrip("/")
         self._email = email
@@ -343,6 +346,7 @@ class MatchTraderClient:
         self._last_auth_time: float = 0.0
         self._rate_limiter = RateLimiter(daily_request_limit, store=store)
         self._session: AsyncSession[Any] | None = None
+        self._on_retry = on_retry
 
     # ── Context Manager ─────────────────────────────────────────────────
 
@@ -976,6 +980,8 @@ class MatchTraderClient:
                 wait = 2**attempt
                 logger.warning("MatchTrader: rate limited, waiting {}s (attempt {})", wait, attempt)
                 await asyncio.sleep(wait)
+                if self._on_retry:
+                    self._on_retry()
                 last_error = e
 
             except Exception as e:
@@ -988,6 +994,8 @@ class MatchTraderClient:
                     attempt,
                 )
                 await asyncio.sleep(wait)
+                if self._on_retry:
+                    self._on_retry()
                 last_error = e
 
         raise MatchTraderError(f"Request failed after {self._max_retries} retries: {last_error}")

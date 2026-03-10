@@ -355,12 +355,12 @@ async def test_reeval_close_not_reinferred(
 # ── Tests: Retry Call Count ─────────────────────────────────────────────────
 
 
-async def test_retry_calls_broker_api_up_to_3_times(
+async def test_retry_calls_broker_api_up_to_5_times(
     scheduler: Scheduler,
     store: DecisionStore,
     mock_matchtrader: AsyncMock,
 ):
-    """Verify broker API is called exactly 3 times when position is never found."""
+    """Verify broker API is called exactly 5 times when position is never found."""
     intent = _make_opened_intent()
     store.insert_intent(intent)
 
@@ -369,7 +369,7 @@ async def test_retry_calls_broker_api_up_to_3_times(
     with patch("asyncio.sleep", new_callable=AsyncMock):
         await scheduler._handle_position_closed(intent)
 
-    assert mock_matchtrader.get_closed_positions.call_count == 3
+    assert mock_matchtrader.get_closed_positions.call_count == 5
 
 
 async def test_retry_stops_early_when_found(

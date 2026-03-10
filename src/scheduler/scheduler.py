@@ -46,10 +46,13 @@ from src.execution.matchtrader_client import MatchTraderClient
 from src.monitor.alert_service import AlertService
 from src.monitor.equity_monitor import EquityMonitor
 from src.monitor.memory_journal import MemoryJournal
+from src.monitor.operational_metrics import OperationalMetrics
 from src.monitor.trade_journal import TradeJournal
 from src.optimize.optimization_engine import OptimizationEngine
 from src.optimize.optimization_state import OptimizationState, Thresholds
+from src.scheduler.close_resolution import determine_resolution_path
 from src.scheduler.decision_cache import StrategicDecisionCache
+from src.scheduler.low_confidence_cooldown import LowConfidenceCooldown
 from src.scheduler.market_hours import MarketHoursChecker
 from src.scheduler.session_cadence import SessionCadence
 from src.scheduler.volatility_monitor import VolatilityMonitor
@@ -164,6 +167,15 @@ class Scheduler:
 
         # v1.2.0: Volatility-triggered re-scans
         self._volatility_monitor = VolatilityMonitor(config.scheduler, config.symbols)
+
+        # v1.3.9: Low-confidence scanner cooldown (P3.10)
+        self._low_confidence_cooldown = LowConfidenceCooldown(
+            cooldown_minutes=config.scheduler.low_confidence_cooldown_minutes,
+            threshold=config.scheduler.low_confidence_threshold,
+        )
+
+        # v1.3.9: Operational metrics (P3.11 + P3.12)
+        self._metrics = OperationalMetrics()
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -332,6 +344,19 @@ class Scheduler:
                                 "skipping to avoid retry loop",
                                 signal.instrument,
                                 rejection_cooldown,
+                            )
+                            continue
+
+                        # P3.10: Low-confidence scanner cooldown
+                        if self._low_confidence_cooldown.is_cooled_down(
+                            signal.instrument, self._now_utc()
+                        ):
+                            count = self._low_confidence_cooldown.get_count(signal.instrument)
+                            logger.warning(
+                                "Scanner loop: {} in low-confidence cooldown "
+                                "({} consecutive cancels), skipping",
+                                signal.instrument,
+                                count,
                             )
                             continue
 
@@ -555,6 +580,8 @@ class Scheduler:
                     intent.scanner_confidence,
                     pre_blended,
                 )
+                self._low_confidence_cooldown.record_low_confidence(intent.symbol, self._now_utc())
+                self._metrics.record_llm_result("cancel")
             return
 
         decision = await asyncio.to_thread(
@@ -601,6 +628,7 @@ class Scheduler:
                 )
 
         if decision.is_actionable:
+            self._metrics.record_llm_result("success")
             if self._should_pause_new_entries():
                 await self._cancel_intent_safe(
                     worker_id=worker_id,
@@ -707,6 +735,8 @@ class Scheduler:
                         intent.scanner_confidence,
                         formatted.confidence_score,
                     )
+                self._low_confidence_cooldown.record_low_confidence(intent.symbol, self._now_utc())
+                self._metrics.record_llm_result("cancel")
                 return
             try:
                 # v1.3.9: Store AB model_id in final_state for engine.py
@@ -788,8 +818,10 @@ class Scheduler:
                             intent.id,
                             tactical_result.action,
                         )
+                        self._metrics.record_tactical_result(passed=False)
                         return
 
+                self._metrics.record_tactical_result(passed=True)
                 await asyncio.to_thread(self._store.mark_ready_for_exec, intent.id)
                 logger.info(
                     "LLM worker {}: intent {} → {} (ready for execution)",
@@ -811,6 +843,7 @@ class Scheduler:
                     return
                 raise
         else:
+            self._metrics.record_llm_result("cancel")
             cancelled = await self._cancel_intent_safe(
                 worker_id=worker_id,
                 intent_id=intent.id,
@@ -1205,7 +1238,7 @@ class Scheduler:
             now_ms = int(self._now_utc().timestamp() * 1000)
             day_ago_ms = now_ms - 86_400_000
             matched = False
-            for attempt, delay in enumerate((2.0, 4.0, 8.0), start=1):
+            for attempt, delay in enumerate((2.0, 4.0, 8.0, 12.0, 16.0), start=1):
                 await asyncio.sleep(delay)
                 closed_positions = await self._matchtrader.get_closed_positions(
                     from_ts=day_ago_ms, to_ts=now_ms
@@ -1227,7 +1260,7 @@ class Scheduler:
                     break
                 logger.debug(
                     "Position monitor: closed position {} not found in broker API"
-                    " (attempt {}/3, waited {}s)",
+                    " (attempt {}/5, waited {}s)",
                     position_id,
                     attempt,
                     delay,
@@ -1242,6 +1275,7 @@ class Scheduler:
         # ── v1.3.9: execution_meta fallback for volume/prices ──────────
         # When broker API didn't return data, read from execution_meta
         # (persisted at trade open time by engine.py)
+        used_execution_meta = False
         if volume == 0.0 or close_price == 0.0:
             try:
                 decision = await asyncio.to_thread(self._store.get_decision, intent.id)
@@ -1249,6 +1283,7 @@ class Scheduler:
                     meta = json.loads(decision.execution_meta)
                     if volume == 0.0 and meta.get("volume"):
                         volume = meta["volume"]
+                        used_execution_meta = True
                         logger.info(
                             "Position monitor: using execution_meta volume={} for {}",
                             volume,
@@ -1275,10 +1310,12 @@ class Scheduler:
                     intent.id,
                     e,
                 )
+        used_best_day = False
         # Override exit_reason if Best Day Rule triggered this close
         # and use recorded unrealized PnL as fallback when broker query returned 0
         if position_id in self._best_day_close_positions:
             exit_reason = "best_day_close"
+            used_best_day = True
             if pnl == 0.0:
                 pnl = self._best_day_close_positions[position_id]
                 logger.info(
@@ -1287,10 +1324,12 @@ class Scheduler:
                     position_id,
                 )
             self._best_day_close_positions.pop(position_id, None)
+        used_reeval = False
         # Override exit_reason if re-evaluation triggered this close
         # and use recorded unrealized PnL as fallback when broker query returned 0
         if position_id in self._reevaluation_close_positions:
             exit_reason = "reeval_close"
+            used_reeval = True
             if pnl == 0.0:
                 pnl = self._reevaluation_close_positions[position_id]
                 logger.info(
@@ -1300,8 +1339,10 @@ class Scheduler:
                 )
             self._reevaluation_close_positions.pop(position_id, None)
         # Fallback for unknown close: use last-known unrealized PnL from position monitor
+        used_last_known = False
         if pnl == 0.0 and position_id in self._last_known_profit:
             pnl = self._last_known_profit[position_id]
+            used_last_known = True
             logger.info(
                 "Position monitor: using last-known polled PnL ${:+.2f} for {}",
                 pnl,
@@ -1337,6 +1378,14 @@ class Scheduler:
             except Exception:
                 pass  # Keep existing exit_reason; decision stays as loaded
 
+        # v1.3.9: Resolution path tracking for trade retrospection quality
+        resolution_path = determine_resolution_path(
+            matched=matched,
+            used_execution_meta=used_execution_meta,
+            used_best_day=used_best_day,
+            used_reeval=used_reeval,
+            used_last_known=used_last_known,
+        )
         # Clean up reevaluation tracking
         self._last_reevaluation.pop(position_id, None)
         self._last_known_profit.pop(position_id, None)
@@ -1384,8 +1433,13 @@ class Scheduler:
                 "position_id": position_id,
                 "pnl": pnl,
                 "reason": exit_reason,
+                "resolution_path": resolution_path,
             },
         )
+        # v1.3.9: Operational metrics — record trade close (P3.11)
+        self._metrics.record_trade_close(exit_reason)
+        # v1.3.9: Reset low-confidence cooldown on successful close (P3.10)
+        self._low_confidence_cooldown.reset_symbol(symbol)
         # Call LLM reflect for learning
         if pnl != 0.0:
             try:
@@ -1986,6 +2040,10 @@ class Scheduler:
                 max_dd_reference=max_dd_ref,
             )
             logger.info("Daily summary sent for {}", date_str)
+
+            # v1.3.9: Emit operational metrics snapshot (P3.11 + P3.12)
+            self._log_trade_event("METRICS_SNAPSHOT", self._metrics.get_summary())
+
         except Exception as e:
             logger.error("Failed to send daily summary: {}", e)
             await self._send_alert(f"⚠️ <b>Daily Summary Error</b>\n<code>{e}</code>")
@@ -2153,3 +2211,6 @@ class Scheduler:
         self._best_day_tracker.reset()
         self._best_day_tracker_date = today
         self._best_day_paused_today = None
+        # v1.3.9: Daily reset for operational metrics and low-confidence cooldown
+        self._metrics.reset()
+        self._low_confidence_cooldown.reset_all()
