@@ -57,7 +57,7 @@ class TestE8OneConfig:
         assert e8_one_config.compliance.best_day_limit == 180
         assert e8_one_config.compliance.drawdown_type == "dynamic"
         assert e8_one_config.symbols == ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD"]
-        assert e8_one_config.execution.default_risk_pct == 0.005
+        assert e8_one_config.execution.default_risk_pct == 0.007
         assert e8_one_config.decision_store.db_path == "data/decisions_e8_one_5k.db"
         assert e8_one_config.monitor.trade_journal_path == "data/trade_journal_e8_one_5k.jsonl"
         assert e8_one_config.monitor.memory_dir == "MEMORY_E8_ONE_5K"
@@ -80,27 +80,25 @@ class TestE8OneDrawdownRules:
         assert result.rule_name == "DAILY_DRAWDOWN"
 
     def test_max_drawdown_passes(self, e8_one_guard):
-        # 6% of HWM. If HWM is 5000, 6% is 300. Safe is 300 * 85% = 255.
+        # 6% of HWM. If HWM is 5000, 6% is 300. Safe is 300 * 90% = 270.
         account = _snapshot(equity=4760.0, total_pnl=-240.0, equity_high_water_mark=5000.0)
-        trade = _trade(risk=10.0)  # 240 + 10 = 250 < 255
+        trade = _trade(risk=10.0)  # current_loss=240, projected=250 < 270
         result = e8_one_guard.check_max_drawdown(trade, account)
         assert result.passed is True
 
     def test_max_drawdown_rejects(self, e8_one_guard):
-        account = _snapshot(equity=4750.0, total_pnl=-250.0, equity_high_water_mark=5000.0)
-        trade = _trade(risk=10.0)  # 250 + 10 = 260 > 255 safe limit
+        account = _snapshot(equity=4730.0, total_pnl=-270.0, equity_high_water_mark=5000.0)
+        trade = _trade(risk=10.0)  # current_loss=270, projected=280 >= 270 safe limit
         result = e8_one_guard.check_max_drawdown(trade, account)
         assert result.passed is False
         assert result.rule_name == "MAX_DRAWDOWN_DYNAMIC"
 
     def test_trailing_drawdown_rejects_from_high_water_mark(self, e8_one_guard):
-        # HWM = 5200. Max DD is 6% of 5000 (initial) = 300. Wait, is it 6% of initial or HWM?
-        # Let's check config logic. It's usually 6% of initial. 5000 * 0.06 = 300.
-        # So floor moves up: 5200 - 300 = 4900.
-        # Safe limit is 85% of 300 = 255.
-        # If HWM is 5200, floor is 4900, safe floor is 4945.
-        account = _snapshot(equity=4950.0, total_pnl=-50.0, equity_high_water_mark=5200.0)
-        trade = _trade(risk=20.0)  # Projected loss: 250 + 20 = 270 > 265.2 (Safe Limit)
+        # HWM = 5200. Max DD is 6% of initial? No — dynamic uses HWM as reference.
+        # reference=5200, max_allowed=5200*0.06=312, safe_limit=312*0.90=280.8
+        # current_loss=5200-4920=280, projected=280+20=300 >= 280.8 → reject
+        account = _snapshot(equity=4920.0, total_pnl=-80.0, equity_high_water_mark=5200.0)
+        trade = _trade(risk=20.0)
         result = e8_one_guard.check_max_drawdown(trade, account)
         assert result.passed is False
 
