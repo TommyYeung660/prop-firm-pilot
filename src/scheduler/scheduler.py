@@ -917,8 +917,12 @@ class Scheduler:
         data = TacticalData()
 
         # ── Spread from MatchTrader ──────────────────────────────────────────
+        # Map config symbol (e.g. "EURUSD") to broker symbol (e.g. "EURUSD.")
+        broker_symbol = symbol
+        if self._registry is not None:
+            broker_symbol = self._registry.to_broker(symbol)
         try:
-            quote = await self._matchtrader.get_quote(symbol)
+            quote = await self._matchtrader.get_quote(broker_symbol)
             if quote:
                 if isinstance(quote, dict):
                     ask = quote.get("ask", 0)
