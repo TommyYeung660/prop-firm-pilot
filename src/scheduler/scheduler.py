@@ -328,6 +328,21 @@ class Scheduler:
                             )
                             continue
 
+                        # P0: Position-aware scanner — skip symbols with active position
+                        # This prevents wasted LLM calls for symbols already held.
+                        # The duplicate_entry_guard in _process_claimed_intent is a
+                        # backup; this early check avoids ~50% of unnecessary LLM spend.
+                        has_active = await asyncio.to_thread(
+                            self._store.has_active_position_for_symbol,
+                            signal.instrument,
+                        )
+                        if has_active:
+                            logger.info(
+                                "Scanner loop: {} already has active position, skipping intent",
+                                signal.instrument,
+                            )
+                            continue
+
                         # C3 fix: Skip symbols with recent compliance rejection (cooldown)
                         rejection_cooldown = getattr(
                             self._config.scheduler, "rejection_cooldown_minutes", 120
