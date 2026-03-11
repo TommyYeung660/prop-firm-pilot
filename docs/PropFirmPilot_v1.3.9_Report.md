@@ -1,7 +1,7 @@
 # PropFirmPilot v1.3.9 — v1.3.7 生產環境問題修復報告 + v1.3.9 生產強化
 
-> **報告日期**: 2026-03-09（初版）/ 2026-03-10（追加 Part F）  
-> **版本**: v1.3.8 (P0/P1) + v1.3.9 (P2/P3) + v1.3.9a (生產強化)  
+> **報告日期**: 2026-03-09（初版）/ 2026-03-10（追加 Part F）/ 2026-03-11（追加 Part G）  
+> **版本**: v1.3.8 (P0/P1) + v1.3.9 (P2/P3) + v1.3.9a (生產強化) + v1.3.9b (生產調優)  
 > **基準版本**: v1.3.7  
 > **聚焦範圍**: v1.3.7 五天生產運行 (Mar 4-9, 2026) 發現的 15 個問題全面修復 + v1.3.9 首日生產 (Mar 10) 發現的 12 個問題強化修復，涵蓋 prop-firm-pilot 與 TradingAgents 兩個倉庫
 
@@ -67,6 +67,16 @@
 39. [修改檔案清單 (v1.3.9a)](#39-修改檔案清單-v139a)
 40. [Git Commit 記錄 (v1.3.9a)](#40-git-commit-記錄-v139a)
 41. [測試覆蓋 (v1.3.9a)](#41-測試覆蓋-v139a)
+
+### Part G — v1.3.9b 生產調優 (Mar 11 Log Analysis)
+
+42. [v1.3.9b 生產調優摘要](#42-v139b-生產調優摘要)
+43. [P0 — Scanner 持倉感知](#43-p0--scanner-持倉感知)
+44. [P1 — Blended Confidence Threshold 審查](#44-p1--blended-confidence-threshold-審查)
+45. [P2 — Memory Journal Diff 欄位](#45-p2--memory-journal-diff-欄位)
+46. [P1 — Config 激進化調整](#46-p1--config-激進化調整)
+47. [修改檔案清單 (v1.3.9b)](#47-修改檔案清單-v139b)
+48. [測試覆蓋 (v1.3.9b)](#48-測試覆蓋-v139b)
 
 ---
 
@@ -1579,3 +1589,219 @@ Scanner 反覆取消低信心信號但無冷卻機制，導致同一品種短時
 | `tests/test_no_data_no_trade.py` (NEW) | 空數據放棄/足夠通過/部分數據 |
 | `tests/test_operational_metrics.py` (NEW) | 指標記錄/摘要/重置 |
 | `tests/test_risk_meta_extraction.py` (NEW) | 欄位解析/缺失預設/無 report |
+
+---
+
+# Part G — v1.3.9b 生產調優
+
+---
+
+## 42. v1.3.9b 生產調優摘要
+
+### 背景
+
+v1.3.9a 於 2026-03-10 19:00 (UTC+8) 完成最後一次 hotfix 後部署至生產環境，運行約 14 小時（至 2026-03-11 09:00）。經分析生產日誌，發現以下核心問題：
+
+1. **Scanner 重複開倉**（P0）：Scanner 對已持倉品種仍生成 intent，導致 Duplicate Entry Guard 頻繁攔截
+2. **Blended Confidence 門檻過高**（P1）：cold-start / losing tier 門檻設定過嚴，大量決策被 threshold 擋下
+3. **記憶日誌重複度高**（P2）：相同 symbol 連續決策幾乎相同內容，缺乏 diff 對比
+4. **交易效率過低**（P1）：14 小時僅 1 個倉位，資金使用率極低
+
+### 用戶指令（暫時忽略項）
+
+- P1 — MatchTrader API 連線重置：暫時忽略
+- P2 — 缺少平倉績效閉環：暫時忽略
+
+### 修復統計
+
+| 指標 | 數值 |
+|---|---|
+| 問題總數 | 4 |
+| P0 | 1 |
+| P1 | 2 |
+| P2 | 1 |
+| 源碼文件修改 | 4 (3 src + 1 config) |
+| 測試文件修改 | 4 |
+| 測試通過 | 48/48 相關測試 |
+
+---
+
+## 43. P0 — Scanner 持倉感知
+
+### 問題描述
+
+Scanner loop 在生成 intent 時未檢查該品種是否已有活躍倉位。導致 EURUSD 已持倉時，Scanner 仍會產生新的 EURUSD intent，最終被下游的 Duplicate Entry Guard 攔截。這造成：
+- 無意義的 LLM 評估消耗（每次 intent 都走完整評估流程再被擋下）
+- 日誌噪音：大量 `duplicate_entry_guard` 拒絕記錄
+- Scanner slot 被佔用，真正可交易品種無法進入
+
+### 根因分析
+
+`_scanner_loop` (scheduler.py:234-472) 的 guard 序列為：
+1. ✅ `intent_exists` — 防止同一信號重複建 intent
+2. ❌ **缺少持倉檢查** — 已持倉品種仍生成 intent
+3. ✅ `rejection_cooldown` — 被拒品種冷卻
+
+### 修復方案
+
+在 `_scanner_loop` 的 `intent_exists` 檢查之後、`rejection_cooldown` 之前，新增持倉檢查：
+
+```python
+# P0: Position-aware scanner — skip symbols with active position
+has_active = await asyncio.to_thread(
+    self._store.has_active_position_for_symbol,
+    signal.instrument,
+)
+if has_active:
+    logger.info(
+        "Scanner loop: {} already has active position, skipping intent",
+        signal.instrument,
+    )
+    continue
+```
+
+使用既有方法 `has_active_position_for_symbol()` (sqlite_store.py:736)，查詢 `status = 'opened'` 的 intent。
+
+### 預期效果
+
+- 已持倉品種在 Scanner 層即被過濾，不進入 LLM 評估流程
+- 減少 Duplicate Entry Guard 觸發次數
+- 釋放 Scanner slot 給其他可交易品種
+
+---
+
+## 44. P1 — Blended Confidence Threshold 審查
+
+### 問題描述
+
+v1.3.9a 的 `_stepwise_threshold()` 門檻設定過於保守，導致大量合理決策被擋下：
+
+| Win-rate 區間 | 舊 min_confidence | 舊 min_blended |
+|---|---|---|
+| < 0.20 (cold-start) | "high" (0.9) | 0.50 |
+| < 0.45 (losing) | **"high" (0.9)** | 0.60 |
+| > 0.55 (winning) | "medium" (0.6) | 0.45 |
+| default | "medium" (0.6) | 0.55 |
+
+**核心問題**：losing tier 要求 `min_confidence = "high"` (0.9)，但 LLM 在缺乏交易歷史時很少給出 high confidence，形成 "越虧越難開倉" 的死循環。
+
+### 修復方案
+
+調整 `_stepwise_threshold()` (thresholds.py:25) 各 tier：
+
+| Win-rate 區間 | 新 min_confidence | 新 min_blended | 變化 |
+|---|---|---|---|
+| < 0.20 (cold-start) | "high" (0.9) | **0.48** | blended -0.02 |
+| < 0.45 (losing) | **"medium" (0.6)** | **0.52** | confidence 降級, blended -0.08 |
+| > 0.55 (winning) | "medium" (0.6) | 0.45 | 不變 |
+| default | "medium" (0.6) | **0.50** | blended -0.05 |
+
+Per-symbol adjustment 幅度縮小：`±0.05 → ±0.03`
+
+### 預期效果
+
+- Losing tier 不再要求 high confidence，打破 "越虧越難開倉" 死循環
+- Cold-start 和 default tier 略放寬，增加開倉機會
+- Per-symbol adjustment 縮小，防止單一品種過度偏離基準
+
+---
+
+## 45. P2 — Memory Journal Diff 欄位
+
+### 問題描述
+
+Memory Journal 對相同 symbol 的連續決策記錄幾乎相同的完整內容，造成：
+- 日誌冗長，難以快速定位變化
+- 無法一眼看出「這次決策和上次有什麼不同」
+
+### 修復方案
+
+在 `memory_journal.py` 中新增 diff 機制：
+
+1. **新增 `_last_decisions` dict**：儲存每個 symbol 的上次決策內容
+2. **新增 `_compute_diff()` 方法**：比較當前與上次決策，排除 `risk_report` 和 `final_state` 等大型欄位，產出變化列表
+3. **修改 `_format_decision_block()`**：當有 diff 時，渲染 "### Δ Changes vs Previous Decision" 區段
+
+### Diff 輸出範例
+
+```markdown
+### Δ Changes vs Previous Decision
+- **action**: BUY → SELL
+- **confidence**: high → medium
+- **blended_confidence**: 0.72 → 0.58
+- **scanner_score**: 3 → 2 (NEW)
+```
+
+---
+
+## 46. P1 — Config 激進化調整
+
+### 問題描述
+
+v1.3.9a 的 config 參數在 Duplicate Entry Guard + 持倉感知的保護下過於保守：
+- 14+ 小時僅 1 個倉位
+- 資金使用率極低
+- Scanner 掃描間隔過長，錯過短期機會
+
+### 修復方案
+
+調整 `config/e8_one_5k_challenge.yaml`：
+
+| 參數 | 舊值 | 新值 | 說明 |
+|---|---|---|---|
+| `default_risk_pct` | 0.007 | **0.01** | 每筆風險 $35→$50 |
+| `active_session_interval_seconds` | 3600 | **1800** | 活躍時段掃描 60min→30min |
+| `quiet_session_interval_seconds` | 14400 | **7200** | 非活躍掃描 4h→2h |
+| `tactical.soft_gates.min_score` | 2 | **1** | 降低 soft gate 門檻 |
+
+### 安全保障
+
+- **Compliance 參數未動**：daily drawdown (5%)、max drawdown (8%)、best day rule ($1,600) 均維持不變
+- **Duplicate Entry Guard**：同方向每日最多 2 筆
+- **Circuit Breaker**：連續 3 SL 觸發當日暫停該品種
+- **持倉感知**（本次 P0 修復）：已持倉品種不再重複建 intent
+
+---
+
+## 47. 修改檔案清單 (v1.3.9b)
+
+### 源碼 / 配置
+
+| 檔案 | 修改內容 |
+|---|---|
+| `src/scheduler/scheduler.py` | P0: `_scanner_loop` 新增持倉感知檢查 |
+| `src/optimize/thresholds.py` | P1: `_stepwise_threshold()` 放寬門檻 |
+| `src/monitor/memory_journal.py` | P2: 新增 `_compute_diff()` + diff 渲染 |
+| `config/e8_one_5k_challenge.yaml` | P1: risk_pct, intervals, soft_gate 調整 |
+
+### 測試
+
+| 檔案 | 修改內容 |
+|---|---|
+| `tests/optimize/test_thresholds.py` | 更新所有門檻斷言值 |
+| `tests/optimize/test_threshold_decay.py` | 更新 10 個衰減斷言值 |
+| `tests/test_config.py` | 更新 `active_session_interval_seconds` 斷言 |
+| `tests/test_prop_firm_guard_e8_one.py` | 更新 `default_risk_pct` 斷言 |
+
+---
+
+## 48. 測試覆蓋 (v1.3.9b)
+
+### 相關測試統計
+
+| 指標 | 數值 |
+|---|---|
+| 相關測試檔案 | 4 |
+| 相關測試總數 | 48 |
+| 通過 | 48 (100%) |
+| 失敗 | 0 |
+| Ruff 警告 | 0 |
+
+### 測試明細
+
+| 測試檔案 | 覆蓋項目 |
+|---|---|
+| `tests/optimize/test_thresholds.py` | stepwise threshold 各 tier 門檻值、per-symbol adjustment |
+| `tests/optimize/test_threshold_decay.py` | threshold 衰減行為、各 win-rate 區間衰減值 |
+| `tests/test_config.py` | YAML config 載入、active_session_interval_seconds |
+| `tests/test_prop_firm_guard_e8_one.py` | E8 One 帳戶合規守衛、default_risk_pct |

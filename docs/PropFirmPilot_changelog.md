@@ -10,6 +10,31 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.9b] — 2026-03-11
+**v1.3.9a Production Tuning — Scanner Position-Aware, Threshold Review, Memory Journal Diff, Config Aggressiveness**
+
+### Fixed
+- **P0**: Scanner generated intents for symbols with active positions — added `has_active_position_for_symbol()` check in `_scanner_loop` before intent creation, preventing wasted LLM evaluations and Duplicate Entry Guard noise
+- **P1**: Blended confidence threshold too strict for cold-start/losing tiers — losing tier `min_confidence` downgraded from "high" to "medium", `min_blended_confidence` reduced across tiers (cold-start 0.50→0.48, losing 0.60→0.52, default 0.55→0.50), per-symbol adjustment narrowed ±0.05→±0.03
+
+### Added
+- `_compute_diff()` method in `src/monitor/memory_journal.py`: compares current decision with previous for same symbol, renders "Δ Changes vs Previous Decision" section in memory journal entries
+- `_last_decisions` dict in `MemoryJournal.__init__`: tracks last decision per symbol for diff computation
+
+### Changed
+- `config/e8_one_5k_challenge.yaml`: `default_risk_pct` 0.007→0.01 ($35→$50/trade), `active_session_interval_seconds` 3600→1800, `quiet_session_interval_seconds` 14400→7200, `tactical.soft_gates.min_score` 2→1
+- Compliance parameters (drawdown limits, best day rule) unchanged — safety margins preserved
+
+### Tested
+- **48 related tests passed** across 4 test files (thresholds, threshold_decay, config, prop_firm_guard_e8_one)
+- Ruff lint + format: 0 warnings
+
+### Files
+- Modified: `src/scheduler/scheduler.py`, `src/optimize/thresholds.py`, `src/monitor/memory_journal.py`, `config/e8_one_5k_challenge.yaml`
+- Tests (Modified): `tests/optimize/test_thresholds.py`, `tests/optimize/test_threshold_decay.py`, `tests/test_config.py`, `tests/test_prop_firm_guard_e8_one.py`
+
+---
+
 ## [1.3.9a] — 2026-03-10
 **v1.3.9 Production Hardening — Breakeven Verify, LLM Fallback, Circuit Breaker, Operational Metrics**
 
