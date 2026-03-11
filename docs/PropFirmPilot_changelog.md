@@ -10,6 +10,40 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.0] — 2026-03-11
+**WebSocket-First Market Data + Closed-Trade Learning Loop**
+
+### Added
+- `src/data/fx_websocket_client.py`：EODHD FX WebSocket client，負責 subscribe、tick parse、bounded reconnect、feed stale detection
+- `src/data/fx_tick_aggregator.py`：tick -> latest quote / closed `1m` bars / roll-up `5m` + `1h` bars
+- `src/data/market_data_hub.py`：統一 market-data read path，支援 `websocket_cache` / `warmup_cache` / `rest_fallback`
+- `Scheduler._build_reflection_payload()`：平倉後輸出 structured reflection payload，攜帶 outcome、market context、risk context
+- TradingAgents 新測試：`tests/test_memory_reflection.py`、`tests/test_prompt_memory_injection.py`
+
+### Changed
+- `src/config.py` + `config/e8_one_5k_challenge.yaml` 新增 `websocket` config block，並預設 `enabled: true`、`use_as_primary_market_data: true`
+- `src/scheduler/scheduler.py` 啟動時先 warm up market-data hub，再啟動 WebSocket sidecar；平倉後反射改走 structured payload
+- `src/scheduler/volatility_monitor.py` 改為 WebSocket-first quote path；`_fetch_tactical_data()` 改為 local aggregated bars first，REST 僅保留 cold-start / stale fallback
+- `src/decision/tactical_validator.py` 新增 `quote_source` / `bars_5min_source` / `bars_1h_source` / `data_source` metadata，明確暴露資料來源
+- TradingAgents memory layer 現在會持久化 structured trade lesson metadata，並在 decision-time retrieval 後注入 `retrieved_trade_lessons` 至 trader prompt
+
+### Operational Notes
+- 本版採 **aggressive rollout**：WebSocket 成為預設 primary market-data path
+- REST 未被移除，只保留 broker state、news、cold-start historical backfill 與 feed degraded fallback
+- reflection / memory retrieval 皆維持 best-effort，不可阻塞 broker close flow 或 decision flow
+
+### Tested
+- prop-firm-pilot：WebSocket client、tick aggregator、market-data hub、scheduler startup、volatility monitor、tactical fetch、reflection payload 定向測試已通過
+- TradingAgents：structured memory persistence、retrieved lesson injection、thread-safety / trader prompt 相關回歸測試已通過
+- 完整驗證命令與結果彙總記錄於 `docs/PropFirmPilot_v1.4.0_Report.md`
+
+### Files
+- prop-firm-pilot：`src/config.py`, `src/data/fx_websocket_client.py`, `src/data/fx_tick_aggregator.py`, `src/data/market_data_hub.py`, `src/scheduler/scheduler.py`, `src/scheduler/volatility_monitor.py`, `src/decision/tactical_validator.py`
+- prop-firm-pilot tests：`tests/data/test_fx_websocket_client.py`, `tests/data/test_fx_tick_aggregator.py`, `tests/data/test_market_data_hub.py`, `tests/test_scheduler.py`, `tests/test_volatility_monitor.py`, `tests/test_agent_bridge_config.py`
+- TradingAgents：`tradingagents/agents/utils/memory.py`, `tradingagents/graph/reflection.py`, `tradingagents/graph/trading_graph.py`, `tradingagents/graph/propagation.py`, `tradingagents/agents/utils/agent_states.py`, `tradingagents/agents/trader/trader.py`
+
+---
+
 ## [1.3.9c] — 2026-03-11
 **OODA Loop Closure — Scheduler Risk Wiring, Tactical Retry, Strategic Cache, Persistent Memory, News Trigger**
 
