@@ -1,6 +1,10 @@
 """Tests for volatility monitor (v1.2.0)."""
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from src.config import SchedulerConfig
 from src.scheduler.volatility_monitor import VolatilityMonitor
@@ -188,3 +192,57 @@ class TestVolatilityMonitor:
         monitor.record_quote("XAUUSD", 2020.0, t1)  # +1.0% big move
         triggered2, _, _ = monitor.check_triggers(t1)
         assert not triggered2  # Global interval blocks it
+
+    @pytest.mark.asyncio
+    async def test_check_once_reads_quotes_from_market_data_hub(self):
+        config = SchedulerConfig(
+            volatility_trigger_enabled=True,
+            volatility_threshold_pct=0.3,
+            volatility_window_minutes=30,
+            volatility_cooldown_seconds=0,
+        )
+        now = _utc_now()
+        hub = SimpleNamespace(
+            get_quote=AsyncMock(
+                return_value=SimpleNamespace(
+                    source="websocket_cache",
+                    quote={"mid": 1.0840},
+                )
+            )
+        )
+        monitor = VolatilityMonitor(config, ["EURUSD"], market_data_hub=hub)
+        monitor.record_quote("EURUSD", 1.0800, now - timedelta(minutes=15))
+
+        triggered, symbol, pct = await monitor.check_once(now)
+
+        assert triggered is True
+        assert symbol == "EURUSD"
+        assert pct > 0.3
+        assert monitor.last_source == "websocket_cache"
+
+    @pytest.mark.asyncio
+    async def test_check_once_falls_back_to_rest_for_stale_symbol(self):
+        config = SchedulerConfig(
+            volatility_trigger_enabled=True,
+            volatility_threshold_pct=0.3,
+            volatility_window_minutes=30,
+            volatility_cooldown_seconds=0,
+        )
+        now = _utc_now()
+        hub = SimpleNamespace(
+            get_quote=AsyncMock(
+                return_value=SimpleNamespace(
+                    source="rest_fallback",
+                    quote={"mid": 1.0840},
+                )
+            )
+        )
+        monitor = VolatilityMonitor(config, ["EURUSD"], market_data_hub=hub)
+        monitor.record_quote("EURUSD", 1.0800, now - timedelta(minutes=15))
+
+        triggered, symbol, pct = await monitor.check_once(now)
+
+        assert triggered is True
+        assert symbol == "EURUSD"
+        assert pct > 0.3
+        assert monitor.last_source == "rest_fallback"

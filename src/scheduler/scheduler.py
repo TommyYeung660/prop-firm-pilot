@@ -272,6 +272,7 @@ class Scheduler:
             symbols=symbols,
             quote_ttl_seconds=self._config.websocket.quote_ttl_seconds,
         )
+        self._volatility_monitor.set_market_data_hub(self._market_data_hub)
         await self._market_data_hub.warmup()
         self._market_data_task = asyncio.create_task(self._websocket_client.run())
         self._market_data_ready = True
@@ -2373,19 +2374,22 @@ class Scheduler:
                 await self._wait_for_market_open("Volatility monitor")
                 now = self._now_utc()
 
-                for symbol in self._config.symbols:
-                    try:
-                        # Map config symbol to broker symbol if needed
-                        broker_symbol = symbol
-                        if self._registry is not None:
-                            broker_symbol = self._registry.to_broker(symbol)
-                        quote = await self._matchtrader.get_quote(broker_symbol)
-                        mid_price = (quote.bid + quote.ask) / 2
-                        self._volatility_monitor.record_quote(symbol, mid_price, now)
-                    except Exception as e:
-                        logger.debug("Volatility monitor: quote failed for {}: {}", symbol, e)
+                if self._market_data_ready and self._market_data_hub is not None:
+                    triggered, symbol, pct = await self._volatility_monitor.check_once(now)
+                else:
+                    for symbol in self._config.symbols:
+                        try:
+                            # Map config symbol to broker symbol if needed
+                            broker_symbol = symbol
+                            if self._registry is not None:
+                                broker_symbol = self._registry.to_broker(symbol)
+                            quote = await self._matchtrader.get_quote(broker_symbol)
+                            mid_price = (quote.bid + quote.ask) / 2
+                            self._volatility_monitor.record_quote(symbol, mid_price, now)
+                        except Exception as e:
+                            logger.debug("Volatility monitor: quote failed for {}: {}", symbol, e)
 
-                triggered, symbol, pct = self._volatility_monitor.check_triggers(now)
+                    triggered, symbol, pct = self._volatility_monitor.check_triggers(now)
                 if triggered:
                     self._latest_market_event_context = (
                         f"Volatility trigger: {symbol} moved {pct:+.2f}% in "
