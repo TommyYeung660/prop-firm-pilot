@@ -1034,6 +1034,49 @@ class Scheduler:
             parts.append("Recent closed trades: " + " | ".join(recent_symbol_trades))
         return " ".join(parts)
 
+    def _build_reflection_payload(
+        self,
+        *,
+        intent: TradeIntent,
+        pnl: float,
+        exit_reason: str,
+        position_id: str,
+        resolution_path: str,
+        hold_duration_seconds: int | None,
+        decision: Any | None,
+    ) -> dict[str, Any]:
+        """Build a structured post-trade reflection payload for TradingAgents."""
+        final_state: dict[str, Any] = {}
+        if getattr(decision, "final_state", None):
+            final_state = dict(decision.final_state)
+        elif intent.agent_state_json:
+            try:
+                final_state = json.loads(intent.agent_state_json)
+            except Exception:
+                final_state = {}
+
+        risk_report = getattr(decision, "risk_report", "") or intent.agent_risk_report
+        model_id = getattr(decision, "model_id", "")
+        return {
+            "symbol": intent.symbol,
+            "trade_date": intent.trade_date,
+            "closed_at": self._now_utc().isoformat(),
+            "position_id": position_id,
+            "side": intent.suggested_side or "",
+            "realized_pnl": pnl,
+            "close_reason": exit_reason,
+            "resolution_path": resolution_path,
+            "hold_duration_seconds": hold_duration_seconds,
+            "scanner_score": intent.scanner_score,
+            "scanner_confidence": intent.scanner_confidence,
+            "historical_pnl_context": self._build_historical_pnl_context(intent.symbol),
+            "market_event_context": self._latest_market_event_context,
+            "decision_summary": intent.suggested_side or "",
+            "risk_report": risk_report,
+            "model_id": model_id,
+            "final_state": final_state,
+        }
+
     async def _log_tactical_result(
         self,
         intent: TradeIntent,
@@ -1959,11 +2002,28 @@ class Scheduler:
         # Call LLM reflect for learning
         if pnl != 0.0:
             try:
+                if decision is None:
+                    decision = await asyncio.to_thread(self._store.get_decision, intent.id)
+                reflection_payload = self._build_reflection_payload(
+                    intent=intent,
+                    pnl=pnl,
+                    exit_reason=exit_reason,
+                    position_id=position_id,
+                    resolution_path=resolution_path,
+                    hold_duration_seconds=hold_duration_seconds,
+                    decision=decision,
+                )
                 await asyncio.to_thread(
                     self._agents.reflect,
-                    {symbol: pnl},
+                    reflection_payload,
                 )
-                logger.info("LLM reflect called for {} PnL={}", symbol, pnl)
+                logger.info(
+                    "LLM reflect called for {} PnL={} reason={} resolution={}",
+                    symbol,
+                    pnl,
+                    exit_reason,
+                    resolution_path,
+                )
             except Exception as e:
                 logger.warning("LLM reflect failed for {}: {}", symbol, e)
 

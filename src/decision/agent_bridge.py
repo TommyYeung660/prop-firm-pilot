@@ -634,14 +634,15 @@ class AgentBridge:
         )
         return results
 
-    def reflect(self, returns_losses: dict[str, float]) -> None:
-        """Feed realized PnL back to TradingAgents for memory updates.
+    def reflect(self, returns_losses: dict[str, Any]) -> None:
+        """Feed realized trade outcomes back to TradingAgents for memory updates.
 
-        Calls reflect_and_remember() which updates all agent memories
-        to improve future decisions.
+        Calls reflect_and_remember() which updates all agent memories to improve
+        future decisions.
 
         Args:
-            returns_losses: Dict of symbol -> realized PnL.
+            returns_losses: Either the legacy `{symbol: realized_pnl}` mapping,
+                or a structured single-trade payload with outcome/context fields.
         """
         self._ensure_loaded()
 
@@ -651,7 +652,13 @@ class AgentBridge:
 
         try:
             self._graph.reflect_and_remember(returns_losses)
-            logger.info("AgentBridge: reflected on {} results", len(returns_losses))
+            if "symbol" in returns_losses and "realized_pnl" in returns_losses:
+                logger.info(
+                    "AgentBridge: reflected structured trade lesson for {}",
+                    returns_losses["symbol"],
+                )
+            else:
+                logger.info("AgentBridge: reflected on {} results", len(returns_losses))
         except Exception as e:
             logger.error("AgentBridge: reflect failed: {}", e)
 

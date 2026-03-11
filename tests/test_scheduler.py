@@ -3154,6 +3154,128 @@ async def test_handle_position_closed_exit_reason_from_close_price(
     assert call_kwargs["trigger_price"] == 1.0951
 
 
+def test_build_reflection_payload_includes_trade_outcome_context(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """v1.4.0: reflection payload should carry outcome and context fields."""
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+    sched._latest_market_event_context = "Volatility trigger: EURUSD moved +0.42% in 30 minutes."
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    intent.suggested_side = "BUY"
+    payload = sched._build_reflection_payload(
+        intent=intent,
+        pnl=-12.5,
+        exit_reason="sl_hit",
+        position_id="pos-3",
+        resolution_path="broker_api",
+        hold_duration_seconds=300,
+        decision=MagicMock(risk_report="Avoid fading CPI spike", model_id="model-a"),
+    )
+
+    assert payload["symbol"] == "EURUSD"
+    assert payload["realized_pnl"] == -12.5
+    assert payload["close_reason"] == "sl_hit"
+    assert payload["position_id"] == "pos-3"
+    assert payload["market_event_context"] == sched._latest_market_event_context
+    assert payload["risk_report"] == "Avoid fading CPI spike"
+
+
+async def test_handle_position_closed_reflect_failure_does_not_break_close_flow(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Reflection errors should be best-effort and not block intent closure."""
+    import json
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+    sched._alert_service = AsyncMock()
+    mock_agents.reflect.side_effect = RuntimeError("memory backend unavailable")
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+    store.update_intent_decision(
+        claimed.id, "BUY", sl_pips=50.0, tp_pips=100.0, risk_report="test", state_json="{}"
+    )
+    store.mark_ready_for_exec(claimed.id)
+    store.mark_executing(claimed.id)
+    store.mark_opened(claimed.id, position_id="pos-4")
+    store.update_execution_meta(
+        claimed.id,
+        json.dumps(
+            {
+                "fill_price": 1.085,
+                "volume": 0.05,
+                "side": "BUY",
+                "sl_price": 1.080,
+                "tp_price": 1.095,
+            }
+        ),
+    )
+
+    closed_pos = MagicMock(
+        position_id="pos-4",
+        profit=-25.0,
+        close_price=1.0800,
+        open_price=1.085,
+        volume=0.05,
+    )
+    mock_matchtrader.get_closed_positions = AsyncMock(return_value=[closed_pos])
+    mock_matchtrader.get_balance.return_value = MagicMock(
+        balance=49975.0,
+        equity=49975.0,
+        margin=0.0,
+        free_margin=49975.0,
+    )
+
+    opened_intent = store.get_intent(claimed.id)
+    await sched._handle_position_closed(opened_intent)
+
+    closed_intent = store.get_intent(claimed.id)
+    assert closed_intent.status == "closed"
+    mock_agents.reflect.assert_called_once()
+    reflect_payload = mock_agents.reflect.call_args.args[0]
+    assert reflect_payload["symbol"] == "EURUSD"
+    assert reflect_payload["realized_pnl"] == -25.0
+    assert reflect_payload["close_reason"] == "sl_hit"
+    assert reflect_payload["risk_report"] == "test"
+
+
 # ── v1.3.9: Tactical Gate Enforcement Tests ──────────────────────────────
 
 
