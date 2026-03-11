@@ -1105,6 +1105,34 @@ class TestStartStop:
             elif hasattr(item, "cancel"):
                 item.cancel()
 
+    async def test_start_initializes_market_data_hub_before_workers(
+        self,
+        scheduler: Scheduler,
+    ) -> None:
+        """start() should warm up market data before worker loops begin."""
+
+        async def fake_initialize() -> None:
+            scheduler._market_data_hub = object()
+            scheduler._market_data_ready = True
+
+        async def fake_gather(*args, **kwargs) -> None:
+            assert scheduler._market_data_hub is not None
+            assert scheduler._market_data_ready is True
+
+        scheduler._initialize_market_data_hub = AsyncMock(side_effect=fake_initialize)
+
+        with patch("asyncio.gather", new=AsyncMock(side_effect=fake_gather)) as mock_gather:
+            await scheduler.start()
+
+        scheduler._initialize_market_data_hub.assert_awaited_once()
+        assert mock_gather.called
+        args = mock_gather.call_args[0]
+        for item in args:
+            if hasattr(item, "close"):
+                item.close()
+            elif hasattr(item, "cancel"):
+                item.cancel()
+
     async def test_start_with_multiple_llm_workers(
         self,
         config: AppConfig,

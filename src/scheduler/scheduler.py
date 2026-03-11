@@ -35,6 +35,9 @@ from src.compliance.best_day_tracker import BestDayTracker
 from src.compliance.hwm_tracker import HighWaterMarkTracker
 from src.config import AppConfig
 from src.data.fx_data_fetcher import EodhdProvider
+from src.data.fx_tick_aggregator import FXTickAggregator
+from src.data.fx_websocket_client import EODHDFXWebSocketClient
+from src.data.market_data_hub import MarketDataHub
 from src.decision.agent_bridge import AgentBridge, AgentDecision, RiskMeta
 from src.decision.decision_formatter import format_decision
 from src.decision.schemas import TradeIntent
@@ -128,6 +131,11 @@ class Scheduler:
         self._memory_journal = memory_journal
         self._trade_journal = trade_journal
         self._latest_market_event_context: str = ""
+        self._tick_aggregator: FXTickAggregator | None = None
+        self._websocket_client: EODHDFXWebSocketClient | None = None
+        self._market_data_hub: MarketDataHub | None = None
+        self._market_data_task: asyncio.Task[None] | None = None
+        self._market_data_ready = False
 
         # v1.3.7: Tactical execution module (shadow mode)
         self._tactical_validator = tactical_validator or TacticalValidator(config.tactical)
@@ -200,6 +208,7 @@ class Scheduler:
         self._running = True
         logger.info("Scheduler: starting all workers")
         await self._refresh_optimization_state()
+        await self._initialize_market_data_hub()
 
         tasks: list[Coroutine[Any, Any, None]] = [
             self._scanner_loop(),
@@ -226,6 +235,46 @@ class Scheduler:
         logger.info("Scheduler: stopping all workers")
         self._running = False
         self._equity_monitor.stop()
+        if self._websocket_client is not None:
+            await self._websocket_client.stop()
+        if self._market_data_task is not None:
+            self._market_data_task.cancel()
+            self._market_data_task = None
+
+    async def _initialize_market_data_hub(self) -> None:
+        """Warm up and start the WebSocket-first market-data sidecar."""
+        self._market_data_ready = False
+        if not self._config.websocket.enabled:
+            return
+        if self._eodhd is None:
+            logger.warning(
+                "Scheduler: websocket market data requested but EODHD provider unavailable"
+            )
+            return
+        eodhd_key = os.getenv("EODHD_API_KEY", "").strip()
+        if not eodhd_key:
+            logger.warning("Scheduler: websocket market data disabled — EODHD_API_KEY missing")
+            return
+        symbols = self._config.websocket.symbols or list(self._config.symbols)
+        self._tick_aggregator = FXTickAggregator()
+        self._websocket_client = EODHDFXWebSocketClient(
+            api_token=eodhd_key,
+            symbols=symbols,
+            reconnect_base_seconds=self._config.websocket.reconnect_base_seconds,
+            reconnect_max_seconds=self._config.websocket.reconnect_max_seconds,
+            stale_after_seconds=self._config.websocket.stale_after_seconds,
+        )
+        self._websocket_client.register_tick_callback(self._tick_aggregator.add_tick)
+        self._market_data_hub = MarketDataHub(
+            aggregator=self._tick_aggregator,
+            websocket_client=self._websocket_client,
+            rest_provider=self._eodhd,
+            symbols=symbols,
+            quote_ttl_seconds=self._config.websocket.quote_ttl_seconds,
+        )
+        await self._market_data_hub.warmup()
+        self._market_data_task = asyncio.create_task(self._websocket_client.run())
+        self._market_data_ready = True
 
     async def recover_stale_claims(self) -> int:
         """Recover stale claimed intents from a previous crashed session.
