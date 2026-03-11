@@ -51,6 +51,10 @@ class TacticalData:
     current_spread: float = 0.0
     typical_spread: float = 0.0
     latest_bar_time: datetime | None = None
+    quote_source: str = ""
+    bars_5min_source: str = ""
+    bars_1h_source: str = ""
+    data_source: str = ""
 
 
 @dataclass

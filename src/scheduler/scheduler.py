@@ -29,6 +29,7 @@ from numbers import Real
 from typing import Any
 
 import httpx
+import pandas as pd
 from loguru import logger
 
 from src.compliance.best_day_tracker import BestDayTracker
@@ -1202,6 +1203,66 @@ class Scheduler:
         5-min and 1-hour OHLCV bars required by ATR, EMA, RSI, and candle gates.
         """
         data = TacticalData()
+        instrument = self._config.instruments.get(symbol)
+        if instrument:
+            data.typical_spread = instrument.avg_spread_pips * instrument.pip_size
+
+        # ── WebSocket-first market data hub ────────────────────────────────
+        if self._market_data_ready and self._market_data_hub is not None:
+            try:
+                quote_result = await self._market_data_hub.get_quote(symbol)
+                data.quote_source = quote_result.source
+                quote = quote_result.quote or {}
+                ask = quote.get("ask", 0)
+                bid = quote.get("bid", 0)
+                ts_ms = quote.get("timestamp_ms", 0) or quote.get("timestampMs", 0)
+                data.current_spread = abs(ask - bid)
+                if ts_ms:
+                    data.latest_bar_time = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+            except Exception as e:
+                logger.warning("Failed to fetch hub quote for {}: {}", symbol, e)
+
+            try:
+                bars_5min_result, bars_1h_result = await asyncio.gather(
+                    self._market_data_hub.get_bars(
+                        symbol,
+                        "5m",
+                        self._config.websocket.warmup_5m_bars,
+                    ),
+                    self._market_data_hub.get_bars(
+                        symbol,
+                        "1h",
+                        self._config.websocket.warmup_1h_bars,
+                    ),
+                )
+                if not bars_5min_result.bars.empty:
+                    data.bars_5min = bars_5min_result.bars
+                    data.bars_5min_source = bars_5min_result.source
+                if not bars_1h_result.bars.empty:
+                    data.bars_1h = bars_1h_result.bars
+                    data.bars_1h_source = bars_1h_result.source
+                if data.latest_bar_time is None and not data.bars_5min.empty:
+                    latest_bar = pd.Timestamp(data.bars_5min.iloc[-1]["datetime"]).to_pydatetime()
+                    if latest_bar.tzinfo is None:
+                        latest_bar = latest_bar.replace(tzinfo=timezone.utc)
+                    data.latest_bar_time = latest_bar
+                sources = {
+                    source
+                    for source in (
+                        data.quote_source,
+                        data.bars_5min_source,
+                        data.bars_1h_source,
+                    )
+                    if source
+                }
+                if len(sources) == 1:
+                    data.data_source = next(iter(sources))
+                elif sources:
+                    data.data_source = "mixed"
+                if data.current_spread > 0 or not data.bars_5min.empty or not data.bars_1h.empty:
+                    return data
+            except Exception as e:
+                logger.warning("Failed to fetch hub intraday bars for {}: {}", symbol, e)
 
         # ── Spread from MatchTrader ──────────────────────────────────────────
         # Map config symbol (e.g. "EURUSD") to broker symbol (e.g. "EURUSD.")
@@ -1231,10 +1292,6 @@ class Scheduler:
                         data.latest_bar_time,
                         (datetime.now(timezone.utc) - data.latest_bar_time).total_seconds(),
                     )
-                # Use instrument config for typical spread
-                instrument = self._config.instruments.get(symbol)
-                if instrument:
-                    data.typical_spread = instrument.avg_spread_pips * instrument.pip_size
         except Exception as e:
             logger.debug("Failed to fetch quote for {}: {}", symbol, e)
 
@@ -1257,6 +1314,7 @@ class Scheduler:
                     )
                 if not bars_5min.empty:
                     data.bars_5min = bars_5min
+                    data.bars_5min_source = "rest_fallback"
                     # Note: latest_bar_time is now set from MatchTrader quote above.
                     # EODHD bar timestamps are NOT used for data_freshness due to
                     # potential multi-hour delay during DST transitions.
@@ -1267,11 +1325,14 @@ class Scheduler:
                     )
                 if not bars_1h.empty:
                     data.bars_1h = bars_1h
+                    data.bars_1h_source = "rest_fallback"
                     logger.debug(
                         "Tactical: fetched {} 1h bars for {}",
                         len(bars_1h),
                         symbol,
                     )
+                if data.bars_5min_source or data.bars_1h_source:
+                    data.data_source = "rest_fallback"
             except Exception as e:
                 logger.warning("Failed to fetch EODHD intraday bars for {}: {}", symbol, e)
 

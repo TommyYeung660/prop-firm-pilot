@@ -3514,6 +3514,138 @@ async def test_fetch_tactical_data_no_fallback_on_eodhd_failure(
     )
 
 
+async def test_fetch_tactical_data_prefers_market_data_hub_cache(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """v1.4.0: tactical reads should prefer websocket-derived hub data when healthy."""
+    import pandas as pd
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    bars_5min = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-11T12:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    bars_1h = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-11T12:00:00Z"),
+                "open": 1.09,
+                "high": 1.12,
+                "low": 1.08,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    sched._market_data_ready = True
+    sched._market_data_hub = MagicMock()
+    sched._market_data_hub.get_quote = AsyncMock(
+        return_value=MagicMock(
+            source="websocket_cache",
+            quote={"bid": 1.0848, "ask": 1.0850, "timestamp_ms": 1_741_696_000_000},
+        )
+    )
+    sched._market_data_hub.get_bars = AsyncMock(
+        side_effect=[
+            MagicMock(source="websocket_cache", bars=bars_5min),
+            MagicMock(source="websocket_cache", bars=bars_1h),
+        ]
+    )
+
+    data = await sched._fetch_tactical_data("EURUSD")
+
+    assert data.bars_5min.equals(bars_5min)
+    assert data.bars_1h.equals(bars_1h)
+    assert data.data_source == "websocket_cache"
+
+
+async def test_fetch_tactical_data_uses_hub_rest_fallback_for_stale_symbol(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """v1.4.0: stale websocket symbols should still resolve through hub fallback."""
+    import pandas as pd
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    bars_5min = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-11T12:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    bars_1h = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-11T12:00:00Z"),
+                "open": 1.09,
+                "high": 1.12,
+                "low": 1.08,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    sched._market_data_ready = True
+    sched._market_data_hub = MagicMock()
+    sched._market_data_hub.get_quote = AsyncMock(
+        return_value=MagicMock(
+            source="rest_fallback",
+            quote={"bid": 1.0848, "ask": 1.0850, "timestamp_ms": 1_741_696_000_000},
+        )
+    )
+    sched._market_data_hub.get_bars = AsyncMock(
+        side_effect=[
+            MagicMock(source="rest_fallback", bars=bars_5min),
+            MagicMock(source="rest_fallback", bars=bars_1h),
+        ]
+    )
+
+    data = await sched._fetch_tactical_data("EURUSD")
+
+    assert data.bars_5min.equals(bars_5min)
+    assert data.bars_1h.equals(bars_1h)
+    assert data.data_source == "rest_fallback"
+
+
 async def test_fetch_tactical_data_uses_quote_timestamp(
     config: AppConfig,
     store: DecisionStore,
