@@ -79,6 +79,8 @@ class PropFirmPilot:
             selected_analysts=config.agents.selected_analysts,
             config=build_agent_config(
                 output_language=config.agents.output_language,
+                memory_path=str(Path(config.monitor.memory_dir) / "chromadb"),
+                session_id=os.getenv("MATCHTRADER_ACCOUNT_ID", "default"),
             ),
         )
         self.journal = TradeJournal(config.monitor.trade_journal_path)
@@ -346,9 +348,30 @@ class PropFirmPilot:
                 b = await client.get_balance()
                 return b.equity
 
+            async def reduce_exposure(
+                level: str,
+                daily_dd_pct: float,
+                max_dd_pct: float,
+                equity: float,
+            ) -> None:
+                del daily_dd_pct, max_dd_pct, equity
+                if level != "DANGER":
+                    return
+                positions = await client.get_open_positions()
+                for pos in positions:
+                    reduce_volume = round(pos.volume * self.config.monitor.reduce_exposure_pct, 2)
+                    reduce_volume = min(pos.volume, max(reduce_volume, 0.01))
+                    await client.close_position(
+                        position_id=pos.position_id,
+                        symbol=pos.symbol,
+                        side=pos.side,
+                        volume=reduce_volume,
+                    )
+
             await self.equity_monitor.start(
                 get_equity=get_equity,
                 on_alert=self.alert_service.drawdown_warning,
+                on_reduce_exposure=reduce_exposure,
                 on_emergency_close=client.close_all_positions,
                 day_start_balance=balance.balance,
                 initial_balance=self.config.account.initial_balance,
@@ -386,6 +409,8 @@ async def _run_scheduler(config: AppConfig) -> None:
         selected_analysts=config.agents.selected_analysts,
         config=build_agent_config(
             output_language=config.agents.output_language,
+            memory_path=str(Path(config.monitor.memory_dir) / "chromadb"),
+            session_id=os.getenv("MATCHTRADER_ACCOUNT_ID", "default"),
         ),
     )
     alert_service = AlertService(

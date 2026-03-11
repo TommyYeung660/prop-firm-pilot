@@ -10,6 +10,42 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.9c] — 2026-03-11
+**OODA Loop Closure — Scheduler Risk Wiring, Tactical Retry, Strategic Cache, Persistent Memory, News Trigger**
+
+### Fixed
+- **P0**: Scheduler mode 的 `EquityMonitor` 現在完整接上 `drawdown_warning`、分級減倉、`close_all_positions()` 與 equity snapshot callback，補上 24/7 主流程的風控執行斷點
+- **P0**: Tactical `WAIT` 不再直接取消 intent，改為 `claimed -> tactical_pending -> retry -> PASS/degrade/cancel`，真正落地 roadmap 的等待重判閉環
+- **P0**: `StrategicDecisionCache` 正式接入 `_process_claimed_intent()`，相同 strategic signal 不再重複呼叫 LLM
+- **P1**: Scheduler 啟動時即 refresh optimization state 並同步 AB routing，避免系統長時間跑在 default thresholds / 空 AB 狀態
+- **P1**: TradingAgents 記憶鏈路補上 deterministic `session_id`、graph rebuild session continuity，以及持久化 Chroma storage path
+- **P2**: Volatility / news trigger 現在都會立即強制一次 equity check，避免事件驅動 rescan 與風控觀察脫節
+
+### Added
+- `src/scheduler/news_event_trigger.py`：以 Alpha Vantage NEWS_SENTIMENT 輪詢新 macro headline，觸發早掃描
+- `EquityMonitor.check_once()`：支援單次權益檢查與分級反應（alert / reduce exposure / emergency close）
+- Historical PnL context 與 market event context 注入 TradingAgents prompt
+- 2 個新測試檔：`tests/monitor/test_equity_monitor.py`、`tests/scheduler/test_news_event_trigger.py`
+
+### Changed
+- `src/config.py`：新增 `reduce_exposure_pct` 與 news trigger config
+- `src/decision/fx_analyst_config.py` / `src/main.py`：Agent config 現在可傳 `memory_path` 與 `session_id`
+- TradingAgents `AgentState` / `Propagator` / `trader` prompt 已支援 `historical_pnl_context` 與 `market_event_context`
+- TradingAgents memory backend 由 in-memory Chroma 升級為可選 persistent Chroma
+
+### Tested
+- **208 related tests passed** across scheduler / decision cache / decision store / agent bridge / optimization integration / trade journal / equity monitor / news trigger
+- Ruff lint: `uv run ruff check src tests` → 0 errors
+
+### Files
+- Modified: `src/config.py`, `src/decision/agent_bridge.py`, `src/decision/fx_analyst_config.py`, `src/main.py`, `src/monitor/equity_monitor.py`, `src/scheduler/scheduler.py`
+- New: `src/scheduler/news_event_trigger.py`
+- Tests (Modified): `tests/scheduler/test_optimization_integration.py`, `tests/test_ab_model_switching.py`, `tests/test_agent_bridge_config.py`, `tests/test_scheduler.py`
+- Tests (New): `tests/monitor/test_equity_monitor.py`, `tests/scheduler/test_news_event_trigger.py`
+- Cross-repo impacts on TradingAgents: `tradingagents/agents/utils/agent_states.py`, `tradingagents/agents/utils/memory.py`, `tradingagents/agents/trader/trader.py`, `tradingagents/graph/propagation.py`, `tradingagents/graph/trading_graph.py`
+
+---
+
 ## [1.3.9b] — 2026-03-11
 **v1.3.9a Production Tuning — Scanner Position-Aware, Threshold Review, Memory Journal Diff, Config Aggressiveness**
 

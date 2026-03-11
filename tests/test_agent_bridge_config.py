@@ -215,6 +215,45 @@ class TestAgentBridgeToolVendors:
         assert captured_config["workspace_dir"] == "/custom/workspace"
         assert captured_config["data_dir"] == "/custom/data"
 
+    def test_ensure_loaded_passes_stable_session_id_and_memory_path(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        """AgentBridge should pass session_id and memory_path to TradingAgentsGraph."""
+        captured: dict[str, object] = {}
+
+        class DummyGraph:
+            def __init__(self, selected_analysts, config, session_id=None):
+                del selected_analysts
+                captured["config"] = config
+                captured["session_id"] = session_id
+
+        fake_graph_module = SimpleNamespace(TradingAgentsGraph=DummyGraph)
+        fake_default_module = SimpleNamespace(DEFAULT_CONFIG={})
+
+        def fake_import(name: str):
+            if name == "tradingagents.graph.trading_graph":
+                return fake_graph_module
+            if name == "tradingagents.default_config":
+                return fake_default_module
+            raise ModuleNotFoundError(name)
+
+        monkeypatch.setattr("src.decision.agent_bridge.importlib.import_module", fake_import)
+
+        memory_path = str(tmp_path / "memory-store")
+        bridge = AgentBridge(
+            agents_path=tmp_path,
+            config={
+                "session_id": "acct-123",
+                "memory_path": memory_path,
+            },
+        )
+        bridge._ensure_loaded()
+
+        assert captured["session_id"] == "acct-123"
+        assert captured["config"]["memory_path"] == memory_path
+
 
 class TestAgentBridgeDateNormalize:
     """Verify trade_date normalization safeguards."""

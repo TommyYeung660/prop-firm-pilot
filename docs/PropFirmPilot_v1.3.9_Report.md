@@ -1,9 +1,9 @@
-# PropFirmPilot v1.3.9 — v1.3.7 生產環境問題修復報告 + v1.3.9 生產強化
+# PropFirmPilot v1.3.9 — v1.3.7 生產環境問題修復報告 + v1.3.9a/b/c 強化與閉環修復
 
-> **報告日期**: 2026-03-09（初版）/ 2026-03-10（追加 Part F）/ 2026-03-11（追加 Part G）  
-> **版本**: v1.3.8 (P0/P1) + v1.3.9 (P2/P3) + v1.3.9a (生產強化) + v1.3.9b (生產調優)  
+> **報告日期**: 2026-03-09（初版）/ 2026-03-10（追加 Part F）/ 2026-03-11（追加 Part G）/ 2026-03-11（追加 Part H）  
+> **版本**: v1.3.8 (P0/P1) + v1.3.9 (P2/P3) + v1.3.9a (生產強化) + v1.3.9b (生產調優) + v1.3.9c (OODA 閉環修復)  
 > **基準版本**: v1.3.7  
-> **聚焦範圍**: v1.3.7 五天生產運行 (Mar 4-9, 2026) 發現的 15 個問題全面修復 + v1.3.9 首日生產 (Mar 10) 發現的 12 個問題強化修復，涵蓋 prop-firm-pilot 與 TradingAgents 兩個倉庫
+> **聚焦範圍**: v1.3.7 五天生產運行 (Mar 4-9, 2026) 發現的 15 個問題全面修復 + v1.3.9 首日生產 (Mar 10) 發現的 12 個問題強化修復 + 依 `docs/PropFirmPilot_v1.3.9b_OODA_Review.md` 補上 P0-P2 閉環斷點，涵蓋 prop-firm-pilot 與 TradingAgents 兩個倉庫
 
 ---
 
@@ -78,13 +78,24 @@
 47. [修改檔案清單 (v1.3.9b)](#47-修改檔案清單-v139b)
 48. [測試覆蓋 (v1.3.9b)](#48-測試覆蓋-v139b)
 
+### Part H — v1.3.9c OODA 閉環修復 (Mar 11 OODA Review Follow-up)
+
+49. [v1.3.9c OODA 閉環修復摘要](#49-v139c-ooda-閉環修復摘要)
+50. [P0 — Scheduler 風控 callback 接線 + 分級反應](#50-p0--scheduler-風控-callback-接線--分級反應)
+51. [P0 — Tactical WAIT 重判閉環](#51-p0--tactical-wait-重判閉環)
+52. [P0/P2 — StrategicDecisionCache 接線 + Historical PnL Context](#52-p0p2--strategicdecisioncache-接線--historical-pnl-context)
+53. [P1 — Startup Optimization Refresh + Persistent Memory Session](#53-p1--startup-optimization-refresh--persistent-memory-session)
+54. [P2 — News Trigger + Immediate Equity Refresh](#54-p2--news-trigger--immediate-equity-refresh)
+55. [修改檔案清單 (v1.3.9c)](#55-修改檔案清單-v139c)
+56. [測試覆蓋 (v1.3.9c)](#56-測試覆蓋-v139c)
+
 ---
 
 ## 1. 版本摘要
 
 v1.3.7 於 2026 年 3 月 4 日部署至 E8 Markets prop firm 生產帳戶，運行約 5 天（Mar 4-9）。經過仔細評估生產日誌，共識別出 **15 個問題**，按嚴重度分為 P0（1 項）、P1（6 項）、P2（6 項）、P3（2 項）。
 
-本報告涵蓋三個修復波次：
+本報告涵蓋五個修復波次：
 
 - **v1.3.8**（P0/P1 修復）：修復 7 個高優先級問題，包括 TradingAgents 跨品種數據污染（P0）、LLM SELL 偏差、LLM 拒絕交易、EURUSD 過度取消、過度 Rescan、Best Day 無限循環、Tactical Gate 固定輸出
 - **v1.3.9**（P2/P3 修復）：修復 8 個問題（含 Issue #2 的第二部分），包括 TP/SL 通知異常、Scanner Score 日內不更新、HOLD 後仍開倉、AB Test 數據收集、Spread Gate 失敗、DuckDB 事務嵌套、Breakeven 門檻過高
@@ -93,7 +104,11 @@ v1.3.7 於 2026 年 3 月 4 日部署至 E8 Markets prop firm 生產帳戶，運
 
 - **v1.3.9a 生產強化**（Mar 10 Log Analysis）：v1.3.9 首日生產運行後，從 prod log 分析出 12 個新問題（P1×4、P2×3、P3×4），全部修復並新增 99 個測試。涵蓋 breakeven SL 驗證、EODHD null 防禦、LLM fallback、no-data guard、連續虧損熔斷、重複開倉限制、risk meta 解析、trade 回溯、scanner 冷卻、操作指標追蹤
 
-所有修復均已推送至 `fix/v1.3.9-p1-fixes` 分支，**996 項測試全部通過**（較前版 897 新增 99 項）。
+- **v1.3.9b 生產調優**（Mar 11 Log Analysis）：補上 scanner 持倉感知、放寬 blended confidence threshold、為 memory journal 加上 diff 區塊，並同步調整 production config 的 aggressiveness
+
+- **v1.3.9c OODA 閉環修復**（Mar 11 OODA Review Follow-up）：依 OODA review 補上 6 個主鏈路斷點，涵蓋 scheduler equity monitor callback wiring、tactical pending/retry、strategic decision cache、startup optimization refresh、persistent memory/session continuity、news event trigger 與事件觸發後的即時 equity refresh
+
+截至 v1.3.9c，v1.3.9 系列除了歷史 **996 項測試**外，另有 **208 項 v1.3.9c 相關回歸測試通過**，且 `ruff check` 無錯誤。
 
 ---
 
@@ -102,17 +117,19 @@ v1.3.7 於 2026 年 3 月 4 日部署至 E8 Markets prop firm 生產帳戶，運
 | 項目 | 值 |
 |---|---|
 | 基準版本 | v1.3.7 |
-| 修復版本 | v1.3.8 (P0/P1) + v1.3.9 (P2/P3) |
-| 報告日期 | 2026-03-09 |
+| 修復版本 | v1.3.8 (P0/P1) + v1.3.9 (P2/P3) + v1.3.9a + v1.3.9b + v1.3.9c |
+| 報告日期 | 2026-03-11 |
 | 跨倉庫 | prop-firm-pilot + TradingAgents |
-| 測試總數 | 996 tests passed（v1.3.8/v1.3.9: 897, v1.3.9a: +99） |
+| 測試總數 | 歷史 996 tests passed + v1.3.9c 相關回歸 208 passed |
 | v1.3.8 prop-firm-pilot 修改檔案 | 7 files |
 | v1.3.8 TradingAgents 修改檔案 | 2 files |
 | v1.3.9 prop-firm-pilot 修改檔案 | 25 files (+1,578/-59 lines) |
 | v1.3.9 TradingAgents 修改檔案 | 4 files (LLM upgrade) |
 | v1.3.9a prop-firm-pilot 修改檔案 | 39 files (+4,705/-161 lines) |
+| v1.3.9c prop-firm-pilot 修改檔案 | 7 files + 1 new file |
+| v1.3.9c TradingAgents 修改檔案 | 5 files |
 | 生產運行時間 | ~5 天（Mar 4-9, 2026）+ Mar 10 首日 |
-| 問題總數 | 27（原 15 + 新 12）（P0:1, P1:10, P2:9, P3:7） |
+| 問題總數 | 27（原 15 + 新 12；不含 v1.3.9c OODA review gap remediation 6 項） |
 
 ---
 
@@ -1805,3 +1822,242 @@ v1.3.9a 的 config 參數在 Duplicate Entry Guard + 持倉感知的保護下過
 | `tests/optimize/test_threshold_decay.py` | threshold 衰減行為、各 win-rate 區間衰減值 |
 | `tests/test_config.py` | YAML config 載入、active_session_interval_seconds |
 | `tests/test_prop_firm_guard_e8_one.py` | E8 One 帳戶合規守衛、default_risk_pct |
+
+---
+
+# Part H — v1.3.9c OODA 閉環修復
+
+---
+
+## 49. v1.3.9c OODA 閉環修復摘要
+
+### 背景
+
+`docs/PropFirmPilot_v1.3.9b_OODA_Review.md` 指出目前系統雖然已有 OODA 骨架，但在真正的閉環上仍有幾個明顯斷點：
+
+1. Scheduler mode 的 `EquityMonitor` 沒有接上 alert / emergency close callback
+2. Tactical `WAIT` 沒有落地 `tactical_pending + retry`
+3. `StrategicDecisionCache` 類別存在，但未接入主決策路徑
+4. Optimization state 只有 daily summary 才 refresh
+5. TradingAgents memory 缺乏穩定 session continuity 與 persistent backend
+6. Observe 仍缺乏主動新聞事件 trigger，且 volatility trigger 不會立即刷新 equity
+
+### v1.3.9c 修復重點
+
+- **P0**：Scheduler 風控 callback 接線 + 分級減倉 / 緊急平倉
+- **P0**：Tactical `WAIT -> tactical_pending -> retry -> PASS/degrade/cancel`
+- **P0**：`StrategicDecisionCache` 正式接入 `_process_claimed_intent()`
+- **P1**：Scheduler 啟動即 refresh optimization state + propagate AB state
+- **P1**：TradingAgents session 固定化 + persistent Chroma memory
+- **P2**：`NewsEventTrigger`、historical PnL prompt injection、volatility/news 事件後的 immediate equity refresh
+
+### 修復統計
+
+| 指標 | 數值 |
+|---|---|
+| OODA gap 修復項 | 6 |
+| prop-firm-pilot 源碼修改 | 6 files |
+| prop-firm-pilot 新增檔案 | 1 file |
+| TradingAgents 修改 | 5 files |
+| 新增測試檔案 | 2 |
+| 相關回歸測試 | 208 passed |
+| Ruff | 0 errors |
+
+---
+
+## 50. P0 — Scheduler 風控 callback 接線 + 分級反應
+
+### 問題描述
+
+`Scheduler._equity_monitor_loop()` 原本只把 `get_equity` 與 drawdown limit 傳進 `EquityMonitor.start()`，沒有把 alert、緊急平倉與 snapshot callback 接進去。結果是：
+
+- Scheduler mode 會計算 drawdown，但不會發送告警
+- 達到 emergency threshold 時，不會執行 `close_all_positions()`
+- 權益曲線只在 monitor-only 模式完整生效
+
+### 修復方案
+
+1. 在 `scheduler.py` 中新增：
+   - `_handle_drawdown_alert()`
+   - `_reduce_exposure_on_drawdown()`
+   - `_handle_emergency_close()`
+   - `_record_equity_snapshot()`
+   - `_run_equity_check_once()`
+2. `EquityMonitor` 新增 `check_once()`，讓 polling loop 與 event-driven trigger 共用同一套風控判定
+3. 加入 `reduce_exposure_pct` 設定，當到達 `DANGER` 時先做 partial de-risk，再由 `CRITICAL` 觸發全平
+4. `main.py` 的 monitor-only mode 也同步支援分級減倉 callback，避免兩條模式分歧
+
+### 影響
+
+- Scheduler mode 的 `Act` 風控鏈正式閉合
+- Volatility / news 事件觸發後，可以立刻重跑一次同一套 drawdown 判定，不必等下一個 polling interval
+
+---
+
+## 51. P0 — Tactical WAIT 重判閉環
+
+### 問題描述
+
+v1.3.9b 前的行為是：當 tactical gate 回傳 `WAIT`，scheduler 直接取消 intent。這使 `tactical_pending` 與 `retry` config 雖然存在，卻完全沒有在主流程落地。
+
+### 修復方案
+
+在 `scheduler.py` 加入 `_retry_tactical_pending()`：
+
+1. `claimed -> tactical_pending`
+2. 按 `retry.interval_seconds` 與 `jitter_seconds` 等待
+3. 重跑 `_run_tactical_validation()`
+4. 依結果轉成：
+   - `PASS` -> `ready_for_exec`
+   - `REJECT` -> `cancelled`
+   - retry budget 用盡 + `expire_action=degrade` -> `ready_for_exec`
+   - retry budget 用盡 + `expire_action=cancel` -> `cancelled`
+
+另外同步補上：
+
+- `TACTICAL_PENDING`
+- `TACTICAL_DEGRADED`
+- retry 次數帶入 `TACTICAL_RESULT`
+
+### 影響
+
+- Tactical layer 從單純同步阻擋器，變成真正的「等待下一根 bar 再觀察 / 再判定」閉環
+- 與原本 `sqlite_store.py` 既有 `mark_tactical_pending()` / `mark_ready_for_exec_from_tactical()` 設計對齊
+
+---
+
+## 52. P0/P2 — StrategicDecisionCache 接線 + Historical PnL Context
+
+### 問題描述
+
+雖然 `StrategicDecisionCache` 與對應測試早已存在，但 scheduler 主決策流程從未使用它。同時，optimization engine 已經有 `feedback_pnl`，卻沒有把結果帶回 LLM prompt。
+
+### 修復方案
+
+1. `_process_claimed_intent()` 現在會用 scanner-derived strategic fingerprint 建立 cache key
+2. cache hit 時直接還原 `AgentDecision`，跳過重複的 strategic LLM 呼叫
+3. close 後會 `invalidate(symbol)`，避免用到過期 decision
+4. 同一階段將 `historical_pnl_context` 注入 `qlib_data`
+5. TradingAgents 端同步擴充：
+   - `AgentState`
+   - `Propagator.create_initial_state()`
+   - `trader.py` prompt context
+
+### 影響
+
+- 對同一戰略情境的重複推理成本明顯下降
+- LLM 在交易前會看到最近 7 天該品種與 portfolio 的 PnL feedback 摘要，`Orient` 不再只靠 memory reflection
+
+---
+
+## 53. P1 — Startup Optimization Refresh + Persistent Memory Session
+
+### 問題描述
+
+兩個 stateful 問題在 v1.3.9b 仍未閉合：
+
+- Optimization state 只有 daily summary 才 refresh
+- TradingAgents graph rebuild / process restart 後 session 可能改變，memory continuity 不穩定
+
+### 修復方案
+
+1. `Scheduler.start()` 在啟動 worker 前先呼叫 `_refresh_optimization_state()`
+2. 立刻把最新 `ab_test` state 傳入 `AgentBridge.set_ab_state()`
+3. `AgentBridge` 新增：
+   - `_resolve_session_id()`
+   - `_resolve_memory_path()`
+   - `_build_graph_instance()`（相容舊版 constructor，避免 `session_id` 破壞向後相容）
+4. `build_agent_config()` / `main.py` 現在會把 `session_id` 與 `memory_path` 傳進 TradingAgents
+5. TradingAgents 端將 memory client 由 `chromadb.Client(...)` 升級為可選 `chromadb.PersistentClient(...)`
+6. `TradingAgentsGraph` 若未顯式傳入 `session_id`，也會優先讀 config 中的固定值
+
+### 影響
+
+- 系統不再依賴「等到 daily summary 才進入最新 optimization 狀態」
+- AB model switch rebuild graph 時，session continuity 能保留
+- memory backend 不再侷限於 process lifetime
+
+---
+
+## 54. P2 — News Trigger + Immediate Equity Refresh
+
+### 問題描述
+
+Observe 端在 v1.3.9b 仍主要依賴 scanner cadence 與 volatility trigger。系統能看到「價格已經動了」，但還看不到「新聞剛發」。
+
+### 修復方案
+
+1. 新增 `src/scheduler/news_event_trigger.py`
+2. 使用 Alpha Vantage `NEWS_SENTIMENT` + macro topic filters 輪詢 headline feed
+3. 透過 `news_keywords`、`lookback_minutes`、`cooldown_seconds` 過濾真正需要 rescan 的 fresh macro event
+4. 觸發後：
+   - `self._rescan_event.set()`
+   - `await self._run_equity_check_once(reason="news_event")`
+   - 產生 `market_event_context` 注入到下一次 TradingAgents prompt
+5. volatility trigger 也同步補上 `_run_equity_check_once()`
+
+### 影響
+
+- Observe 從純價格驅動，提升為「價格 + 新聞事件」混合驅動
+- 事件觸發不再只叫 scanner，風控也會同步刷新，縮短 Observe -> Act 的保護延遲
+
+---
+
+## 55. 修改檔案清單 (v1.3.9c)
+
+### prop-firm-pilot
+
+| 檔案 | 修改內容 |
+|---|---|
+| `src/config.py` | 新增 `reduce_exposure_pct` 與 news trigger config |
+| `src/decision/agent_bridge.py` | deterministic session_id、persistent memory path、legacy constructor fallback |
+| `src/decision/fx_analyst_config.py` | `build_agent_config()` 支援 `memory_path` / `session_id` |
+| `src/main.py` | monitor-only 分級減倉 + AgentBridge config 傳遞 |
+| `src/monitor/equity_monitor.py` | 新增 `check_once()` 與 `on_reduce_exposure` callback |
+| `src/scheduler/scheduler.py` | tactical retry、decision cache wiring、startup refresh、immediate equity check、news loop |
+| `src/scheduler/news_event_trigger.py` | NEW，macro headline trigger |
+
+### TradingAgents
+
+| 檔案 | 修改內容 |
+|---|---|
+| `tradingagents/agents/utils/agent_states.py` | 新增 `historical_pnl_context` / `market_event_context` |
+| `tradingagents/agents/utils/memory.py` | 支援 persistent Chroma client |
+| `tradingagents/agents/trader/trader.py` | 將 PnL / market event context 注入 trader prompt |
+| `tradingagents/graph/propagation.py` | 傳遞新的 scheduler context 欄位 |
+| `tradingagents/graph/trading_graph.py` | `session_id` 優先讀 config / deterministic value |
+
+### 測試
+
+| 檔案 | 修改內容 |
+|---|---|
+| `tests/test_scheduler.py` | tactical retry、cache hit、PnL context、volatility immediate equity check |
+| `tests/scheduler/test_optimization_integration.py` | startup refresh 驗證 |
+| `tests/test_agent_bridge_config.py` | stable session_id / memory path 驗證 |
+| `tests/test_ab_model_switching.py` | graph rebuild session continuity |
+| `tests/monitor/test_equity_monitor.py` | NEW，單次 equity check / 分級反應 |
+| `tests/scheduler/test_news_event_trigger.py` | NEW，macro headline trigger |
+
+---
+
+## 56. 測試覆蓋 (v1.3.9c)
+
+### 驗證命令
+
+```bash
+uv run pytest tests/test_scheduler.py tests/test_decision_cache.py tests/test_decision_store.py tests/test_ab_model_switching.py tests/test_agent_bridge_config.py tests/scheduler/test_optimization_integration.py tests/monitor/test_trade_journal.py tests/monitor/test_equity_monitor.py tests/scheduler/test_news_event_trigger.py -q
+
+uv run ruff check src tests
+```
+
+### 驗證結果
+
+| 項目 | 結果 |
+|---|---|
+| Scheduler / cache / store / agent bridge / optimization / journal / equity / news 相關回歸 | **208 passed** |
+| Ruff | **All checks passed** |
+
+### 補充說明
+
+- 這一波的驗證目標是 OODA review 直接涉及的主鏈路，不是重新跑整個 monorepo 全量測試
+- `docs/PropFirmPilot_v1.3.9b_OODA_Review.md` 中列出的 P0-P2 項目，已在 v1.3.9c 對應落地到主流程

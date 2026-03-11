@@ -49,6 +49,9 @@ class EquityMonitor:
         self,
         get_equity: Callable[[], Coroutine[Any, Any, float]],
         on_alert: Callable[[str, float, float, float], Coroutine[Any, Any, Any]] | None = None,
+        on_reduce_exposure: (
+            Callable[[str, float, float, float], Coroutine[Any, Any, Any]] | None
+        ) = None,
         on_emergency_close: Callable[[], Coroutine[Any, Any, Any]] | None = None,
         on_equity_snapshot: Callable[[float, float, float], Coroutine[Any, Any, Any]] | None = None,
         day_start_balance: float = 50000.0,
@@ -78,25 +81,18 @@ class EquityMonitor:
 
         while self._running:
             try:
-                equity = await get_equity()
-                daily_dd_pct = self._calc_drawdown_pct(
-                    equity, day_start_balance, daily_drawdown_limit
+                result = await self.check_once(
+                    get_equity=get_equity,
+                    on_alert=on_alert,
+                    on_reduce_exposure=on_reduce_exposure,
+                    on_emergency_close=on_emergency_close,
+                    on_equity_snapshot=on_equity_snapshot,
+                    day_start_balance=day_start_balance,
+                    initial_balance=initial_balance,
+                    daily_drawdown_limit=daily_drawdown_limit,
+                    max_drawdown_limit=max_drawdown_limit,
                 )
-                max_dd_pct = self._calc_drawdown_pct(equity, initial_balance, max_drawdown_limit)
-                worst_pct = max(daily_dd_pct, max_dd_pct)
-                level = self._classify_level(worst_pct)
-                if on_equity_snapshot:
-                    await on_equity_snapshot(equity, daily_dd_pct, max_dd_pct)
-                if self._is_escalation(level) and on_alert:
-                    await on_alert(level, daily_dd_pct, max_dd_pct, equity)
-                    self._last_alert_level = level
-                if worst_pct >= self._auto_close_pct:
-                    logger.critical(
-                        "EquityMonitor: CRITICAL drawdown {:.1%} — triggering emergency close!",
-                        worst_pct,
-                    )
-                    if on_emergency_close:
-                        await on_emergency_close()
+                if result["emergency_closed"]:
                     self._running = False
                     break
 
@@ -111,6 +107,59 @@ class EquityMonitor:
                 logger.info("EquityMonitor: sleep cancelled, exiting")
                 break
         logger.info("EquityMonitor: stopped")
+
+    async def check_once(
+        self,
+        get_equity: Callable[[], Coroutine[Any, Any, float]],
+        on_alert: Callable[[str, float, float, float], Coroutine[Any, Any, Any]] | None = None,
+        on_reduce_exposure: (
+            Callable[[str, float, float, float], Coroutine[Any, Any, Any]] | None
+        ) = None,
+        on_emergency_close: Callable[[], Coroutine[Any, Any, Any]] | None = None,
+        on_equity_snapshot: Callable[[float, float, float], Coroutine[Any, Any, Any]] | None = None,
+        day_start_balance: float = 50000.0,
+        initial_balance: float = 50000.0,
+        daily_drawdown_limit: float = 0.05,
+        max_drawdown_limit: float = 0.08,
+    ) -> dict[str, float | str | bool]:
+        """Run a single equity check and execute graded protection callbacks."""
+        equity = await get_equity()
+        daily_dd_pct = self._calc_drawdown_pct(equity, day_start_balance, daily_drawdown_limit)
+        max_dd_pct = self._calc_drawdown_pct(equity, initial_balance, max_drawdown_limit)
+        worst_pct = max(daily_dd_pct, max_dd_pct)
+        level = self._classify_level(worst_pct)
+        emergency_closed = False
+
+        if on_equity_snapshot:
+            await on_equity_snapshot(equity, daily_dd_pct, max_dd_pct)
+
+        escalated = self._is_escalation(level)
+        if escalated and on_alert:
+            await on_alert(level, daily_dd_pct, max_dd_pct, equity)
+
+        if escalated and level == "DANGER" and on_reduce_exposure:
+            await on_reduce_exposure(level, daily_dd_pct, max_dd_pct, equity)
+
+        if worst_pct >= self._auto_close_pct:
+            logger.critical(
+                "EquityMonitor: CRITICAL drawdown {:.1%} — triggering emergency close!",
+                worst_pct,
+            )
+            if on_emergency_close:
+                await on_emergency_close()
+            emergency_closed = True
+
+        if escalated:
+            self._last_alert_level = level
+
+        return {
+            "equity": equity,
+            "daily_dd_pct": daily_dd_pct,
+            "max_dd_pct": max_dd_pct,
+            "worst_pct": worst_pct,
+            "level": level,
+            "emergency_closed": emergency_closed,
+        }
 
     def stop(self) -> None:
         """Signal the monitor to stop."""

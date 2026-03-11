@@ -24,6 +24,7 @@ from src.config import (
 from src.decision.agent_bridge import AgentDecision
 from src.decision.schemas import TradeIntent
 from src.decision_store.sqlite_store import DecisionStore, InvalidTransitionError
+from src.optimize.optimization_state import OptimizationState
 from src.scheduler.scheduler import Scheduler
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -1040,6 +1041,23 @@ class TestEquityMonitorLoop:
         await scheduler._equity_monitor_loop()
 
         mock_matchtrader.get_balance.assert_called()
+
+    async def test_passes_alert_and_emergency_callbacks(
+        self,
+        scheduler: Scheduler,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Should wire alert/emergency/equity callbacks into EquityMonitor.start()."""
+        scheduler._equity_monitor = MagicMock()
+        scheduler._equity_monitor.start = AsyncMock()
+        scheduler._alert_service = MagicMock()
+
+        await scheduler._equity_monitor_loop()
+
+        call_kwargs = scheduler._equity_monitor.start.call_args.kwargs
+        assert callable(call_kwargs["on_alert"])
+        assert callable(call_kwargs["on_emergency_close"])
+        assert callable(call_kwargs["on_equity_snapshot"])
 
     async def test_handles_balance_error(
         self,
@@ -3111,7 +3129,7 @@ async def test_handle_position_closed_exit_reason_from_close_price(
 # ── v1.3.9: Tactical Gate Enforcement Tests ──────────────────────────────
 
 
-async def test_tactical_gate_blocks_intent_when_shadow_mode_off(
+async def test_tactical_wait_retries_then_cancels_when_expire_action_cancel(
     config: AppConfig,
     store: DecisionStore,
     mock_scanner: MagicMock,
@@ -3119,15 +3137,15 @@ async def test_tactical_gate_blocks_intent_when_shadow_mode_off(
     mock_engine: AsyncMock,
     mock_matchtrader: AsyncMock,
 ):
-    """v1.3.9-fix: When shadow_mode=False, tactical WAIT/REJECT must cancel the intent.
-
-    Previously the tactical result was only logged/alerted but never used to block.
-    """
+    """WAIT should enter tactical_pending, retry, then cancel on retry expiry."""
     from src.decision.tactical_validator import TacticalResult
 
-    # Enable tactical gate with shadow_mode=false
     config.tactical.enabled = True
     config.tactical.shadow_mode = False
+    config.tactical.retry.max_retries = 1
+    config.tactical.retry.interval_seconds = 0
+    config.tactical.retry.jitter_seconds = 0
+    config.tactical.retry.expire_action = "cancel"
 
     sched = Scheduler(
         config=config,
@@ -3138,7 +3156,6 @@ async def test_tactical_gate_blocks_intent_when_shadow_mode_off(
         matchtrader=mock_matchtrader,
     )
 
-    # Create and claim an intent
     intent = TradeIntent(
         trade_date=Scheduler._today_str(),
         symbol="EURUSD",
@@ -3149,19 +3166,21 @@ async def test_tactical_gate_blocks_intent_when_shadow_mode_off(
     claimed = store.claim_next_pending("llm-0")
     assert claimed is not None
 
-    # Mock _run_tactical_validation to return WAIT
     tactical_wait = TacticalResult(
         action="WAIT",
         detail="Spread too wide (0.0005 > 0.0003)",
     )
-    with patch.object(sched, "_run_tactical_validation", new_callable=AsyncMock) as mock_tac:
-        mock_tac.return_value = tactical_wait
+    with (
+        patch.object(sched, "_run_tactical_validation", new_callable=AsyncMock) as mock_tac,
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        mock_tac.side_effect = [tactical_wait, tactical_wait]
         await sched._process_claimed_intent("llm-0", claimed)
 
-    # Verify: intent should be cancelled, NOT ready_for_exec
     final = store.get_intent(claimed.id)
     assert final.status == "cancelled"
     assert "Tactical gate WAIT" in (final.execution_error or "")
+    assert mock_tac.await_count == 2
 
 
 async def test_tactical_gate_passes_in_shadow_mode(
@@ -3212,6 +3231,222 @@ async def test_tactical_gate_passes_in_shadow_mode(
     # Verify: intent should be ready_for_exec (NOT cancelled)
     final = store.get_intent(claimed.id)
     assert final.status == "ready_for_exec"
+
+
+async def test_tactical_wait_retries_then_ready_for_exec_when_gate_passes(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """WAIT should pause in tactical_pending and resume to ready_for_exec on PASS."""
+    from src.decision.tactical_validator import TacticalResult
+
+    config.tactical.enabled = True
+    config.tactical.shadow_mode = False
+    config.tactical.retry.max_retries = 2
+    config.tactical.retry.interval_seconds = 0
+    config.tactical.retry.jitter_seconds = 0
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+
+    tactical_wait = TacticalResult(action="WAIT", detail="Need another 5min bar")
+    tactical_pass = TacticalResult(action="PASS", detail="Momentum aligned")
+    with (
+        patch.object(sched, "_run_tactical_validation", new_callable=AsyncMock) as mock_tac,
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        mock_tac.side_effect = [tactical_wait, tactical_pass]
+        await sched._process_claimed_intent("llm-0", claimed)
+
+    final = store.get_intent(claimed.id)
+    assert final.status == "ready_for_exec"
+    assert mock_tac.await_count == 2
+
+
+async def test_tactical_wait_degrades_to_ready_for_exec_on_retry_expiry(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Degrade mode should release intent to execution after retry budget is exhausted."""
+    from src.decision.tactical_validator import TacticalResult
+
+    config.tactical.enabled = True
+    config.tactical.shadow_mode = False
+    config.tactical.retry.max_retries = 1
+    config.tactical.retry.interval_seconds = 0
+    config.tactical.retry.jitter_seconds = 0
+    config.tactical.retry.expire_action = "degrade"
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+
+    tactical_wait = TacticalResult(action="WAIT", detail="Still waiting")
+    with (
+        patch.object(sched, "_run_tactical_validation", new_callable=AsyncMock) as mock_tac,
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        mock_tac.side_effect = [tactical_wait, tactical_wait]
+        await sched._process_claimed_intent("llm-0", claimed)
+
+    final = store.get_intent(claimed.id)
+    assert final.status == "ready_for_exec"
+    assert mock_tac.await_count == 2
+
+
+async def test_process_claimed_intent_uses_decision_cache_for_repeated_signal(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Repeated strategic inputs should reuse the cached LLM decision."""
+    config.tactical.enabled = False
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    intent1 = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    intent2 = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent1)
+    store.insert_intent(intent2)
+
+    claimed1 = store.claim_next_pending("llm-0")
+    assert claimed1 is not None
+    await sched._process_claimed_intent("llm-0", claimed1)
+
+    claimed2 = store.claim_next_pending("llm-0")
+    assert claimed2 is not None
+    await sched._process_claimed_intent("llm-0", claimed2)
+
+    assert mock_agents.decide.call_count == 1
+    assert store.get_intent(claimed2.id).status == "ready_for_exec"
+
+
+async def test_process_claimed_intent_injects_historical_pnl_context(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """LLM input should include historical PnL context for the current symbol."""
+    config.tactical.enabled = False
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+    sched._optimization_state = OptimizationState(feedback_pnl={"EURUSD": 12.5, "GBPUSD": -5.0})
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+
+    await sched._process_claimed_intent("llm-0", claimed)
+
+    qlib_data = mock_agents.decide.call_args.kwargs["qlib_data"]
+    assert "historical_pnl_context" in qlib_data
+    assert "EURUSD" in qlib_data["historical_pnl_context"]
+    assert "12.50" in qlib_data["historical_pnl_context"]
+
+
+async def test_volatility_trigger_runs_immediate_equity_check(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Volatility-triggered rescans should also force an immediate equity check."""
+    config.scheduler.volatility_trigger_enabled = True
+    config.scheduler.volatility_poll_interval_seconds = 0
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    sched._run_equity_check_once = AsyncMock()
+    sched._volatility_monitor.check_triggers = MagicMock(return_value=(True, "EURUSD", 0.42))
+    mock_matchtrader.get_quote.return_value = MagicMock(bid=1.0848, ask=1.0850)
+
+    await _run_loop_once(sched, sched._volatility_monitor_loop())
+
+    sched._run_equity_check_once.assert_awaited_once()
 
 
 async def test_fetch_tactical_data_no_fallback_on_eodhd_failure(

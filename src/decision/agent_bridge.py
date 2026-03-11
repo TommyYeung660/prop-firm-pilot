@@ -234,6 +234,7 @@ class AgentBridge:
         self._default_config: dict[str, Any] = {}
         self._merged_config: dict[str, Any] = {}
         self._fallback_model: str = "volcengine/kimi-k2.5"
+        self._session_id: str = self._resolve_session_id()
 
     def set_ab_state(self, state: ABTestState | None) -> None:
         """Set AB test state for model routing."""
@@ -261,6 +262,42 @@ class AgentBridge:
             if not key.startswith(LLM_ENV_PREFIXES):
                 continue
             os.environ[key] = value
+
+    def _resolve_session_id(self) -> str:
+        """Build a deterministic TradingAgents session ID for memory continuity."""
+        explicit = str(self._config.get("session_id", "")).strip()
+        if explicit:
+            return explicit
+        raw = os.getenv("MATCHTRADER_ACCOUNT_ID", "").strip() or "default"
+        cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "-", raw).strip("-")
+        return f"prop-firm-{cleaned or 'default'}"
+
+    def _resolve_memory_path(self) -> str:
+        """Resolve persistent memory path for TradingAgents Chroma storage."""
+        explicit = str(self._config.get("memory_path", "")).strip()
+        if explicit:
+            return explicit
+        return str(self._agents_path / "data" / "memory")
+
+    def _build_graph_instance(self, graph_cls: Any, config: dict[str, Any]) -> Any:
+        """Construct TradingAgentsGraph with session_id fallback for old signatures."""
+        try:
+            return graph_cls(
+                selected_analysts=self._selected_analysts,
+                config=config,
+                session_id=self._session_id,
+            )
+        except TypeError as e:
+            if "session_id" not in str(e):
+                raise
+            logger.debug(
+                "AgentBridge: graph constructor lacks session_id kwarg, "
+                "retrying legacy init"
+            )
+            return graph_cls(
+                selected_analysts=self._selected_analysts,
+                config=config,
+            )
 
     def _ensure_loaded(self) -> None:
         """Lazy-load TradingAgentsGraph on first use."""
@@ -298,15 +335,15 @@ class AgentBridge:
                 merged_config["workspace_dir"] = agents_str
             if "data_dir" not in self._config:
                 merged_config["data_dir"] = str(self._agents_path / "data")
+            if "memory_path" not in self._config:
+                merged_config["memory_path"] = self._resolve_memory_path()
+            merged_config["session_id"] = self._session_id
 
             self._graph_cls = graph_cls
             self._default_config = default_config
             self._merged_config = merged_config
 
-            self._graph = graph_cls(
-                selected_analysts=self._selected_analysts,
-                config=merged_config,
-            )
+            self._graph = self._build_graph_instance(graph_cls, merged_config)
             logger.info(
                 "AgentBridge: loaded TradingAgentsGraph (analysts={})",
                 self._selected_analysts,
@@ -346,10 +383,7 @@ class AgentBridge:
         self._merged_config["default_model"] = model_id
 
         try:
-            self._graph = self._graph_cls(
-                selected_analysts=self._selected_analysts,
-                config=self._merged_config,
-            )
+            self._graph = self._build_graph_instance(self._graph_cls, self._merged_config)
             self._current_model_id = model_id
             logger.info(
                 "AB: switched LLM model to '{}' (graph rebuilt)",

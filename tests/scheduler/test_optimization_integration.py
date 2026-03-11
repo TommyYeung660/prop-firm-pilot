@@ -15,6 +15,7 @@ from src.config import (
     SchedulerConfig,
 )
 from src.decision_store.sqlite_store import DecisionStore
+from src.optimize.optimization_state import ABTestState, OptimizationState
 from src.scheduler.scheduler import Scheduler
 
 
@@ -75,3 +76,35 @@ class TestOptimizationIntegration:
         await scheduler._send_daily_summary("2026-02-12")
 
         engine.refresh_state.assert_called_once()
+
+    async def test_start_refreshes_optimization_state_before_workers(
+        self,
+        scheduler: Scheduler,
+    ) -> None:
+        """Startup should immediately load optimization + AB routing state."""
+        state = OptimizationState(
+            ab_test=ABTestState(
+                model_a="rightcodes/gpt-5.4",
+                model_b="volcengine/kimi-k2.5",
+                ratio=0.5,
+            )
+        )
+        engine = MagicMock()
+        engine.refresh_state.return_value = state
+        scheduler._optimization_engine = engine
+        scheduler._agents = MagicMock()
+
+        with pytest.raises(RuntimeError, match="stop after refresh"):
+            with pytest.MonkeyPatch.context() as mp:
+                async def fail_gather(*args, **kwargs):
+                    del kwargs
+                    for item in args:
+                        if hasattr(item, "close"):
+                            item.close()
+                    raise RuntimeError("stop after refresh")
+
+                mp.setattr("asyncio.gather", fail_gather)
+                await scheduler.start()
+
+        engine.refresh_state.assert_called_once()
+        scheduler._agents.set_ab_state.assert_called_once_with(state.ab_test)

@@ -35,6 +35,7 @@ def _make_bridge(tmp_path, ab_state: ABTestState | None = None) -> AgentBridge:
         "quick_think_llm": "rightcodes/gpt-5.4",
         "default_model": "rightcodes/gpt-5.4",
     }
+    bridge._session_id = "acct-123"
     bridge._current_model_id = ""
     if ab_state is not None:
         bridge.set_ab_state(ab_state)
@@ -70,6 +71,7 @@ class TestApplyAbModel:
         bridge._graph_cls.assert_called_once_with(
             selected_analysts=["market", "news"],
             config=bridge._merged_config,
+            session_id="acct-123",
         )
         # Graph was replaced
         assert bridge._graph is not original_graph

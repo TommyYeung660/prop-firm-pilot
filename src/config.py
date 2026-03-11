@@ -112,6 +112,10 @@ class MonitorConfig(BaseModel):
     equity_check_interval: int = 60
     drawdown_alert_pct: float = 0.80
     auto_close_pct: float = 0.90
+    reduce_exposure_pct: float = Field(
+        default=0.50,
+        description="Fraction of each position to close when drawdown reaches DANGER level.",
+    )
     trade_journal_path: str = "data/trade_journal.jsonl"
     memory_dir: str = "MEMORY"
 
@@ -255,6 +259,42 @@ class SchedulerConfig(BaseModel):
     )
     volatility_cooldown_seconds: int = Field(
         default=300, description="Min seconds between volatility-triggered scans (v1.3.6: 5min)"
+    )
+    news_trigger_enabled: bool = Field(
+        default=False,
+        description="Enable macro/news headline polling to trigger early rescans.",
+    )
+    news_poll_interval_seconds: int = Field(
+        default=300,
+        description="How often to poll the news trigger feed.",
+    )
+    news_lookback_minutes: int = Field(
+        default=30,
+        description="Maximum age for a headline to count as a fresh event.",
+    )
+    news_max_headlines: int = Field(
+        default=10,
+        description="Maximum headlines to request per poll.",
+    )
+    news_cooldown_seconds: int = Field(
+        default=300,
+        description="Minimum seconds between successive news-triggered rescans.",
+    )
+    news_keywords: list[str] = Field(
+        default_factory=lambda: [
+            "federal reserve",
+            "ecb",
+            "boj",
+            "boe",
+            "rba",
+            "nfp",
+            "cpi",
+            "inflation",
+            "rate hike",
+            "rate cut",
+            "payrolls",
+        ],
+        description="Keywords used to classify high-impact macro headlines.",
     )
 
     # v1.3.5: Compliance rejection cooldown

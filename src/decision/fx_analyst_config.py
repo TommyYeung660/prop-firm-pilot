@@ -101,6 +101,8 @@ def _get_primary_vendor() -> str:
 
 def build_agent_config(
     output_language: str = "繁體中文",
+    memory_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """Build TradingAgents config dict for FX trading.
 
@@ -108,7 +110,7 @@ def build_agent_config(
         Config dict ready to pass to TradingAgentsGraph().
     """
     primary = _get_primary_vendor()
-    return {
+    config: dict[str, Any] = {
         "output_language": output_language,
         "market_type": "fx",  # newly added for TradingAgents integration
         "data_vendors": {
@@ -132,6 +134,11 @@ def build_agent_config(
         "fx_pairs": list(FX_PAIR_CONTEXT.keys()),
         "fx_key_events": FX_KEY_EVENTS,
     }
+    if memory_path:
+        config["memory_path"] = memory_path
+    if session_id:
+        config["session_id"] = session_id
+    return config
 
 
 def get_pair_context(symbol: str) -> dict[str, Any]:

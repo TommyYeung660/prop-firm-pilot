@@ -22,6 +22,7 @@ Usage:
 import asyncio
 import json
 import os
+import random
 from collections.abc import Coroutine
 from datetime import datetime, timedelta, timezone
 from numbers import Real
@@ -34,7 +35,7 @@ from src.compliance.best_day_tracker import BestDayTracker
 from src.compliance.hwm_tracker import HighWaterMarkTracker
 from src.config import AppConfig
 from src.data.fx_data_fetcher import EodhdProvider
-from src.decision.agent_bridge import AgentBridge
+from src.decision.agent_bridge import AgentBridge, AgentDecision, RiskMeta
 from src.decision.decision_formatter import format_decision
 from src.decision.schemas import TradeIntent
 from src.decision.tactical_validator import TacticalData, TacticalResult, TacticalValidator
@@ -54,6 +55,7 @@ from src.scheduler.close_resolution import determine_resolution_path
 from src.scheduler.decision_cache import StrategicDecisionCache
 from src.scheduler.low_confidence_cooldown import LowConfidenceCooldown
 from src.scheduler.market_hours import MarketHoursChecker
+from src.scheduler.news_event_trigger import NewsEventTrigger
 from src.scheduler.session_cadence import SessionCadence
 from src.scheduler.volatility_monitor import VolatilityMonitor
 from src.signal.scanner_bridge import ScannerBridge
@@ -125,6 +127,7 @@ class Scheduler:
         self._optimization_state: OptimizationState | None = None
         self._memory_journal = memory_journal
         self._trade_journal = trade_journal
+        self._latest_market_event_context: str = ""
 
         # v1.3.7: Tactical execution module (shadow mode)
         self._tactical_validator = tactical_validator or TacticalValidator(config.tactical)
@@ -167,6 +170,19 @@ class Scheduler:
 
         # v1.2.0: Volatility-triggered re-scans
         self._volatility_monitor = VolatilityMonitor(config.scheduler, config.symbols)
+        self._news_trigger: NewsEventTrigger | None = None
+        if config.scheduler.news_trigger_enabled:
+            alpha_vantage_key = os.getenv("ALPHA_VANTAGE_API_KEY", "")
+            if alpha_vantage_key:
+                self._news_trigger = NewsEventTrigger(
+                    api_key=alpha_vantage_key,
+                    keywords=config.scheduler.news_keywords,
+                    lookback_minutes=config.scheduler.news_lookback_minutes,
+                    max_headlines=config.scheduler.news_max_headlines,
+                    cooldown_seconds=config.scheduler.news_cooldown_seconds,
+                )
+            else:
+                logger.warning("ALPHA_VANTAGE_API_KEY not set — news trigger disabled")
 
         # v1.3.9: Low-confidence scanner cooldown (P3.10)
         self._low_confidence_cooldown = LowConfidenceCooldown(
@@ -183,6 +199,7 @@ class Scheduler:
         """Launch all workers as concurrent asyncio tasks."""
         self._running = True
         logger.info("Scheduler: starting all workers")
+        await self._refresh_optimization_state()
 
         tasks: list[Coroutine[Any, Any, None]] = [
             self._scanner_loop(),
@@ -199,6 +216,8 @@ class Scheduler:
         # v1.2.0: Volatility monitor loop (if enabled)
         if self._config.scheduler.volatility_trigger_enabled:
             tasks.append(self._volatility_monitor_loop())
+        if self._news_trigger is not None:
+            tasks.append(self._news_event_loop())
 
         await asyncio.gather(*tasks)
 
@@ -569,6 +588,11 @@ class Scheduler:
             "drop_distance": intent.scanner_drop_distance,
             "topk_spread": intent.scanner_topk_spread,
         }
+        historical_pnl_context = self._build_historical_pnl_context(intent.symbol)
+        if historical_pnl_context:
+            qlib_data["historical_pnl_context"] = historical_pnl_context
+        if self._latest_market_event_context:
+            qlib_data["market_event_context"] = self._latest_market_event_context
 
         thresholds = self._get_thresholds_for_symbol(intent.symbol)
         pre_blended = self._blend_confidence(intent.scanner_confidence, intent.scanner_score)
@@ -599,13 +623,32 @@ class Scheduler:
                 self._metrics.record_llm_result("cancel")
             return
 
-        decision = await asyncio.to_thread(
-            self._agents.decide,
-            symbol=intent.symbol,
-            trade_date=intent.trade_date,
-            qlib_data=qlib_data,
-            intent_id=intent.id,
-        )
+        cache_key = self._decision_cache_key(intent)
+        cached_decision = self._decision_cache.get_cached(intent.symbol, cache_key)
+        if cached_decision is not None:
+            decision = self._hydrate_cached_decision(intent.symbol, cached_decision)
+            self._log_trade_event(
+                "LLM_DECISION_CACHE_HIT",
+                {
+                    "intent_id": intent.id,
+                    "symbol": intent.symbol,
+                    "cache_key": cache_key,
+                    "decision": decision.decision,
+                },
+            )
+        else:
+            decision = await asyncio.to_thread(
+                self._agents.decide,
+                symbol=intent.symbol,
+                trade_date=intent.trade_date,
+                qlib_data=qlib_data,
+                intent_id=intent.id,
+            )
+            self._decision_cache.store(
+                intent.symbol,
+                cache_key,
+                self._serialize_decision_for_cache(decision),
+            )
         self._log_trade_event(
             "LLM_DECISION",
             {
@@ -771,70 +814,46 @@ class Scheduler:
                     tactical_result = await self._run_tactical_validation(
                         intent, side=decision.decision
                     )
-                    self._log_trade_event(
-                        "TACTICAL_RESULT",
-                        {
-                            "intent_id": intent.id,
-                            "symbol": intent.symbol,
-                            "side": decision.decision,
-                            "action": tactical_result.action,
-                            "hard_gates": [
-                                {"gate": r.gate_name, "passed": r.passed, "detail": r.detail}
-                                for r in tactical_result.hard_gates
-                            ],
-                            "soft_score": tactical_result.soft_score,
-                            "shadow_mode": self._config.tactical.shadow_mode,
-                        },
-                    )
+                    await self._log_tactical_result(intent, decision.decision, tactical_result)
 
-                    if self._alert_service:
-                        hard_summary = " ".join(
-                            f"{'✅' if r.passed else '❌'}{r.gate_name}"
-                            for r in tactical_result.hard_gates
-                        )
-                        soft_summary = " ".join(
-                            f"{'✅' if r.passed else '❌'}{r.gate_name}"
-                            for r in tactical_result.soft_gates
-                        )
-                        shadow = "(Shadow)" if self._config.tactical.shadow_mode else ""
-                        await self._send_alert(
-                            f"🔬 <b>Tactical Gate {shadow}</b>\n"
-                            f"• {intent.symbol} {decision.decision}\n"
-                            f"• Action: <b>{tactical_result.action}</b>\n"
-                            f"• Hard: {hard_summary}\n"
-                            f"• Soft: {soft_summary}"
-                            f" ({tactical_result.soft_score}/{tactical_result.soft_required})\n"
-                            f"• {tactical_result.detail}"
-                        )
-
-                    # v1.3.9: Enforce tactical gate when shadow_mode is off
-                    if not self._config.tactical.shadow_mode and tactical_result.action != "PASS":
-                        await self._cancel_intent_safe(
-                            worker_id=worker_id,
-                            intent_id=intent.id,
-                            reason=(
-                                f"Tactical gate {tactical_result.action}: {tactical_result.detail}"
-                            ),
-                            context="tactical_gate_block",
-                        )
-                        self._log_trade_event(
-                            "TACTICAL_BLOCKED",
-                            {
-                                "intent_id": intent.id,
-                                "symbol": intent.symbol,
-                                "side": decision.decision,
-                                "action": tactical_result.action,
-                                "detail": tactical_result.detail,
-                            },
-                        )
-                        logger.warning(
-                            "LLM worker {}: intent {} tactical {} \u2014 blocked from execution",
-                            worker_id,
-                            intent.id,
-                            tactical_result.action,
-                        )
-                        self._metrics.record_tactical_result(passed=False)
-                        return
+                    if not self._config.tactical.shadow_mode:
+                        if tactical_result.action == "WAIT":
+                            progressed = await self._retry_tactical_pending(
+                                worker_id=worker_id,
+                                intent=intent,
+                                side=decision.decision,
+                                initial_result=tactical_result,
+                            )
+                            self._metrics.record_tactical_result(passed=progressed)
+                            return
+                        if tactical_result.action == "REJECT":
+                            await self._cancel_intent_safe(
+                                worker_id=worker_id,
+                                intent_id=intent.id,
+                                reason=(
+                                    f"Tactical gate {tactical_result.action}: "
+                                    f"{tactical_result.detail}"
+                                ),
+                                context="tactical_gate_reject",
+                            )
+                            self._log_trade_event(
+                                "TACTICAL_BLOCKED",
+                                {
+                                    "intent_id": intent.id,
+                                    "symbol": intent.symbol,
+                                    "side": decision.decision,
+                                    "action": tactical_result.action,
+                                    "detail": tactical_result.detail,
+                                },
+                            )
+                            logger.warning(
+                                "LLM worker {}: intent {} tactical {} — blocked from execution",
+                                worker_id,
+                                intent.id,
+                                tactical_result.action,
+                            )
+                            self._metrics.record_tactical_result(passed=False)
+                            return
 
                 self._metrics.record_tactical_result(passed=True)
                 await asyncio.to_thread(self._store.mark_ready_for_exec, intent.id)
@@ -896,6 +915,209 @@ class Scheduler:
                         stale.id,
                         intent.symbol,
                     )
+
+    def _decision_cache_key(self, intent: TradeIntent) -> str:
+        """Build a stable cache fingerprint from strategic inputs only."""
+        return (
+            f"{intent.scanner_score:.6f}|{intent.scanner_confidence}|"
+            f"{intent.scanner_score_gap:.6f}|{intent.scanner_drop_distance:.6f}|"
+            f"{intent.scanner_topk_spread:.6f}|{self._latest_market_event_context}"
+        )
+
+    def _serialize_decision_for_cache(self, decision: AgentDecision) -> dict[str, Any]:
+        """Convert AgentDecision into a cache-friendly payload."""
+        return {
+            "decision": decision.decision,
+            "final_state": decision.final_state,
+            "risk_report": decision.risk_report,
+            "model_id": decision.model_id,
+            "risk_meta": decision.risk_meta.model_dump(),
+        }
+
+    def _hydrate_cached_decision(self, symbol: str, payload: dict[str, Any]) -> AgentDecision:
+        """Rebuild AgentDecision from cached strategic output."""
+        return AgentDecision(
+            symbol=symbol,
+            decision=payload.get("decision", "HOLD"),
+            final_state=payload.get("final_state", {}),
+            risk_report=payload.get("risk_report", ""),
+            model_id=payload.get("model_id", ""),
+            risk_meta=RiskMeta(**payload.get("risk_meta", {})),
+        )
+
+    def _build_historical_pnl_context(self, symbol: str) -> str:
+        """Summarize recent PnL feedback for LLM prompts."""
+        symbol_pnl: float | None = None
+        portfolio_summary = ""
+        if self._optimization_state is not None:
+            symbol_pnl = self._optimization_state.feedback_pnl.get(symbol)
+            if self._optimization_state.feedback_pnl:
+                ordered = ", ".join(
+                    f"{sym}={pnl:.2f}"
+                    for sym, pnl in sorted(self._optimization_state.feedback_pnl.items())
+                )
+                portfolio_summary = f"7d feedback pnl by symbol: {ordered}."
+
+        recent_symbol_trades: list[str] = []
+        if self._trade_journal is not None:
+            try:
+                closed_trades = self._trade_journal.get_closed_trades(days=7)
+                for trade in reversed(closed_trades):
+                    if trade.get("symbol") != symbol:
+                        continue
+                    timestamp = str(trade.get("timestamp", ""))[:10]
+                    pnl = float(trade.get("pnl", trade.get("realized_pnl", 0.0)) or 0.0)
+                    reason = trade.get("reason", trade.get("exit_reason", "unknown"))
+                    recent_symbol_trades.append(f"{timestamp}: pnl={pnl:.2f} ({reason})")
+                    if len(recent_symbol_trades) >= 3:
+                        break
+            except Exception as e:
+                logger.debug("Historical pnl context build failed for {}: {}", symbol, e)
+
+        parts: list[str] = []
+        if symbol_pnl is not None:
+            parts.append(f"7d realized pnl for {symbol}: {symbol_pnl:.2f}.")
+        if portfolio_summary:
+            parts.append(portfolio_summary)
+        if recent_symbol_trades:
+            parts.append("Recent closed trades: " + " | ".join(recent_symbol_trades))
+        return " ".join(parts)
+
+    async def _log_tactical_result(
+        self,
+        intent: TradeIntent,
+        side: str,
+        tactical_result: TacticalResult,
+        retry_count: int = 0,
+    ) -> None:
+        """Log and alert tactical validation results."""
+        self._log_trade_event(
+            "TACTICAL_RESULT",
+            {
+                "intent_id": intent.id,
+                "symbol": intent.symbol,
+                "side": side,
+                "action": tactical_result.action,
+                "retry_count": retry_count,
+                "hard_gates": [
+                    {"gate": r.gate_name, "passed": r.passed, "detail": r.detail}
+                    for r in tactical_result.hard_gates
+                ],
+                "soft_score": tactical_result.soft_score,
+                "shadow_mode": self._config.tactical.shadow_mode,
+            },
+        )
+
+        if self._alert_service:
+            hard_summary = " ".join(
+                f"{'✅' if r.passed else '❌'}{r.gate_name}" for r in tactical_result.hard_gates
+            )
+            soft_summary = " ".join(
+                f"{'✅' if r.passed else '❌'}{r.gate_name}" for r in tactical_result.soft_gates
+            )
+            shadow = "(Shadow)" if self._config.tactical.shadow_mode else ""
+            retry_suffix = f" [retry {retry_count}]" if retry_count > 0 else ""
+            await self._send_alert(
+                f"🔬 <b>Tactical Gate {shadow}</b>\n"
+                f"• {intent.symbol} {side}{retry_suffix}\n"
+                f"• Action: <b>{tactical_result.action}</b>\n"
+                f"• Hard: {hard_summary}\n"
+                f"• Soft: {soft_summary}"
+                f" ({tactical_result.soft_score}/{tactical_result.soft_required})\n"
+                f"• {tactical_result.detail}"
+            )
+
+    async def _retry_tactical_pending(
+        self,
+        *,
+        worker_id: str,
+        intent: TradeIntent,
+        side: str,
+        initial_result: TacticalResult,
+    ) -> bool:
+        """Retry tactical WAIT decisions before expiring them."""
+        await asyncio.to_thread(self._store.mark_tactical_pending, intent.id)
+        retry_cfg = self._config.tactical.retry
+        self._log_trade_event(
+            "TACTICAL_PENDING",
+            {
+                "intent_id": intent.id,
+                "symbol": intent.symbol,
+                "side": side,
+                "detail": initial_result.detail,
+                "max_retries": retry_cfg.max_retries,
+            },
+        )
+
+        for retry_count in range(1, retry_cfg.max_retries + 1):
+            jitter = (
+                random.uniform(-retry_cfg.jitter_seconds, retry_cfg.jitter_seconds)
+                if retry_cfg.jitter_seconds > 0
+                else 0.0
+            )
+            await asyncio.sleep(max(0.0, retry_cfg.interval_seconds + jitter))
+            latest = await asyncio.to_thread(self._store.get_intent, intent.id)
+            if latest is None or latest.status != "tactical_pending":
+                logger.warning(
+                    "LLM worker {}: tactical retry aborted for {} (status={})",
+                    worker_id,
+                    intent.id,
+                    latest.status if latest else "missing",
+                )
+                return False
+
+            tactical_result = await self._run_tactical_validation(latest, side=side)
+            await self._log_tactical_result(
+                latest,
+                side,
+                tactical_result,
+                retry_count=retry_count,
+            )
+
+            if tactical_result.action == "PASS":
+                await asyncio.to_thread(self._store.mark_ready_for_exec_from_tactical, intent.id)
+                logger.info(
+                    "LLM worker {}: intent {} tactical retry passed on attempt {}",
+                    worker_id,
+                    intent.id,
+                    retry_count,
+                )
+                return True
+
+            if tactical_result.action == "REJECT":
+                await self._cancel_intent_safe(
+                    worker_id=worker_id,
+                    intent_id=intent.id,
+                    reason=f"Tactical gate REJECT: {tactical_result.detail}",
+                    context="tactical_retry_reject",
+                )
+                return False
+
+        if retry_cfg.expire_action == "degrade":
+            await asyncio.to_thread(self._store.mark_ready_for_exec_from_tactical, intent.id)
+            self._log_trade_event(
+                "TACTICAL_DEGRADED",
+                {
+                    "intent_id": intent.id,
+                    "symbol": intent.symbol,
+                    "side": side,
+                    "retries": retry_cfg.max_retries,
+                },
+            )
+            logger.warning(
+                "LLM worker {}: intent {} tactical retries exhausted — degrading to execution",
+                worker_id,
+                intent.id,
+            )
+            return True
+
+        await self._cancel_intent_safe(
+            worker_id=worker_id,
+            intent_id=intent.id,
+            reason=f"Tactical gate WAIT: {initial_result.detail}",
+            context="tactical_retry_expired",
+        )
+        return False
 
     async def _run_tactical_validation(self, intent: TradeIntent, side: str) -> TacticalResult:
         """Fetch tactical data and run Hard/Soft gate validation.
@@ -1099,11 +1321,6 @@ class Scheduler:
         """Start equity monitoring with drawdown alerts."""
         logger.info("Equity monitor loop: started")
         try:
-
-            async def get_equity() -> float:
-                balance = await self._matchtrader.get_balance()
-                return balance.equity
-
             balance = await self._matchtrader.get_balance()
             # For dynamic drawdown, use HWM as the reference for max drawdown
             max_dd_reference = self._config.account.initial_balance
@@ -1111,7 +1328,11 @@ class Scheduler:
                 max_dd_reference = self._hwm_tracker.high_water_mark
 
             await self._equity_monitor.start(
-                get_equity=get_equity,
+                get_equity=self._get_equity,
+                on_alert=self._handle_drawdown_alert,
+                on_reduce_exposure=self._reduce_exposure_on_drawdown,
+                on_emergency_close=self._handle_emergency_close,
+                on_equity_snapshot=self._record_equity_snapshot,
                 day_start_balance=balance.balance,
                 initial_balance=max_dd_reference,  # HWM for dynamic, initial for balance-based
                 daily_drawdown_limit=self._config.compliance.daily_drawdown_limit,
@@ -1123,6 +1344,170 @@ class Scheduler:
 
         except Exception as e:
             logger.error("Equity monitor loop error: {}", e)
+
+    async def _get_equity(self) -> float:
+        """Fetch current account equity from MatchTrader."""
+        balance = await self._matchtrader.get_balance()
+        return balance.equity
+
+    async def _handle_drawdown_alert(
+        self,
+        level: str,
+        daily_dd_pct: float,
+        max_dd_pct: float,
+        equity: float,
+    ) -> None:
+        """Forward drawdown warnings to the alert service and journal."""
+        self._log_trade_event(
+            "EQUITY_ALERT",
+            {
+                "level": level,
+                "daily_dd_pct": daily_dd_pct,
+                "max_dd_pct": max_dd_pct,
+                "equity": equity,
+            },
+        )
+        if self._alert_service is not None:
+            await self._alert_service.drawdown_warning(level, daily_dd_pct, max_dd_pct, equity)
+
+    async def _reduce_exposure_on_drawdown(
+        self,
+        level: str,
+        daily_dd_pct: float,
+        max_dd_pct: float,
+        equity: float,
+    ) -> None:
+        """Reduce open exposure when drawdown reaches DANGER level."""
+        if level != "DANGER":
+            return
+
+        positions = await self._matchtrader.get_open_positions()
+        if not positions:
+            return
+
+        results: list[tuple[str, float, bool]] = []
+        for pos in positions:
+            reduce_volume = self._compute_reduction_volume(pos.symbol, pos.volume)
+            if reduce_volume <= 0:
+                continue
+            result = await self._matchtrader.close_position(
+                position_id=pos.position_id,
+                symbol=pos.symbol,
+                side=pos.side,
+                volume=reduce_volume,
+            )
+            results.append((pos.position_id, reduce_volume, result.success))
+
+        if results:
+            self._log_trade_event(
+                "EQUITY_REDUCE_EXPOSURE",
+                {
+                    "level": level,
+                    "daily_dd_pct": daily_dd_pct,
+                    "max_dd_pct": max_dd_pct,
+                    "equity": equity,
+                    "results": [
+                        {"position_id": pid, "volume": volume, "success": success}
+                        for pid, volume, success in results
+                    ],
+                },
+            )
+            await self._send_alert(
+                f"⚠️ <b>Drawdown De-Risk</b>\n"
+                f"• Level: {level}\n"
+                f"• Equity: {equity:.2f}\n"
+                f"• Daily DD: {daily_dd_pct:.1%}\n"
+                f"• Max DD: {max_dd_pct:.1%}\n"
+                f"• Reduced {len(results)} position(s)"
+            )
+
+    def _compute_reduction_volume(self, symbol: str, volume: float) -> float:
+        """Calculate partial close volume for de-risking."""
+        if volume <= 0:
+            return 0.0
+        instrument = self._config.instruments.get(symbol)
+        min_lot = instrument.min_lot if instrument is not None else 0.01
+        reduce_volume = round(volume * self._config.monitor.reduce_exposure_pct, 2)
+        if reduce_volume < min_lot:
+            reduce_volume = min(volume, min_lot)
+        return min(volume, reduce_volume)
+
+    async def _handle_emergency_close(self) -> None:
+        """Close all positions and emit emergency audit events."""
+        results = await self._matchtrader.close_all_positions()
+        closed_count = sum(1 for r in results if r.success)
+        self._log_trade_event(
+            "EQUITY_EMERGENCY_CLOSE",
+            {
+                "closed_count": closed_count,
+                "results": [result.model_dump() for result in results],
+            },
+        )
+        await self._send_alert(
+            "🛑 <b>Emergency Close Executed</b>\n"
+            f"• Closed {closed_count}/{len(results)} position(s)"
+        )
+
+    async def _record_equity_snapshot(
+        self,
+        equity: float,
+        daily_dd_pct: float,
+        max_dd_pct: float,
+    ) -> None:
+        """Persist the latest equity snapshot to store and journal."""
+        open_positions = 0
+        try:
+            positions = await self._matchtrader.get_open_positions()
+            open_positions = len(positions)
+        except Exception as e:
+            logger.debug("Equity snapshot: failed to fetch open positions: {}", e)
+
+        await asyncio.to_thread(
+            self._store.insert_equity_snapshot,
+            equity,
+            daily_dd_pct,
+            max_dd_pct,
+            None,
+            open_positions,
+        )
+        if self._trade_journal is not None:
+            try:
+                self._trade_journal.log_equity_snapshot(
+                    balance=equity,
+                    equity=equity,
+                    daily_pnl=0.0,
+                    open_positions=open_positions,
+                )
+            except Exception as e:
+                logger.debug("TradeJournal equity snapshot failed: {}", e)
+
+    async def _run_equity_check_once(self, reason: str) -> None:
+        """Force an immediate one-shot equity check outside the polling loop."""
+        balance = await self._matchtrader.get_balance()
+        max_dd_reference = self._config.account.initial_balance
+        if self._hwm_tracker is not None:
+            max_dd_reference = self._hwm_tracker.high_water_mark
+
+        result = await self._equity_monitor.check_once(
+            get_equity=self._get_equity,
+            on_alert=self._handle_drawdown_alert,
+            on_reduce_exposure=self._reduce_exposure_on_drawdown,
+            on_emergency_close=self._handle_emergency_close,
+            on_equity_snapshot=self._record_equity_snapshot,
+            day_start_balance=balance.balance,
+            initial_balance=max_dd_reference,
+            daily_drawdown_limit=self._config.compliance.daily_drawdown_limit,
+            max_drawdown_limit=self._config.compliance.max_drawdown_limit,
+        )
+        self._log_trade_event(
+            "EQUITY_CHECK_ON_DEMAND",
+            {
+                "reason": reason,
+                "level": result["level"],
+                "worst_pct": result["worst_pct"],
+                "equity": result["equity"],
+            },
+        )
 
     async def _position_monitor_loop(self) -> None:
         """Detect positions closed by SL/TP/manual and update store + send alerts.
@@ -1455,6 +1840,7 @@ class Scheduler:
                 "resolution_path": resolution_path,
             },
         )
+        self._decision_cache.invalidate(symbol)
         # v1.3.9: Operational metrics — record trade close (P3.11)
         self._metrics.record_trade_close(exit_reason)
         # v1.3.9: Reset low-confidence cooldown on successful close (P3.10)
@@ -1952,7 +2338,12 @@ class Scheduler:
 
                 triggered, symbol, pct = self._volatility_monitor.check_triggers(now)
                 if triggered:
+                    self._latest_market_event_context = (
+                        f"Volatility trigger: {symbol} moved {pct:+.2f}% in "
+                        f"{self._config.scheduler.volatility_window_minutes} minutes."
+                    )
                     self._rescan_event.set()
+                    await self._run_equity_check_once(reason=f"volatility:{symbol}")
                     await self._send_alert(
                         f"\U0001f4c8 <b>Volatility Trigger</b>\n"
                         f"\u2022 {symbol} moved {pct:+.2f}% in "
@@ -1973,6 +2364,64 @@ class Scheduler:
                 return
 
         logger.info("Volatility monitor loop: stopped")
+
+    async def _news_event_loop(self) -> None:
+        """Poll macro headlines and trigger rescans when fresh events arrive."""
+        if self._news_trigger is None:
+            return
+
+        logger.info("News event loop: started")
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            while self._running:
+                try:
+                    await self._wait_for_market_open("News event loop")
+                    now = self._now_utc()
+                    triggered, headlines = await self._news_trigger.check_once(
+                        client=client,
+                        now=now,
+                    )
+                    if triggered:
+                        self._latest_market_event_context = self._format_headline_context(headlines)
+                        self._rescan_event.set()
+                        await self._run_equity_check_once(reason="news_event")
+                        lead = headlines[0]
+                        await self._send_alert(
+                            f"📰 <b>News Trigger</b>\n"
+                            f"• {lead['title']}\n"
+                            f"• Triggering early scan"
+                        )
+                except asyncio.CancelledError:
+                    logger.info("News event loop: cancelled")
+                    return
+                except Exception as e:
+                    logger.error("News event loop error: {}", e)
+
+                try:
+                    await asyncio.sleep(self._config.scheduler.news_poll_interval_seconds)
+                except asyncio.CancelledError:
+                    logger.info("News event loop: cancelled during sleep")
+                    return
+
+        logger.info("News event loop: stopped")
+
+    def _format_headline_context(self, headlines: list[dict[str, str]]) -> str:
+        """Convert fresh headlines into prompt-ready event context."""
+        return "Fresh macro/news events: " + " | ".join(
+            f"{headline['published_at']}: {headline['title']}" for headline in headlines[:3]
+        )
+
+    async def _refresh_optimization_state(self) -> None:
+        """Load the latest optimization state and propagate AB routing."""
+        if self._optimization_engine is None:
+            return
+        try:
+            self._optimization_state = await asyncio.to_thread(
+                self._optimization_engine.refresh_state
+            )
+            if self._optimization_state:
+                self._agents.set_ab_state(self._optimization_state.ab_test)
+        except Exception as e:
+            logger.warning("Optimization refresh failed: {}", e)
 
     async def _daily_summary_loop(self) -> None:
         """Send a daily summary at the configured UTC hour.
@@ -2011,16 +2460,7 @@ class Scheduler:
         Args:
             date_str: Today's date in YYYY-MM-DD format.
         """
-        if self._optimization_engine is not None:
-            try:
-                self._optimization_state = await asyncio.to_thread(
-                    self._optimization_engine.refresh_state
-                )
-                # v1.3.9: Propagate AB test state to AgentBridge
-                if self._optimization_state:
-                    self._agents.set_ab_state(self._optimization_state.ab_test)
-            except Exception as e:
-                logger.warning("Optimization refresh failed: {}", e)
+        await self._refresh_optimization_state()
 
         if self._alert_service is None:
             return
