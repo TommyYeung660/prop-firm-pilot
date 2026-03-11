@@ -29,12 +29,16 @@ from numbers import Real
 from typing import Any
 
 import httpx
+import pandas as pd
 from loguru import logger
 
 from src.compliance.best_day_tracker import BestDayTracker
 from src.compliance.hwm_tracker import HighWaterMarkTracker
 from src.config import AppConfig
 from src.data.fx_data_fetcher import EodhdProvider
+from src.data.fx_tick_aggregator import FXTickAggregator
+from src.data.fx_websocket_client import EODHDFXWebSocketClient
+from src.data.market_data_hub import MarketDataHub
 from src.decision.agent_bridge import AgentBridge, AgentDecision, RiskMeta
 from src.decision.decision_formatter import format_decision
 from src.decision.schemas import TradeIntent
@@ -128,6 +132,11 @@ class Scheduler:
         self._memory_journal = memory_journal
         self._trade_journal = trade_journal
         self._latest_market_event_context: str = ""
+        self._tick_aggregator: FXTickAggregator | None = None
+        self._websocket_client: EODHDFXWebSocketClient | None = None
+        self._market_data_hub: MarketDataHub | None = None
+        self._market_data_task: asyncio.Task[None] | None = None
+        self._market_data_ready = False
 
         # v1.3.7: Tactical execution module (shadow mode)
         self._tactical_validator = tactical_validator or TacticalValidator(config.tactical)
@@ -200,6 +209,7 @@ class Scheduler:
         self._running = True
         logger.info("Scheduler: starting all workers")
         await self._refresh_optimization_state()
+        await self._initialize_market_data_hub()
 
         tasks: list[Coroutine[Any, Any, None]] = [
             self._scanner_loop(),
@@ -226,6 +236,47 @@ class Scheduler:
         logger.info("Scheduler: stopping all workers")
         self._running = False
         self._equity_monitor.stop()
+        if self._websocket_client is not None:
+            await self._websocket_client.stop()
+        if self._market_data_task is not None:
+            self._market_data_task.cancel()
+            self._market_data_task = None
+
+    async def _initialize_market_data_hub(self) -> None:
+        """Warm up and start the WebSocket-first market-data sidecar."""
+        self._market_data_ready = False
+        if not self._config.websocket.enabled:
+            return
+        if self._eodhd is None:
+            logger.warning(
+                "Scheduler: websocket market data requested but EODHD provider unavailable"
+            )
+            return
+        eodhd_key = os.getenv("EODHD_API_KEY", "").strip()
+        if not eodhd_key:
+            logger.warning("Scheduler: websocket market data disabled — EODHD_API_KEY missing")
+            return
+        symbols = self._config.websocket.symbols or list(self._config.symbols)
+        self._tick_aggregator = FXTickAggregator()
+        self._websocket_client = EODHDFXWebSocketClient(
+            api_token=eodhd_key,
+            symbols=symbols,
+            reconnect_base_seconds=self._config.websocket.reconnect_base_seconds,
+            reconnect_max_seconds=self._config.websocket.reconnect_max_seconds,
+            stale_after_seconds=self._config.websocket.stale_after_seconds,
+        )
+        self._websocket_client.register_tick_callback(self._tick_aggregator.add_tick)
+        self._market_data_hub = MarketDataHub(
+            aggregator=self._tick_aggregator,
+            websocket_client=self._websocket_client,
+            rest_provider=self._eodhd,
+            symbols=symbols,
+            quote_ttl_seconds=self._config.websocket.quote_ttl_seconds,
+        )
+        self._volatility_monitor.set_market_data_hub(self._market_data_hub)
+        await self._market_data_hub.warmup()
+        self._market_data_task = asyncio.create_task(self._websocket_client.run())
+        self._market_data_ready = True
 
     async def recover_stale_claims(self) -> int:
         """Recover stale claimed intents from a previous crashed session.
@@ -983,6 +1034,49 @@ class Scheduler:
             parts.append("Recent closed trades: " + " | ".join(recent_symbol_trades))
         return " ".join(parts)
 
+    def _build_reflection_payload(
+        self,
+        *,
+        intent: TradeIntent,
+        pnl: float,
+        exit_reason: str,
+        position_id: str,
+        resolution_path: str,
+        hold_duration_seconds: int | None,
+        decision: Any | None,
+    ) -> dict[str, Any]:
+        """Build a structured post-trade reflection payload for TradingAgents."""
+        final_state: dict[str, Any] = {}
+        if getattr(decision, "final_state", None):
+            final_state = dict(decision.final_state)
+        elif intent.agent_state_json:
+            try:
+                final_state = json.loads(intent.agent_state_json)
+            except Exception:
+                final_state = {}
+
+        risk_report = getattr(decision, "risk_report", "") or intent.agent_risk_report
+        model_id = getattr(decision, "model_id", "")
+        return {
+            "symbol": intent.symbol,
+            "trade_date": intent.trade_date,
+            "closed_at": self._now_utc().isoformat(),
+            "position_id": position_id,
+            "side": intent.suggested_side or "",
+            "realized_pnl": pnl,
+            "close_reason": exit_reason,
+            "resolution_path": resolution_path,
+            "hold_duration_seconds": hold_duration_seconds,
+            "scanner_score": intent.scanner_score,
+            "scanner_confidence": intent.scanner_confidence,
+            "historical_pnl_context": self._build_historical_pnl_context(intent.symbol),
+            "market_event_context": self._latest_market_event_context,
+            "decision_summary": intent.suggested_side or "",
+            "risk_report": risk_report,
+            "model_id": model_id,
+            "final_state": final_state,
+        }
+
     async def _log_tactical_result(
         self,
         intent: TradeIntent,
@@ -1152,6 +1246,66 @@ class Scheduler:
         5-min and 1-hour OHLCV bars required by ATR, EMA, RSI, and candle gates.
         """
         data = TacticalData()
+        instrument = self._config.instruments.get(symbol)
+        if instrument:
+            data.typical_spread = instrument.avg_spread_pips * instrument.pip_size
+
+        # ── WebSocket-first market data hub ────────────────────────────────
+        if self._market_data_ready and self._market_data_hub is not None:
+            try:
+                quote_result = await self._market_data_hub.get_quote(symbol)
+                data.quote_source = quote_result.source
+                quote = quote_result.quote or {}
+                ask = quote.get("ask", 0)
+                bid = quote.get("bid", 0)
+                ts_ms = quote.get("timestamp_ms", 0) or quote.get("timestampMs", 0)
+                data.current_spread = abs(ask - bid)
+                if ts_ms:
+                    data.latest_bar_time = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+            except Exception as e:
+                logger.warning("Failed to fetch hub quote for {}: {}", symbol, e)
+
+            try:
+                bars_5min_result, bars_1h_result = await asyncio.gather(
+                    self._market_data_hub.get_bars(
+                        symbol,
+                        "5m",
+                        self._config.websocket.warmup_5m_bars,
+                    ),
+                    self._market_data_hub.get_bars(
+                        symbol,
+                        "1h",
+                        self._config.websocket.warmup_1h_bars,
+                    ),
+                )
+                if not bars_5min_result.bars.empty:
+                    data.bars_5min = bars_5min_result.bars
+                    data.bars_5min_source = bars_5min_result.source
+                if not bars_1h_result.bars.empty:
+                    data.bars_1h = bars_1h_result.bars
+                    data.bars_1h_source = bars_1h_result.source
+                if data.latest_bar_time is None and not data.bars_5min.empty:
+                    latest_bar = pd.Timestamp(data.bars_5min.iloc[-1]["datetime"]).to_pydatetime()
+                    if latest_bar.tzinfo is None:
+                        latest_bar = latest_bar.replace(tzinfo=timezone.utc)
+                    data.latest_bar_time = latest_bar
+                sources = {
+                    source
+                    for source in (
+                        data.quote_source,
+                        data.bars_5min_source,
+                        data.bars_1h_source,
+                    )
+                    if source
+                }
+                if len(sources) == 1:
+                    data.data_source = next(iter(sources))
+                elif sources:
+                    data.data_source = "mixed"
+                if data.current_spread > 0 or not data.bars_5min.empty or not data.bars_1h.empty:
+                    return data
+            except Exception as e:
+                logger.warning("Failed to fetch hub intraday bars for {}: {}", symbol, e)
 
         # ── Spread from MatchTrader ──────────────────────────────────────────
         # Map config symbol (e.g. "EURUSD") to broker symbol (e.g. "EURUSD.")
@@ -1181,10 +1335,6 @@ class Scheduler:
                         data.latest_bar_time,
                         (datetime.now(timezone.utc) - data.latest_bar_time).total_seconds(),
                     )
-                # Use instrument config for typical spread
-                instrument = self._config.instruments.get(symbol)
-                if instrument:
-                    data.typical_spread = instrument.avg_spread_pips * instrument.pip_size
         except Exception as e:
             logger.debug("Failed to fetch quote for {}: {}", symbol, e)
 
@@ -1207,6 +1357,7 @@ class Scheduler:
                     )
                 if not bars_5min.empty:
                     data.bars_5min = bars_5min
+                    data.bars_5min_source = "rest_fallback"
                     # Note: latest_bar_time is now set from MatchTrader quote above.
                     # EODHD bar timestamps are NOT used for data_freshness due to
                     # potential multi-hour delay during DST transitions.
@@ -1217,11 +1368,14 @@ class Scheduler:
                     )
                 if not bars_1h.empty:
                     data.bars_1h = bars_1h
+                    data.bars_1h_source = "rest_fallback"
                     logger.debug(
                         "Tactical: fetched {} 1h bars for {}",
                         len(bars_1h),
                         symbol,
                     )
+                if data.bars_5min_source or data.bars_1h_source:
+                    data.data_source = "rest_fallback"
             except Exception as e:
                 logger.warning("Failed to fetch EODHD intraday bars for {}: {}", symbol, e)
 
@@ -1848,11 +2002,28 @@ class Scheduler:
         # Call LLM reflect for learning
         if pnl != 0.0:
             try:
+                if decision is None:
+                    decision = await asyncio.to_thread(self._store.get_decision, intent.id)
+                reflection_payload = self._build_reflection_payload(
+                    intent=intent,
+                    pnl=pnl,
+                    exit_reason=exit_reason,
+                    position_id=position_id,
+                    resolution_path=resolution_path,
+                    hold_duration_seconds=hold_duration_seconds,
+                    decision=decision,
+                )
                 await asyncio.to_thread(
                     self._agents.reflect,
-                    {symbol: pnl},
+                    reflection_payload,
                 )
-                logger.info("LLM reflect called for {} PnL={}", symbol, pnl)
+                logger.info(
+                    "LLM reflect called for {} PnL={} reason={} resolution={}",
+                    symbol,
+                    pnl,
+                    exit_reason,
+                    resolution_path,
+                )
             except Exception as e:
                 logger.warning("LLM reflect failed for {}: {}", symbol, e)
 
@@ -2324,19 +2495,22 @@ class Scheduler:
                 await self._wait_for_market_open("Volatility monitor")
                 now = self._now_utc()
 
-                for symbol in self._config.symbols:
-                    try:
-                        # Map config symbol to broker symbol if needed
-                        broker_symbol = symbol
-                        if self._registry is not None:
-                            broker_symbol = self._registry.to_broker(symbol)
-                        quote = await self._matchtrader.get_quote(broker_symbol)
-                        mid_price = (quote.bid + quote.ask) / 2
-                        self._volatility_monitor.record_quote(symbol, mid_price, now)
-                    except Exception as e:
-                        logger.debug("Volatility monitor: quote failed for {}: {}", symbol, e)
+                if self._market_data_ready and self._market_data_hub is not None:
+                    triggered, symbol, pct = await self._volatility_monitor.check_once(now)
+                else:
+                    for symbol in self._config.symbols:
+                        try:
+                            # Map config symbol to broker symbol if needed
+                            broker_symbol = symbol
+                            if self._registry is not None:
+                                broker_symbol = self._registry.to_broker(symbol)
+                            quote = await self._matchtrader.get_quote(broker_symbol)
+                            mid_price = (quote.bid + quote.ask) / 2
+                            self._volatility_monitor.record_quote(symbol, mid_price, now)
+                        except Exception as e:
+                            logger.debug("Volatility monitor: quote failed for {}: {}", symbol, e)
 
-                triggered, symbol, pct = self._volatility_monitor.check_triggers(now)
+                    triggered, symbol, pct = self._volatility_monitor.check_triggers(now)
                 if triggered:
                     self._latest_market_event_context = (
                         f"Volatility trigger: {symbol} moved {pct:+.2f}% in "

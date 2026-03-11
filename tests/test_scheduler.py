@@ -1105,6 +1105,34 @@ class TestStartStop:
             elif hasattr(item, "cancel"):
                 item.cancel()
 
+    async def test_start_initializes_market_data_hub_before_workers(
+        self,
+        scheduler: Scheduler,
+    ) -> None:
+        """start() should warm up market data before worker loops begin."""
+
+        async def fake_initialize() -> None:
+            scheduler._market_data_hub = object()
+            scheduler._market_data_ready = True
+
+        async def fake_gather(*args, **kwargs) -> None:
+            assert scheduler._market_data_hub is not None
+            assert scheduler._market_data_ready is True
+
+        scheduler._initialize_market_data_hub = AsyncMock(side_effect=fake_initialize)
+
+        with patch("asyncio.gather", new=AsyncMock(side_effect=fake_gather)) as mock_gather:
+            await scheduler.start()
+
+        scheduler._initialize_market_data_hub.assert_awaited_once()
+        assert mock_gather.called
+        args = mock_gather.call_args[0]
+        for item in args:
+            if hasattr(item, "close"):
+                item.close()
+            elif hasattr(item, "cancel"):
+                item.cancel()
+
     async def test_start_with_multiple_llm_workers(
         self,
         config: AppConfig,
@@ -3126,6 +3154,128 @@ async def test_handle_position_closed_exit_reason_from_close_price(
     assert call_kwargs["trigger_price"] == 1.0951
 
 
+def test_build_reflection_payload_includes_trade_outcome_context(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """v1.4.0: reflection payload should carry outcome and context fields."""
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+    sched._latest_market_event_context = "Volatility trigger: EURUSD moved +0.42% in 30 minutes."
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    intent.suggested_side = "BUY"
+    payload = sched._build_reflection_payload(
+        intent=intent,
+        pnl=-12.5,
+        exit_reason="sl_hit",
+        position_id="pos-3",
+        resolution_path="broker_api",
+        hold_duration_seconds=300,
+        decision=MagicMock(risk_report="Avoid fading CPI spike", model_id="model-a"),
+    )
+
+    assert payload["symbol"] == "EURUSD"
+    assert payload["realized_pnl"] == -12.5
+    assert payload["close_reason"] == "sl_hit"
+    assert payload["position_id"] == "pos-3"
+    assert payload["market_event_context"] == sched._latest_market_event_context
+    assert payload["risk_report"] == "Avoid fading CPI spike"
+
+
+async def test_handle_position_closed_reflect_failure_does_not_break_close_flow(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Reflection errors should be best-effort and not block intent closure."""
+    import json
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+    sched._alert_service = AsyncMock()
+    mock_agents.reflect.side_effect = RuntimeError("memory backend unavailable")
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+    store.update_intent_decision(
+        claimed.id, "BUY", sl_pips=50.0, tp_pips=100.0, risk_report="test", state_json="{}"
+    )
+    store.mark_ready_for_exec(claimed.id)
+    store.mark_executing(claimed.id)
+    store.mark_opened(claimed.id, position_id="pos-4")
+    store.update_execution_meta(
+        claimed.id,
+        json.dumps(
+            {
+                "fill_price": 1.085,
+                "volume": 0.05,
+                "side": "BUY",
+                "sl_price": 1.080,
+                "tp_price": 1.095,
+            }
+        ),
+    )
+
+    closed_pos = MagicMock(
+        position_id="pos-4",
+        profit=-25.0,
+        close_price=1.0800,
+        open_price=1.085,
+        volume=0.05,
+    )
+    mock_matchtrader.get_closed_positions = AsyncMock(return_value=[closed_pos])
+    mock_matchtrader.get_balance.return_value = MagicMock(
+        balance=49975.0,
+        equity=49975.0,
+        margin=0.0,
+        free_margin=49975.0,
+    )
+
+    opened_intent = store.get_intent(claimed.id)
+    await sched._handle_position_closed(opened_intent)
+
+    closed_intent = store.get_intent(claimed.id)
+    assert closed_intent.status == "closed"
+    mock_agents.reflect.assert_called_once()
+    reflect_payload = mock_agents.reflect.call_args.args[0]
+    assert reflect_payload["symbol"] == "EURUSD"
+    assert reflect_payload["realized_pnl"] == -25.0
+    assert reflect_payload["close_reason"] == "sl_hit"
+    assert reflect_payload["risk_report"] == "test"
+
+
 # ── v1.3.9: Tactical Gate Enforcement Tests ──────────────────────────────
 
 
@@ -3484,6 +3634,138 @@ async def test_fetch_tactical_data_no_fallback_on_eodhd_failure(
     assert data.latest_bar_time is None, (
         f"Expected latest_bar_time=None after EODHD failure, got {data.latest_bar_time}"
     )
+
+
+async def test_fetch_tactical_data_prefers_market_data_hub_cache(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """v1.4.0: tactical reads should prefer websocket-derived hub data when healthy."""
+    import pandas as pd
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    bars_5min = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-11T12:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    bars_1h = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-11T12:00:00Z"),
+                "open": 1.09,
+                "high": 1.12,
+                "low": 1.08,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    sched._market_data_ready = True
+    sched._market_data_hub = MagicMock()
+    sched._market_data_hub.get_quote = AsyncMock(
+        return_value=MagicMock(
+            source="websocket_cache",
+            quote={"bid": 1.0848, "ask": 1.0850, "timestamp_ms": 1_741_696_000_000},
+        )
+    )
+    sched._market_data_hub.get_bars = AsyncMock(
+        side_effect=[
+            MagicMock(source="websocket_cache", bars=bars_5min),
+            MagicMock(source="websocket_cache", bars=bars_1h),
+        ]
+    )
+
+    data = await sched._fetch_tactical_data("EURUSD")
+
+    assert data.bars_5min.equals(bars_5min)
+    assert data.bars_1h.equals(bars_1h)
+    assert data.data_source == "websocket_cache"
+
+
+async def test_fetch_tactical_data_uses_hub_rest_fallback_for_stale_symbol(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """v1.4.0: stale websocket symbols should still resolve through hub fallback."""
+    import pandas as pd
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    bars_5min = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-11T12:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    bars_1h = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-11T12:00:00Z"),
+                "open": 1.09,
+                "high": 1.12,
+                "low": 1.08,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    sched._market_data_ready = True
+    sched._market_data_hub = MagicMock()
+    sched._market_data_hub.get_quote = AsyncMock(
+        return_value=MagicMock(
+            source="rest_fallback",
+            quote={"bid": 1.0848, "ask": 1.0850, "timestamp_ms": 1_741_696_000_000},
+        )
+    )
+    sched._market_data_hub.get_bars = AsyncMock(
+        side_effect=[
+            MagicMock(source="rest_fallback", bars=bars_5min),
+            MagicMock(source="rest_fallback", bars=bars_1h),
+        ]
+    )
+
+    data = await sched._fetch_tactical_data("EURUSD")
+
+    assert data.bars_5min.equals(bars_5min)
+    assert data.bars_1h.equals(bars_1h)
+    assert data.data_source == "rest_fallback"
 
 
 async def test_fetch_tactical_data_uses_quote_timestamp(

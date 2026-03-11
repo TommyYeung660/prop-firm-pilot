@@ -13,6 +13,7 @@ Usage:
 
 from collections import deque
 from datetime import datetime, timedelta
+from typing import Any
 
 from loguru import logger
 
@@ -28,14 +29,25 @@ class VolatilityMonitor:
         triggered, symbol, pct_change = monitor.check_triggers(now_utc)
     """
 
-    def __init__(self, config: SchedulerConfig, symbols: list[str]) -> None:
+    def __init__(
+        self,
+        config: SchedulerConfig,
+        symbols: list[str],
+        market_data_hub: Any | None = None,
+    ) -> None:
         self._config = config
         self._symbols = symbols
+        self._market_data_hub = market_data_hub
         # Per-symbol quote history: deque of (timestamp, mid_price)
         self._quotes: dict[str, deque[tuple[datetime, float]]] = {sym: deque() for sym in symbols}
         self._last_trigger_time: datetime | None = None
         self._last_trigger_per_symbol: dict[str, datetime] = {}
         self._global_min_interval_seconds: int = 900  # 15 min between ANY trigger
+        self.last_source: str = ""
+
+    def set_market_data_hub(self, market_data_hub: Any | None) -> None:
+        """Attach or replace the market-data hub used by check_once()."""
+        self._market_data_hub = market_data_hub
 
     def record_quote(self, symbol: str, mid_price: float, now: datetime) -> None:
         """Record a price quote for a symbol.
@@ -94,6 +106,38 @@ class VolatilityMonitor:
             return True, best_symbol, best_pct
 
         return False, "", 0.0
+
+    async def check_once(self, now: datetime) -> tuple[bool, str, float]:
+        """Fetch latest quotes from the market-data hub and evaluate triggers once."""
+        if self._market_data_hub is None:
+            return self.check_triggers(now)
+
+        source_by_symbol: dict[str, str] = {}
+        for symbol in self._symbols:
+            try:
+                quote_result = await self._market_data_hub.get_quote(symbol)
+            except Exception as e:
+                logger.debug(
+                    "Volatility monitor: market data hub quote failed for {}: {}",
+                    symbol,
+                    e,
+                )
+                continue
+            quote = quote_result.quote
+            if not quote:
+                continue
+            mid_price = quote.get("mid")
+            if mid_price is None and quote.get("bid") is not None and quote.get("ask") is not None:
+                mid_price = (float(quote["bid"]) + float(quote["ask"])) / 2.0
+            if mid_price is None:
+                continue
+            self.record_quote(symbol, float(mid_price), now)
+            source_by_symbol[symbol] = str(quote_result.source)
+
+        triggered, symbol, pct = self.check_triggers(now)
+        if symbol:
+            self.last_source = source_by_symbol.get(symbol, "")
+        return triggered, symbol, pct
 
     def _calculate_price_change_pct(self, symbol: str, now: datetime) -> float:
         """Calculate price change % over the rolling window for a symbol."""

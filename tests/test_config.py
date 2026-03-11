@@ -119,3 +119,13 @@ def test_breakeven_activation_pct_from_config():
 
     config = load_config("config/e8_one_5k_challenge.yaml")
     assert config.scheduler.breakeven_activation_pct == 0.3
+
+
+def test_config_loads_websocket_primary_market_data_block():
+    """v1.4.0: websocket-first market data settings should load from YAML."""
+    from src.config import load_config
+
+    config = load_config("config/e8_one_5k_challenge.yaml")
+    assert config.websocket.enabled is True
+    assert config.websocket.use_as_primary_market_data is True
+    assert "EURUSD" in config.websocket.symbols

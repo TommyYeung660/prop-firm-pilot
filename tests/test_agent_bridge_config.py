@@ -268,6 +268,44 @@ class TestAgentBridgeDateNormalize:
         assert AgentBridge._normalize_trade_date("not-a-date") == expected_today
 
 
+class TestAgentBridgeReflect:
+    """Verify reflect() handles both legacy and structured payloads."""
+
+    def test_reflect_passes_structured_payload_to_graph(self, tmp_path, monkeypatch) -> None:
+        captured: dict[str, object] = {}
+
+        class DummyGraph:
+            def __init__(self, selected_analysts, config):
+                del selected_analysts, config
+
+            def reflect_and_remember(self, payload):
+                captured["payload"] = payload
+
+        fake_graph_module = SimpleNamespace(TradingAgentsGraph=DummyGraph)
+        fake_default_module = SimpleNamespace(DEFAULT_CONFIG={})
+
+        def fake_import(name: str):
+            if name == "tradingagents.graph.trading_graph":
+                return fake_graph_module
+            if name == "tradingagents.default_config":
+                return fake_default_module
+            raise ModuleNotFoundError(name)
+
+        monkeypatch.setattr("src.decision.agent_bridge.importlib.import_module", fake_import)
+
+        bridge = AgentBridge(agents_path=tmp_path, config={})
+        payload = {
+            "symbol": "EURUSD",
+            "realized_pnl": -12.5,
+            "close_reason": "sl_hit",
+            "market_event_context": "Volatility trigger",
+        }
+
+        bridge.reflect(payload)
+
+        assert captured["payload"] == payload
+
+
 # ── main.py integration tests ──────────────────────────────────────────────
 
 
