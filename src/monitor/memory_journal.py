@@ -36,6 +36,8 @@ class MemoryJournal:
         """
         self._memory_dir = Path(memory_dir)
         self._memory_dir.mkdir(parents=True, exist_ok=True)
+        # v1.3.9a: Track last decision per symbol for diff computation
+        self._last_decisions: dict[str, dict[str, Any]] = {}
         logger.debug("MemoryJournal: initialized at {}", self._memory_dir)
 
     # ── Public Methods ─────────────────────────────────────────────────────
@@ -82,18 +84,31 @@ class MemoryJournal:
         decision: str,
         context: dict[str, Any] | None = None,
     ) -> None:
-        """Log an LLM decision (including HOLD) to today's Markdown file."""
+        """Log an LLM decision (including HOLD) to today's Markdown file.
+
+        v1.3.9a: Computes a diff against the previous decision for the same
+        symbol so reviewers can quickly see what changed between cycles.
+        """
         now = datetime.now(timezone.utc)
         date_str = now.strftime("%Y-%m-%d")
         time_str = now.strftime("%H:%M:%S UTC")
+
+        ctx = context or {}
+        # v1.3.9a: Compute diff vs last decision for this symbol
+        current_snapshot = {"side": side, "decision": decision, **ctx}
+        diff = self._compute_diff(symbol, current_snapshot)
 
         content = self._format_decision_block(
             time_str=time_str,
             symbol=symbol,
             side=side,
             decision=decision,
-            context=context or {},
+            context=ctx,
+            diff=diff,
         )
+        # Update last-known decision for next diff
+        self._last_decisions[symbol] = current_snapshot
+
         file_path = self._memory_dir / f"{date_str}.md"
         self._append_to_file(file_path, content)
         logger.info("MemoryJournal: logged LLM decision for {} ({})", symbol, date_str)
@@ -192,8 +207,14 @@ class MemoryJournal:
         side: str,
         decision: str,
         context: dict[str, Any],
+        diff: dict[str, tuple[Any, Any]] | None = None,
     ) -> str:
-        """Format a generic decision block for scheduler LLM outputs."""
+        """Format a generic decision block for scheduler LLM outputs.
+
+        Args:
+            diff: Optional dict of {key: (old_value, new_value)} showing what
+                  changed vs the previous decision for this symbol.
+        """
         lines = []
         lines.append(f"## {time_str} - {symbol} {decision}")
         lines.append("")
@@ -205,6 +226,19 @@ class MemoryJournal:
         for key, value in context.items():
             lines.append(f"- **{key}**: {value}")
         lines.append("")
+
+        # v1.3.9a: Diff vs previous decision for same symbol
+        if diff:
+            lines.append("### Δ Changes vs Previous Decision")
+            lines.append("")
+            for key, (old_val, new_val) in diff.items():
+                lines.append(f"- **{key}**: `{old_val}` → `{new_val}`")
+            lines.append("")
+        elif diff is not None:
+            # diff was computed but empty — identical to previous
+            lines.append("> ℹ️ No changes vs previous decision for this symbol.")
+            lines.append("")
+
         lines.append("---")
         lines.append("")
         return "\n".join(lines)
@@ -229,6 +263,32 @@ class MemoryJournal:
         lines.append("---")
         lines.append("")
         return "\n".join(lines)
+
+    def _compute_diff(
+        self, symbol: str, current: dict[str, Any]
+    ) -> dict[str, tuple[Any, Any]] | None:
+        """Compare current decision snapshot to the last one for this symbol.
+
+        Returns:
+            None if no prior decision exists (first time).
+            Empty dict if nothing changed.
+            Dict of {key: (old_value, new_value)} for changed fields.
+        """
+        prev = self._last_decisions.get(symbol)
+        if prev is None:
+            return None
+
+        # Keys that are verbose / non-comparable (e.g. risk_report, final_state)
+        skip_keys = {"risk_report", "final_state"}
+        all_keys = sorted((set(prev) | set(current)) - skip_keys)
+
+        diff: dict[str, tuple[Any, Any]] = {}
+        for key in all_keys:
+            old_val = prev.get(key)
+            new_val = current.get(key)
+            if old_val != new_val:
+                diff[key] = (old_val, new_val)
+        return diff
 
     def _append_to_file(self, file_path: Path, content: str) -> None:
         """Append content to a file.
