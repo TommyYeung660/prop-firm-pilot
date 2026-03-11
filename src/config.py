@@ -466,9 +466,18 @@ class WebSocketConfig(BaseModel):
         default=30,
         description="Maximum age for a quote to be considered fresh",
     )
-    warmup_1m_bars: int = Field(default=120, description="Cold-start backfill bars for 1m timeframe")
-    warmup_5m_bars: int = Field(default=120, description="Cold-start backfill bars for 5m timeframe")
-    warmup_1h_bars: int = Field(default=80, description="Cold-start backfill bars for 1h timeframe")
+    warmup_1m_bars: int = Field(
+        default=120,
+        description="Cold-start backfill bars for 1m timeframe",
+    )
+    warmup_5m_bars: int = Field(
+        default=120,
+        description="Cold-start backfill bars for 5m timeframe",
+    )
+    warmup_1h_bars: int = Field(
+        default=80,
+        description="Cold-start backfill bars for 1h timeframe",
+    )
 
 
 class LoggingConfig(BaseModel):

@@ -145,6 +145,15 @@ uv run ruff check src tests
 uv run ruff check C:/Users/tommy.yeung/CursorProjects/TradingAgents/tradingagents C:/Users/tommy.yeung/CursorProjects/TradingAgents/tests
 ```
 
+### 6.5 驗證結果
+
+- prop-firm-pilot targeted suites：`188 passed`
+- TradingAgents targeted suites：`6 passed`
+- v1.3.9c regression set：`214 passed`
+- prop-firm-pilot lint：`All checks passed!`
+- TradingAgents changed-file lint：`All checks passed!`
+- 註：TradingAgents full-repo lint 未作為本次 release gate，因該 repo 尚有大量與 v1.4.0 無關的既有 lint debt
+
 ---
 
 ## 7. 已知限制

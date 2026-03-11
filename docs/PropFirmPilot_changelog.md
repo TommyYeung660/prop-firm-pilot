@@ -33,8 +33,11 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - reflection / memory retrieval 皆維持 best-effort，不可阻塞 broker close flow 或 decision flow
 
 ### Tested
-- prop-firm-pilot：WebSocket client、tick aggregator、market-data hub、scheduler startup、volatility monitor、tactical fetch、reflection payload 定向測試已通過
-- TradingAgents：structured memory persistence、retrieved lesson injection、thread-safety / trader prompt 相關回歸測試已通過
+- prop-firm-pilot targeted suites：`188 passed`
+- TradingAgents targeted suites：`6 passed`
+- v1.3.9c regression set：`214 passed`
+- prop-firm-pilot lint：`uv run ruff check src tests` → `All checks passed!`
+- TradingAgents changed-file lint：`uv run ruff check tradingagents/agents/utils/memory.py tradingagents/graph/reflection.py tradingagents/agents/utils/agent_states.py tradingagents/graph/propagation.py tradingagents/agents/trader/trader.py tradingagents/graph/trading_graph.py tests/test_memory_reflection.py tests/test_prompt_memory_injection.py` → `All checks passed!`
 - 完整驗證命令與結果彙總記錄於 `docs/PropFirmPilot_v1.4.0_Report.md`
 
 ### Files
