@@ -43,6 +43,23 @@ monitor:
   trade_journal_path: data/trade_journal_e8_one_5k.jsonl
   memory_dir: MEMORY_E8_ONE_5K
 
+websocket:
+  enabled: true
+  use_as_primary_market_data: true
+  provider: "eodhd"
+  symbols:
+    - EURUSD
+    - GBPUSD
+    - USDJPY
+    - AUDUSD
+  reconnect_base_seconds: 2
+  reconnect_max_seconds: 300
+  stale_after_seconds: 45
+  quote_ttl_seconds: 30
+  warmup_1m_bars: 120
+  warmup_5m_bars: 120
+  warmup_1h_bars: 80
+
 optimization:
   state_path: data/optimization_state_e8_one_5k.json
   ab_model_a: "rightcodes/gpt-5.4"

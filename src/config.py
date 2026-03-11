@@ -437,6 +437,40 @@ class TacticalConfig(BaseModel):
     intent_dedup: TacticalIntentDedupConfig = Field(default_factory=TacticalIntentDedupConfig)
 
 
+class WebSocketConfig(BaseModel):
+    """WebSocket-first market data configuration for v1.4.0."""
+
+    enabled: bool = Field(default=True, description="Enable WebSocket market data ingestion")
+    use_as_primary_market_data: bool = Field(
+        default=True,
+        description="Prefer WebSocket-derived quotes/bars over REST when feed is healthy",
+    )
+    provider: Literal["eodhd"] = Field(
+        default="eodhd",
+        description="Primary market data WebSocket provider",
+    )
+    symbols: list[str] = Field(default_factory=list, description="Symbols to subscribe to")
+    reconnect_base_seconds: int = Field(
+        default=2,
+        description="Base seconds for exponential reconnect backoff",
+    )
+    reconnect_max_seconds: int = Field(
+        default=300,
+        description="Maximum seconds for exponential reconnect backoff",
+    )
+    stale_after_seconds: int = Field(
+        default=45,
+        description="Mark a symbol stale after this many seconds without ticks",
+    )
+    quote_ttl_seconds: int = Field(
+        default=30,
+        description="Maximum age for a quote to be considered fresh",
+    )
+    warmup_1m_bars: int = Field(default=120, description="Cold-start backfill bars for 1m timeframe")
+    warmup_5m_bars: int = Field(default=120, description="Cold-start backfill bars for 5m timeframe")
+    warmup_1h_bars: int = Field(default=80, description="Cold-start backfill bars for 1h timeframe")
+
+
 class LoggingConfig(BaseModel):
     """Logging configuration."""
 
@@ -465,6 +499,7 @@ class AppConfig(BaseModel):
     decision_store: DecisionStoreConfig = DecisionStoreConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
     tactical: TacticalConfig = Field(default_factory=TacticalConfig)
+    websocket: WebSocketConfig = Field(default_factory=WebSocketConfig)
 
 
 # ── Config Loading ──────────────────────────────────────────────────────────
