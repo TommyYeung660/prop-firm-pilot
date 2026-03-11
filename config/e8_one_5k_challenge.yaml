@@ -31,7 +31,7 @@ compliance:
 
 execution:
   max_positions: 5
-  default_risk_pct: 0.007        # 每筆交易風險 0.7% ($35)
+  default_risk_pct: 0.009
   max_slippage_pips: 2.0
   random_delay_min: 0.5
   random_delay_max: 2.0
@@ -62,8 +62,8 @@ scheduler:
     server_timezone: "Europe/Athens"
   # v1.2.0: 時段感知掃描節奏
   session_aware_enabled: true
-  active_session_interval_seconds: 3600   # 1h during London/NY
-  quiet_session_interval_seconds: 14400   # 4h during off-hours
+  active_session_interval_seconds: 1800   # 30min during London/NY — v1.3.9a: 1h→30min 更頻繁掃描
+  quiet_session_interval_seconds: 7200    # 2h during off-hours — v1.3.9a: 4h→2h 更頻繁掃描
   # DST 自動調整交易時段 (London/NY 各自根據當地 DST 調整)
   session_dst_auto: true
   london_timezone: "Europe/London"
@@ -132,7 +132,7 @@ tactical:
     atr_timeframe: "1h"
     data_max_age_seconds: 600
   soft_gates:
-    min_score: 2
+    min_score: 1                     # v1.3.9a: 2→1 降低 soft gate 門檻，減少誤拒
     ema_fast: 8
     ema_slow: 21
     ema_timeframe: "5min"

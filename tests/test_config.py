@@ -21,7 +21,7 @@ def test_e8_one_5k_session_aware_config():
 
     config = load_config("config/e8_one_5k_challenge.yaml")
     assert config.scheduler.session_aware_enabled is True
-    assert config.scheduler.active_session_interval_seconds == 3600
+    assert config.scheduler.active_session_interval_seconds == 1800
     assert config.scheduler.volatility_trigger_enabled is True
     assert config.scheduler.volatility_threshold_pct == 0.5
 

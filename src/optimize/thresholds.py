@@ -26,12 +26,15 @@ def _stepwise_threshold(win_rate: float) -> Thresholds:
     # v1.3.8: Cold-start tier — relax thresholds for symbols with < 20% win rate
     # (insufficient data to judge). Prevents over-filtering new/low-trade symbols.
     if win_rate < 0.20:
-        return Thresholds(min_confidence="medium", min_blended_confidence=0.50)
+        return Thresholds(min_confidence="medium", min_blended_confidence=0.48)
+    # v1.3.9a: Relaxed losing-symbol tier (0.60→0.52) — previous value was too
+    # restrictive: medium-confidence signals with score ≥0.3 produced blended ≈0.48
+    # which never cleared 0.60.  Net effect: system opened only 1 position in 13.5h.
     if win_rate < 0.45:
-        return Thresholds(min_confidence="high", min_blended_confidence=0.60)
+        return Thresholds(min_confidence="medium", min_blended_confidence=0.52)
     if win_rate > 0.55:
         return Thresholds(min_confidence="low", min_blended_confidence=0.45)
-    return Thresholds(min_confidence="medium", min_blended_confidence=0.55)
+    return Thresholds(min_confidence="medium", min_blended_confidence=0.50)
 
 
 def _adjust_blended(base: float, delta: float) -> float:
@@ -61,7 +64,8 @@ def compute_thresholds(
 
     for symbol, win_rate in symbol_win_rates.items():
         delta = win_rate - global_win_rate
-        adj = 0.05 if delta >= 0.05 else -0.05 if delta <= -0.05 else 0.0
+        # v1.3.9a: Reduced per-symbol adjustment (0.05→0.03) to avoid over-penalizing
+        adj = 0.03 if delta >= 0.05 else -0.03 if delta <= -0.05 else 0.0
 
         # H3: Decay per-symbol adjustment for inactive symbols.
         # After N inactive days, the harmful adjustment (positive adj value, which
