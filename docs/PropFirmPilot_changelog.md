@@ -10,6 +10,36 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+**Roadmap Resequencing for Upcoming v1.4.x Work**
+
+> **Status**: Planned roadmap alignment
+> **Reason**: Tactical entry / exit stabilization now takes priority over the broader unfinished `v1.4.5` scope
+
+### Planned: v1.4.6 — Tactical Entry Fixes & Optimization
+- tactical entry gate correctness、資料 freshness 邊界、degraded path 行為修正
+- `WAIT` / retry / degrade / cancel 分流規則整理，避免 intent churn 與過早取消
+- per-symbol / session / regime tactical entry threshold calibration
+- tactical entry diagnostics、reason code、score breakdown 與資料來源輸出補強
+
+### Planned: v1.4.7 — Tactical Exit Fixes & Optimization
+- tactical exit trigger 與 scheduler / execution / journal 的一致性修正
+- tactical exit action persistence、reason tagging、duplicate close 防護
+- exit-side diagnostics、failure logging 與 action replay 能力補強
+- tactical exit trailing / reprice / 保護性收緊邏輯微調
+
+### Planned: v1.4.8 — Deferred Broader Decision / Risk Upgrade
+- 原先較廣泛的 `v1.4.5` 未完成範圍順延到此版本
+- lessons expansion 到更多 agent nodes
+- memory unification
+- dynamic exit baseline
+- correlation / portfolio guard
+
+### Tracking
+- Roadmap: `docs/PropFirmPilot_v1.4.0_road_map.md`
+
+---
+
 ## [1.4.1] — 2026-03-12
 **Production Reliability / Observability Hardening**
 

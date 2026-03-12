@@ -1,6 +1,6 @@
 # PropFirmPilot v1.4.0 之後 — 發展路線圖
 
-> **更新日期**: 2026-03-12
+> **更新日期**: 2026-03-13
 >
 > **當前版本**: v1.4.2（Runtime Hardening + Observability）
 >
@@ -193,15 +193,70 @@
 - 能快速定位 feed stale、fallback 過多、event storm 等問題
 - 能把 `v1.4.1` 從「第一輪 hardening 完成」推進到「運維成熟」
 
-### 4.2 v1.4.5 — 決策品質與出場品質升級
+### 4.2 v1.4.6 — Tactical Entry 修復與校準
 
-當 `v1.4.2` 把運行面穩住後，下一個高 ROI 版本應聚焦在 **讓交易決策與出場策略一起變得更好**。
+在 `v1.4.2` 之後，下一個版本不應立刻擴大決策圖範圍，而應先把 tactical entry
+的正確性、穩定性與可解釋性補齊。這一版的重點是 **先把進場判斷修到可信，再談更廣泛的決策品質升級**。
+
+#### 目標
+
+- 修正 tactical entry gate 在 live runtime 下的錯判、漏判與資料品質邊界
+- 把 tactical entry 的 retry / degrade / cancel 行為定義得更一致
+- 完成 entry-side 的門檻校準與診斷輸出，降低後續優化的盲修風險
+
+#### 核心工作
+
+| 類別 | 工作項 |
+|---|---|
+| **Gate Correctness** | 修正 spread / ATR / session / data-freshness gate 在 degraded 與 cold-start 場景的判定一致性 |
+| **Retry Semantics** | 整理 tactical `WAIT`、重試、degrade、cancel 的分流規則，避免 intent churn 與過早放棄 |
+| **Threshold Calibration** | 依幣對、session、波動 regime 校準 tactical entry 門檻與 soft-gate scoring |
+| **Entry Diagnostics** | 補強 tactical gate reason code、score breakdown、資料來源與 freshness metadata |
+| **Execution Handoff** | 對齊 tactical `PASS` / `DEGRADE` 後續到 scheduler / execution path 的狀態傳遞 |
+
+#### 預期效果
+
+- tactical entry 更少出現「本來該過卻被擋」或「本來該擋卻通過」的情況
+- 進場 gate 的行為可以被明確回放，而不是只能靠 log 猜
+- 後續 exit 與 broader decision-quality 工作，會建立在更穩定的 entry 基線上
+
+### 4.3 v1.4.7 — Tactical Exit 修復與出場優化
+
+`v1.4.6` 先把進場端修穩之後，下一版應集中處理 tactical exit 在 live execution
+中的正確性與一致性。這一版的定位是 **把出場動作從「有規則」提升到「規則、執行、記錄三者一致」**。
+
+#### 目標
+
+- 修正 tactical exit trigger 與 scheduler / execution 之間的落差
+- 補齊 tactical exit action 的 persistence、journal 與 reason tagging
+- 在不過度擴張範圍的前提下，優化出場反應速度與穩定性
+
+#### 核心工作
+
+| 類別 | 工作項 |
+|---|---|
+| **Exit Trigger Repair** | 修正 tactical exit rule evaluation、cooldown / debounce、與 re-evaluation / emergency close 的交互邊界 |
+| **Execution Consistency** | 對齊 scheduler、order manager、trade journal、close reason、execution metadata 的 tactical exit 行為 |
+| **Action Integrity** | 防止 duplicate close、漏記錄 action、或 tactical exit 成功但狀態未回寫 |
+| **Exit Diagnostics** | 補齊 tactical exit action、reject、failure、fallback 的 structured logging 與 postmortem 資料 |
+| **Exit Optimization** | 微調 trailing、reprice、事件驅動出場反應與保護性收緊邏輯 |
+
+#### 預期效果
+
+- tactical exit 不再只是理論規則，而會成為可驗證、可追蹤的正式控制面
+- 出場動作的觸發、執行、回寫更一致，減少「已判斷應出場但實際沒處理好」的風險
+- 為後續更廣義的 dynamic exit baseline 提供可靠基礎
+
+### 4.4 v1.4.8 — 延後的決策品質與風險治理升級
+
+原本較廣泛的 `v1.4.5` 範圍，現在不再作為 `v1.4.6` / `v1.4.7` 的主題。除了 tactical
+entry / exit 修復與優化已拆入這兩版之外，其餘未完成的 broader scope 順延到 `v1.4.8`。
 
 #### 目標
 
 - 把 lessons 從單點 prompt 擴展到多節點決策圖
-- 把 entry-side 強化延伸到 exit-side
-- 加入最基本的組合風險感知
+- 整理記憶系統邊界，避免 `TradeJournal` / `MemoryJournal` / lesson memory 分裂
+- 把單筆交易控制進一步升級到組合層風險控制
 
 #### 核心工作
 
@@ -209,17 +264,16 @@
 |---|---|
 | **Lesson Expansion** | 將 `retrieved_trade_lessons` 擴展到 bull / bear / judge 等更多 agent node |
 | **Memory Unification** | 整理 `TradeJournal`、`MemoryJournal`、lesson memory 的角色，避免記憶系統分裂 |
-| **Dynamic Exit** | ATR/regime-aware 動態 SL/TP、trailing stop 收緊、事件驅動 reprice |
+| **Dynamic Exit Baseline** | 將 ATR/regime-aware 動態 SL/TP、trailing、事件驅動 reprice 提升為正式策略基線 |
 | **Correlation Control** | 新增同幣別曝險上限、相關幣對同向持倉限制、portfolio guard |
-| **Tactical Calibration** | 依幣對、session、波動 regime 校準 tactical gate 門檻 |
 
 #### 預期效果
 
 - 決策不只知道「過去犯過什麼錯」，還能在更多 agent 節點一致使用這些教訓
-- 平均 MAE、平均 R、極端行情下的出場品質更有機會改善
+- 出場邏輯從 tactical repair 進一步升級為更完整的 dynamic exit baseline
 - 從單筆風險控制，進一步升級到組合層風險控制
 
-### 4.3 v2.0.0 — 事件驅動深化與 async 化
+### 4.5 v2.0.0 — 事件驅動深化與 async 化
 
 `v2.0.0` 的主題，不是另起爐灶，而是把 `v1.4.x` 已建立的控制面再往低延遲與高吞吐推進。
 
@@ -245,7 +299,7 @@
 - LLM 決策等待時間與外部資料阻塞時間進一步縮短
 - 研究、掃描、決策、執行之間的切換成本更低
 
-### 4.4 v2.5.0 — Ops Dashboard 與可視化控制台
+### 4.6 v2.5.0 — Ops Dashboard 與可視化控制台
 
 Dashboard 仍然值得做，但它的正確時機是在控制面成熟之後，而不是之前。
 
@@ -267,7 +321,7 @@ Dashboard 仍然值得做，但它的正確時機是在控制面成熟之後，�
 
 Dashboard 的價值在於讓成熟系統更可控，而不是替不穩定系統做漂亮外殼。
 
-### 4.5 v3.0.0 — 擴張到 $50k 與多帳號治理
+### 4.7 v3.0.0 — 擴張到 $50k 與多帳號治理
 
 `v3.0.0` 仍應維持在更後面，因為多帳號管理只有在單帳號控制面穩定盈利時才真正有意義。
 
@@ -317,11 +371,23 @@ Dashboard 的價值在於讓成熟系統更可控，而不是替不穩定系統�
   │                · warmup/fallback 校準
   │                · emergency response 補強
   │
-  ├─ v1.4.5 ────── Decision Quality + Exit Quality             [2–4 週]
+  ├─ v1.4.6 ────── Tactical Entry Fixes + Optimization         [1–2 週]
+  │                · tactical gate correctness
+  │                · retry / degrade / cancel 對齊
+  │                · entry threshold calibration
+  │                · entry diagnostics 補強
+  │
+  ├─ v1.4.7 ────── Tactical Exit Fixes + Optimization          [1–2 週]
+  │                · tactical exit trigger / execution 對齊
+  │                · action persistence / journal 一致性
+  │                · duplicate close 防護
+  │                · exit diagnostics 與保護性優化
+  │
+  ├─ v1.4.8 ────── Deferred Decision / Risk Upgrade            [2–4 週]
   │                · lessons 擴散到更多 agent nodes
-  │                · dynamic SL/TP / trailing logic
+  │                · memory unification
+  │                · dynamic exit baseline
   │                · correlation / portfolio guard
-  │                · tactical gate 校準
   │
   ├─ v2.0.0 ────── Event-Driven Scale + Async Tools            [4–6 週]
   │                · TradingAgents async 化
@@ -344,10 +410,11 @@ Dashboard 的價值在於讓成熟系統更可控，而不是替不穩定系統�
 |---|:---:|:---:|:---:|---|
 | Hub telemetry / source attribution | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.2` |
 | Emergency response 補強 | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.2` |
-| Lessons 擴散到更多 agent nodes | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.5` |
-| Dynamic SL/TP / trailing logic | 🔴 高 | 🔴 高 | ⭐⭐⭐ | `v1.4.5` |
-| Correlation / portfolio guard | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.5` |
-| Tactical gate 校準 | 🟡 中 | 🟡 中 | ⭐⭐ | `v1.4.5` |
+| Tactical entry gate 修復 / 校準 | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.6` |
+| Tactical exit action 修復 / 優化 | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.7` |
+| Lessons 擴散到更多 agent nodes | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.8` |
+| Dynamic SL/TP / trailing logic | 🔴 高 | 🔴 高 | ⭐⭐⭐ | `v1.4.8` |
+| Correlation / portfolio guard | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.8` |
 | TradingAgents async 化 | 🟡 中 | 🟡 中 | ⭐⭐ | `v2.0.0` |
 | RD-Agent 週末自動化 | 🟡 中 | 🔴 高 | ⭐ | `v2.0.0` |
 | Ops Dashboard | 🟢 低 | 🟡 中 | ⭐ | `v2.5.0` |
@@ -358,10 +425,12 @@ Dashboard 的價值在於讓成熟系統更可控，而不是替不穩定系統�
 | 里程碑 | 達成條件 | 目標版本 |
 |---|---|---|
 | **M1: 控制面可觀測** | 能清楚回答每次 quote/bar/decision 的資料來源、freshness 與 rescan 原因 | `v1.4.2` |
-| **M2: 決策與出場一起升級** | lessons 擴展到多 agent node，dynamic exit 與 correlation guard 成為正式基線 | `v1.4.5` |
-| **M3: 事件驅動深化** | `observe -> rescan -> decide` 延遲再下降，TradingAgents 工具鏈 async 化 | `v2.0.0` |
-| **M4: 系統運維可視化** | runtime、memory、market data health、alerts 可集中查看 | `v2.5.0` |
-| **M5: 更高資金量治理** | 單帳號穩定通過後，支援 `$50k` 與多帳號的配置、監控、風控隔離 | `v3.0.0` |
+| **M2: 戰術進場穩定化** | tactical entry gate 的判定、重試、degrade 與 diagnostics 成為可信基線 | `v1.4.6` |
+| **M3: 戰術出場穩定化** | tactical exit 的觸發、執行、回寫與日誌一致，能可靠回放 | `v1.4.7` |
+| **M4: 決策與風險正式升級** | lessons 擴展到多 agent node，dynamic exit 與 correlation guard 成為正式基線 | `v1.4.8` |
+| **M5: 事件驅動深化** | `observe -> rescan -> decide` 延遲再下降，TradingAgents 工具鏈 async 化 | `v2.0.0` |
+| **M6: 系統運維可視化** | runtime、memory、market data health、alerts 可集中查看 | `v2.5.0` |
+| **M7: 更高資金量治理** | 單帳號穩定通過後，支援 `$50k` 與多帳號的配置、監控、風控隔離 | `v3.0.0` |
 
 ---
 
@@ -382,7 +451,8 @@ Dashboard 的價值在於讓成熟系統更可控，而不是替不穩定系統�
 - 事件驅動的 steady-state runtime
 - 明確的 degraded / failure isolation 哲學
 
-所以下一階段最重要的不是再多堆幾個模組，而是把這套 OODA trading machine 變得：
+所以下一階段最重要的不是再多堆幾個模組，而是先把 tactical
+entry / exit 修穩，再把這套 OODA trading machine 變得：
 
 - 更可觀測
 - 更一致
