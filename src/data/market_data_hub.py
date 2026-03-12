@@ -45,6 +45,14 @@ class BarResult:
     bars: pd.DataFrame
 
 
+@dataclass
+class _RestRefreshState:
+    """Tracks the latest observed REST tail for refresh suppression."""
+
+    attempted_at: datetime
+    latest_bar_at: datetime | None
+
+
 class MarketDataHub:
     """Resolve quotes and intraday bars from cache first, REST as fallback."""
 
@@ -67,6 +75,7 @@ class MarketDataHub:
         symbols: list[str],
         quote_ttl_seconds: int = 30,
         bar_cache_max_age_seconds: int = 3600,
+        rest_refresh_cooldown_seconds: int = 300,
         now_provider: Callable[[], datetime] | None = None,
         operational_metrics: OperationalMetrics | None = None,
     ) -> None:
@@ -76,8 +85,10 @@ class MarketDataHub:
         self._symbols = list(symbols)
         self._quote_ttl_seconds = quote_ttl_seconds
         self._bar_cache_max_age_seconds = bar_cache_max_age_seconds
+        self._rest_refresh_cooldown_seconds = rest_refresh_cooldown_seconds
         self._now_provider = now_provider or (lambda: datetime.now(timezone.utc))
         self._warm_cache: dict[tuple[str, str], pd.DataFrame] = {}
+        self._rest_refresh_state: dict[tuple[str, str], _RestRefreshState] = {}
         self._forced_stale_symbols: set[str] = set()
         self._metrics = operational_metrics
 
@@ -111,8 +122,16 @@ class MarketDataHub:
         bars = self._warm_cache.get((symbol, "1m"))
         rows_fetched = 0
         if bars is None or bars.empty or not self._bars_are_fresh(bars):
-            bars, rows_fetched = await self._refresh_rest_cache(symbol=symbol, timeframe="1m")
-            self._log_rest_fallback(symbol=symbol, timeframe="1m", rows_fetched=rows_fetched)
+            if self._should_refresh_rest_cache(symbol=symbol, timeframe="1m"):
+                bars, rows_fetched = await self._refresh_rest_cache(symbol=symbol, timeframe="1m")
+            else:
+                bars = self._warm_cache.get((symbol, "1m"))
+            self._log_rest_fallback(
+                symbol=symbol,
+                timeframe="1m",
+                rows_fetched=rows_fetched,
+                bars=bars,
+            )
         self._record_market_data_read("rest_fallback", rows_fetched)
         quote = self._build_quote_from_bars(symbol, bars)
         return QuoteResult(symbol=symbol, source="rest_fallback", quote=quote)
@@ -149,7 +168,12 @@ class MarketDataHub:
             )
         bars, rows_fetched = await self._refresh_rest_cache(symbol=symbol, timeframe=timeframe)
         self._record_market_data_read("rest_fallback", rows_fetched)
-        self._log_rest_fallback(symbol=symbol, timeframe=timeframe, rows_fetched=rows_fetched)
+        self._log_rest_fallback(
+            symbol=symbol,
+            timeframe=timeframe,
+            rows_fetched=rows_fetched,
+            bars=bars,
+        )
         return BarResult(
             symbol=symbol,
             timeframe=timeframe,
@@ -190,11 +214,20 @@ class MarketDataHub:
 
     def _bars_are_fresh(self, bars: pd.DataFrame) -> bool:
         """Check bar freshness independently from quote freshness."""
-        latest_ts = pd.Timestamp(bars.iloc[-1]["datetime"]).to_pydatetime()
-        if latest_ts.tzinfo is None:
-            latest_ts = latest_ts.replace(tzinfo=timezone.utc)
+        latest_ts = self._latest_bar_time(bars)
+        if latest_ts is None:
+            return False
         age = self._now_provider() - latest_ts
         return age <= timedelta(seconds=self._bar_cache_max_age_seconds)
+
+    def _latest_bar_time(self, bars: pd.DataFrame | None) -> datetime | None:
+        """Return the latest bar timestamp as aware UTC datetime."""
+        if bars is None or bars.empty:
+            return None
+        latest_ts = pd.Timestamp(bars.iloc[-1]["datetime"]).to_pydatetime()
+        if latest_ts.tzinfo is None:
+            return latest_ts.replace(tzinfo=timezone.utc)
+        return latest_ts.astimezone(timezone.utc)
 
     def _build_quote_from_bars(
         self,
@@ -219,6 +252,28 @@ class MarketDataHub:
         if bars.empty:
             return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
         return bars.sort_values("datetime").reset_index(drop=True)
+
+    def _should_refresh_rest_cache(
+        self,
+        symbol: str,
+        timeframe: Literal["1m", "5m", "1h"],
+    ) -> bool:
+        """Avoid repeated stale 1m refreshes when the REST tail has not advanced."""
+        if timeframe != "1m":
+            return True
+        key = (symbol, timeframe)
+        state = self._rest_refresh_state.get(key)
+        if state is None:
+            return True
+        now = self._now_provider()
+        if now - state.attempted_at >= timedelta(seconds=self._rest_refresh_cooldown_seconds):
+            return True
+        cached_latest = self._latest_bar_time(self._warm_cache.get(key))
+        if cached_latest is None:
+            return True
+        if state.latest_bar_at is None:
+            return False
+        return cached_latest > state.latest_bar_at
 
     def _resolve_rest_window(
         self,
@@ -248,14 +303,23 @@ class MarketDataHub:
             cached = self._warm_cache.get((symbol, timeframe))
             if cached is None:
                 cached = self._normalize_bars(pd.DataFrame())
-            self._warm_cache[(symbol, timeframe)] = self._normalize_bars(cached)
-            return self._warm_cache[(symbol, timeframe)], rows_fetched
+            normalized_cached = self._normalize_bars(cached)
+            self._warm_cache[(symbol, timeframe)] = normalized_cached
+            self._rest_refresh_state[(symbol, timeframe)] = _RestRefreshState(
+                attempted_at=self._now_provider(),
+                latest_bar_at=self._latest_bar_time(normalized_cached),
+            )
+            return normalized_cached, rows_fetched
         cached = self._warm_cache.get((symbol, timeframe))
         if cached is not None and not cached.empty:
             bars = pd.concat([cached, bars], ignore_index=True)
             bars = bars.drop_duplicates(subset=["datetime"], keep="last")
         normalized = self._normalize_bars(bars)
         self._warm_cache[(symbol, timeframe)] = normalized
+        self._rest_refresh_state[(symbol, timeframe)] = _RestRefreshState(
+            attempted_at=self._now_provider(),
+            latest_bar_at=self._latest_bar_time(normalized),
+        )
         return normalized, rows_fetched
 
     def _record_market_data_read(self, source: str, row_count: int = 0) -> None:
@@ -268,16 +332,24 @@ class MarketDataHub:
         symbol: str,
         timeframe: Literal["1m", "5m", "1h"],
         rows_fetched: int,
+        bars: pd.DataFrame | None,
     ) -> None:
         """Log degraded market-data fallback with current websocket health context."""
         status = self._websocket_client.get_status()
+        latest_bar_at = self._latest_bar_time(bars)
+        latest_bar_age_sec = None
+        if latest_bar_at is not None:
+            latest_bar_age_sec = round((self._now_provider() - latest_bar_at).total_seconds(), 1)
         logger.warning(
-            "MarketDataHub: REST fallback for {} {} (rows_fetched={}, ws_state={}, last_error={})",
+            "MarketDataHub: REST fallback for {} {} (rows_fetched={}, ws_state={}, last_error={}, "
+            "latest_rest_bar_time={}, latest_rest_bar_age_sec={})",
             symbol,
             timeframe,
             rows_fetched,
             status.get("state"),
             status.get("last_error") or "none",
+            latest_bar_at.isoformat() if latest_bar_at is not None else "none",
+            latest_bar_age_sec if latest_bar_age_sec is not None else "none",
         )
 
     async def _fetch_rest_bars(
