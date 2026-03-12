@@ -42,6 +42,12 @@ from src.data.market_data_hub import MarketDataHub
 from src.decision.agent_bridge import AgentBridge, AgentDecision, RiskMeta
 from src.decision.decision_formatter import format_decision
 from src.decision.schemas import TradeIntent
+from src.decision.tactical_exit_manager import (
+    TacticalExitEvaluation,
+    TacticalExitManager,
+    WriteBudgetSnapshot,
+)
+from src.decision.tactical_exit_rules import TacticalExitSnapshot
 from src.decision.tactical_validator import TacticalData, TacticalResult, TacticalValidator
 from src.decision_store.janitor import Janitor
 from src.decision_store.sqlite_store import DecisionStore, InvalidTransitionError
@@ -142,6 +148,7 @@ class Scheduler:
 
         # v1.3.7: Tactical execution module (shadow mode)
         self._tactical_validator = tactical_validator or TacticalValidator(config.tactical)
+        self._tactical_exit_manager = TacticalExitManager(config.tactical.exit)
         self._decision_cache = decision_cache or StrategicDecisionCache(
             ttl_seconds=config.tactical.decision_cache.ttl_seconds
         )
@@ -1732,13 +1739,8 @@ class Scheduler:
                     if self._best_day_tracker.should_close_winners() and open_positions:
                         await self._close_winning_positions(open_positions)
 
-                    # Phase 2.5: Trailing stop — move SL to breakeven
                     if open_positions:
-                        await self._apply_breakeven_stops(open_positions, opened_intents)
-
-                    # Phase 2.6: Re-evaluate open positions via LLM
-                    if open_positions:
-                        await self._reevaluate_open_positions(open_positions, opened_intents)
+                        await self._run_tactical_exit_cycle(open_positions, opened_intents)
 
             except asyncio.CancelledError:
                 logger.info("Position monitor loop: cancelled")
@@ -2340,6 +2342,387 @@ class Scheduler:
                 intent.id,
                 e,
             )
+
+    def _load_execution_meta_dict(self, intent: TradeIntent) -> dict[str, Any]:
+        """Best-effort read of execution metadata from the intent or decision store."""
+        meta_json = getattr(intent, "execution_meta", "") or ""
+        if not meta_json:
+            try:
+                decision = self._store.get_decision(intent.id)
+                if decision and decision.execution_meta:
+                    meta_json = decision.execution_meta
+            except Exception as e:
+                logger.debug(
+                    "Tactical exit: could not load execution_meta for {}: {}",
+                    intent.id,
+                    e,
+                )
+
+        if not meta_json:
+            return {}
+
+        try:
+            return json.loads(meta_json)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("Tactical exit: invalid execution_meta for {}: {}", intent.id, e)
+            return {}
+
+    @staticmethod
+    def _parse_meta_datetime(value: Any) -> datetime | None:
+        """Parse metadata timestamps stored as ISO strings."""
+        if isinstance(value, datetime):
+            return value
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except ValueError:
+            return None
+
+    def _compute_tactical_exit_unrealized_r(self, pos: Any, meta: dict[str, Any]) -> float:
+        """Convert floating PnL distance into R using original stop distance."""
+        entry_price = self._coerce_numeric(meta.get("fill_price"), fallback=pos.open_price)
+        original_sl = self._coerce_numeric(meta.get("sl_price"), fallback=pos.sl_price or 0.0)
+        risk_distance = abs(entry_price - original_sl)
+        if risk_distance <= 0:
+            return 0.0
+
+        if pos.side == "BUY":
+            profit_distance = pos.current_price - entry_price
+        else:
+            profit_distance = entry_price - pos.current_price
+        return profit_distance / risk_distance
+
+    def _build_tactical_exit_snapshot(
+        self,
+        pos: Any,
+        intent: TradeIntent,
+        tactical_data: TacticalData,
+    ) -> TacticalExitSnapshot:
+        """Build the pure tactical-exit snapshot for one open position."""
+        meta = self._load_execution_meta_dict(intent)
+        original_sl_price = (
+            self._coerce_numeric(meta.get("sl_price"), fallback=pos.sl_price or 0.0) or None
+        )
+        original_tp_price = (
+            self._coerce_numeric(meta.get("tp_price"), fallback=pos.tp_price or 0.0) or None
+        )
+        return TacticalExitSnapshot(
+            position_id=str(pos.position_id),
+            symbol=intent.symbol,
+            side=pos.side,
+            open_price=pos.open_price,
+            current_price=pos.current_price,
+            volume=pos.volume,
+            sl_price=pos.sl_price,
+            tp_price=pos.tp_price,
+            original_sl_price=original_sl_price,
+            original_tp_price=original_tp_price,
+            unrealized_r=self._compute_tactical_exit_unrealized_r(pos, meta),
+            partial_close_done=bool(meta.get("partial_close_done", False)),
+            bars_5min=tactical_data.bars_5min,
+            bars_1h=tactical_data.bars_1h,
+            prior_trailing_sl=self._coerce_numeric(
+                meta.get("trailing_sl"),
+                fallback=0.0,
+            )
+            or None,
+            last_tactical_exit_action=str(meta.get("last_tactical_exit_action", "")),
+            last_tactical_exit_at=self._parse_meta_datetime(meta.get("last_tactical_exit_at")),
+        )
+
+    def _get_tactical_exit_budget_snapshot(self) -> WriteBudgetSnapshot:
+        """Read current broker write-budget snapshot for tactical exit throttling."""
+        limiter = getattr(
+            self._matchtrader,
+            "rate_limiter",
+            getattr(self._matchtrader, "_rate_limiter", None),
+        )
+        write_remaining = int(
+            self._coerce_numeric(
+                getattr(limiter, "write_remaining", getattr(limiter, "remaining", 0)),
+                fallback=0.0,
+            )
+        )
+        daily_write_limit = int(
+            self._coerce_numeric(
+                getattr(limiter, "daily_write_limit", getattr(limiter, "_daily_limit", 0)),
+                fallback=0.0,
+            )
+        )
+        return WriteBudgetSnapshot(
+            write_remaining=write_remaining,
+            daily_write_limit=daily_write_limit,
+        )
+
+    async def _handle_tactical_exit_evaluation(
+        self,
+        pos: Any,
+        intent: TradeIntent,
+        evaluation: TacticalExitEvaluation,
+    ) -> None:
+        """Handle non-broker side effects of a tactical exit evaluation."""
+        if evaluation.decision.action != "HOLD":
+            await self._execute_tactical_exit_action(pos, intent, evaluation)
+            return
+
+        if evaluation.skip_reason:
+            event_type = (
+                "TACTICAL_EXIT_BUDGET_BLOCKED"
+                if evaluation.skip_reason == "write_budget_blocked"
+                else "TACTICAL_EXIT_SKIPPED"
+            )
+            self._log_trade_event(
+                event_type,
+                {
+                    "position_id": str(pos.position_id),
+                    "intent_id": intent.id,
+                    "symbol": intent.symbol,
+                    "reason": evaluation.skip_reason,
+                },
+            )
+
+        if evaluation.requires_llm_exception_review:
+            await self._reevaluate_open_positions([pos], [intent])
+
+    def _calculate_partial_close_volume(
+        self,
+        symbol: str,
+        current_volume: float,
+        ratio: float,
+    ) -> float | None:
+        """Calculate a valid partial-close volume respecting broker minimum lot size."""
+        config_symbol = symbol
+        if self._registry is not None:
+            config_symbol = self._registry.to_config_safe(symbol)
+        else:
+            config_symbol = symbol.rstrip(".")
+
+        instrument = self._config.instruments.get(config_symbol)
+        min_lot = instrument.min_lot if instrument is not None else 0.01
+        step = min_lot
+        precision = max(0, len(f"{step:.8f}".rstrip("0").split(".")[-1]))
+
+        raw_close_volume = current_volume * ratio
+        close_volume = int(raw_close_volume / step) * step
+        close_volume = round(close_volume, precision)
+        remaining_volume = round(current_volume - close_volume, precision)
+
+        if close_volume < min_lot:
+            return None
+        if remaining_volume < min_lot:
+            return None
+        return close_volume
+
+    def _update_tactical_exit_meta(
+        self,
+        intent: TradeIntent,
+        decision: Any,
+        *,
+        partial_close_volume: float | None = None,
+    ) -> None:
+        """Persist tactical exit metadata back into execution_meta."""
+        meta = self._load_execution_meta_dict(intent)
+        meta["tactical_exit_state"] = decision.state
+        meta["last_tactical_exit_action"] = decision.action
+        meta["last_tactical_exit_at"] = self._now_utc().isoformat()
+        meta["tactical_exit_reason"] = decision.reason
+
+        if decision.action == "MOVE_TO_BREAKEVEN" and decision.new_sl is not None:
+            meta["breakeven_sl"] = decision.new_sl
+        if decision.action == "TRAIL_SL" and decision.new_sl is not None:
+            meta["trailing_sl"] = decision.new_sl
+        if decision.action == "REPRICE_TP" and decision.new_tp is not None:
+            meta["dynamic_tp"] = decision.new_tp
+        if decision.action == "PARTIAL_CLOSE":
+            meta["partial_close_done"] = True
+            meta["partial_close_ratio"] = decision.partial_close_ratio
+            meta["partial_close_volume"] = partial_close_volume
+            meta["partial_close_at"] = self._now_utc().isoformat()
+
+        meta_json = json.dumps(meta, default=str)
+        self._store.update_execution_meta(intent.id, meta_json)
+
+    async def _execute_tactical_exit_action(
+        self,
+        pos: Any,
+        intent: TradeIntent,
+        evaluation: TacticalExitEvaluation,
+    ) -> None:
+        """Execute a tactical exit action and persist the result on success."""
+        decision = evaluation.decision
+        position_id = str(pos.position_id)
+
+        if decision.action == "PARTIAL_CLOSE":
+            close_volume = self._calculate_partial_close_volume(
+                intent.symbol,
+                current_volume=pos.volume,
+                ratio=decision.partial_close_ratio or 0.0,
+            )
+            if close_volume is None:
+                self._log_trade_event(
+                    "TACTICAL_EXIT_SKIPPED",
+                    {
+                        "position_id": position_id,
+                        "intent_id": intent.id,
+                        "symbol": intent.symbol,
+                        "reason": "invalid_partial_close_volume",
+                    },
+                )
+                return
+
+            result = await self._matchtrader.close_position(
+                position_id=position_id,
+                symbol=pos.symbol,
+                side=pos.side,
+                volume=close_volume,
+            )
+            if not result.success:
+                self._log_trade_event(
+                    "TACTICAL_EXIT_SKIPPED",
+                    {
+                        "position_id": position_id,
+                        "intent_id": intent.id,
+                        "symbol": intent.symbol,
+                        "reason": result.message,
+                    },
+                )
+                return
+
+            self._update_tactical_exit_meta(
+                intent,
+                decision,
+                partial_close_volume=close_volume,
+            )
+            self._log_trade_event(
+                "TACTICAL_EXIT_ACTION",
+                {
+                    "position_id": position_id,
+                    "intent_id": intent.id,
+                    "symbol": intent.symbol,
+                    "action": decision.action,
+                    "volume": close_volume,
+                },
+            )
+            return
+
+        if decision.action == "EXIT_NOW":
+            result = await self._matchtrader.close_position(
+                position_id=position_id,
+                symbol=pos.symbol,
+                side=pos.side,
+                volume=pos.volume,
+            )
+            if not result.success:
+                self._log_trade_event(
+                    "TACTICAL_EXIT_SKIPPED",
+                    {
+                        "position_id": position_id,
+                        "intent_id": intent.id,
+                        "symbol": intent.symbol,
+                        "reason": result.message,
+                    },
+                )
+                return
+
+            self._update_tactical_exit_meta(intent, decision)
+            self._log_trade_event(
+                "TACTICAL_EXIT_ACTION",
+                {
+                    "position_id": position_id,
+                    "intent_id": intent.id,
+                    "symbol": intent.symbol,
+                    "action": decision.action,
+                    "volume": pos.volume,
+                },
+            )
+            return
+
+        expected_sl = decision.new_sl if decision.new_sl is not None else pos.sl_price
+        expected_tp = decision.new_tp if decision.new_tp is not None else pos.tp_price
+        result = await self._matchtrader.modify_position(
+            position_id=position_id,
+            symbol=pos.symbol,
+            side=pos.side,
+            volume=pos.volume,
+            sl=expected_sl,
+            tp=expected_tp,
+        )
+        if not result.success:
+            self._log_trade_event(
+                "TACTICAL_EXIT_SKIPPED",
+                {
+                    "position_id": position_id,
+                    "intent_id": intent.id,
+                    "symbol": intent.symbol,
+                    "reason": result.message,
+                },
+            )
+            return
+
+        verified = await self._matchtrader.verify_sl_tp(
+            position_id=position_id,
+            expected_sl=expected_sl,
+            expected_tp=expected_tp,
+        )
+        if not verified:
+            self._log_trade_event(
+                "TACTICAL_EXIT_SKIPPED",
+                {
+                    "position_id": position_id,
+                    "intent_id": intent.id,
+                    "symbol": intent.symbol,
+                    "reason": "verify_failed",
+                },
+            )
+            return
+
+        if decision.action == "MOVE_TO_BREAKEVEN":
+            self._breakeven_applied.add(position_id)
+
+        self._update_tactical_exit_meta(intent, decision)
+        self._log_trade_event(
+            "TACTICAL_EXIT_ACTION",
+            {
+                "position_id": position_id,
+                "intent_id": intent.id,
+                "symbol": intent.symbol,
+                "action": decision.action,
+            },
+        )
+
+    async def _run_tactical_exit_cycle(
+        self,
+        open_positions: list[Any],
+        opened_intents: list[TradeIntent],
+    ) -> None:
+        """Evaluate all open positions through the tactical exit manager."""
+        if not self._config.tactical.exit.enabled:
+            return
+
+        intent_lookup = {
+            intent.position_id: intent
+            for intent in opened_intents
+            if intent.position_id is not None
+        }
+        budget = self._get_tactical_exit_budget_snapshot()
+
+        for pos in open_positions:
+            intent = intent_lookup.get(str(pos.position_id))
+            if intent is None:
+                continue
+
+            tactical_data = await self._fetch_tactical_data(intent.symbol)
+            snapshot = self._build_tactical_exit_snapshot(pos, intent, tactical_data)
+            evaluation = self._tactical_exit_manager.evaluate_position(
+                snapshot=snapshot,
+                budget=budget,
+                now=self._now_utc(),
+            )
+            await self._handle_tactical_exit_evaluation(pos, intent, evaluation)
 
     async def _reevaluate_open_positions(
         self, open_positions: list[Any], opened_intents: list[TradeIntent]
