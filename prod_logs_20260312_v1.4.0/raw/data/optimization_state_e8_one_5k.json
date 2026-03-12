@@ -1,0 +1,34 @@
+{
+  "version": "1.0",
+  "generated_at": "2026-03-11T22:00:24.988301+00:00",
+  "pnl_lookback_days": 7,
+  "winrate_lookback_days": 14,
+  "global_thresholds": {
+    "min_confidence": "low",
+    "min_blended_confidence": 0.45
+  },
+  "symbol_thresholds": {
+    "EURUSD": {
+      "min_confidence": "low",
+      "min_blended_confidence": 0.47
+    },
+    "AUDUSD": {
+      "min_confidence": "low",
+      "min_blended_confidence": 0.42
+    }
+  },
+  "ab_test": {
+    "model_a": "rightcodes/gpt-5.4",
+    "model_b": "volcengine/kimi-k2.5",
+    "ratio": 0.5,
+    "counts": {},
+    "pnl_by_model": {}
+  },
+  "feedback_pnl": {
+    "EURUSD": -56.82,
+    "AUDUSD": 131.95
+  },
+  "risk_per_trade_suggestion": null,
+  "llm_cost_stats": {},
+  "factor_contributions": {}
+}

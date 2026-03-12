@@ -193,7 +193,7 @@
 - 能快速定位 feed stale、fallback 過多、event storm 等問題
 - 能把 `v1.4.1` 從「第一輪 hardening 完成」推進到「運維成熟」
 
-### 4.2 v1.5.0 — 決策品質與出場品質升級
+### 4.2 v1.4.5 — 決策品質與出場品質升級
 
 當 `v1.4.2` 把運行面穩住後，下一個高 ROI 版本應聚焦在 **讓交易決策與出場策略一起變得更好**。
 
@@ -317,7 +317,7 @@ Dashboard 的價值在於讓成熟系統更可控，而不是替不穩定系統�
   │                · warmup/fallback 校準
   │                · emergency response 補強
   │
-  ├─ v1.5.0 ────── Decision Quality + Exit Quality             [2–4 週]
+  ├─ v1.4.5 ────── Decision Quality + Exit Quality             [2–4 週]
   │                · lessons 擴散到更多 agent nodes
   │                · dynamic SL/TP / trailing logic
   │                · correlation / portfolio guard
@@ -344,10 +344,10 @@ Dashboard 的價值在於讓成熟系統更可控，而不是替不穩定系統�
 |---|:---:|:---:|:---:|---|
 | Hub telemetry / source attribution | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.2` |
 | Emergency response 補強 | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.2` |
-| Lessons 擴散到更多 agent nodes | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.5.0` |
-| Dynamic SL/TP / trailing logic | 🔴 高 | 🔴 高 | ⭐⭐⭐ | `v1.5.0` |
-| Correlation / portfolio guard | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.5.0` |
-| Tactical gate 校準 | 🟡 中 | 🟡 中 | ⭐⭐ | `v1.5.0` |
+| Lessons 擴散到更多 agent nodes | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.5` |
+| Dynamic SL/TP / trailing logic | 🔴 高 | 🔴 高 | ⭐⭐⭐ | `v1.4.5` |
+| Correlation / portfolio guard | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.5` |
+| Tactical gate 校準 | 🟡 中 | 🟡 中 | ⭐⭐ | `v1.4.5` |
 | TradingAgents async 化 | 🟡 中 | 🟡 中 | ⭐⭐ | `v2.0.0` |
 | RD-Agent 週末自動化 | 🟡 中 | 🔴 高 | ⭐ | `v2.0.0` |
 | Ops Dashboard | 🟢 低 | 🟡 中 | ⭐ | `v2.5.0` |
@@ -358,7 +358,7 @@ Dashboard 的價值在於讓成熟系統更可控，而不是替不穩定系統�
 | 里程碑 | 達成條件 | 目標版本 |
 |---|---|---|
 | **M1: 控制面可觀測** | 能清楚回答每次 quote/bar/decision 的資料來源、freshness 與 rescan 原因 | `v1.4.2` |
-| **M2: 決策與出場一起升級** | lessons 擴展到多 agent node，dynamic exit 與 correlation guard 成為正式基線 | `v1.5.0` |
+| **M2: 決策與出場一起升級** | lessons 擴展到多 agent node，dynamic exit 與 correlation guard 成為正式基線 | `v1.4.5` |
 | **M3: 事件驅動深化** | `observe -> rescan -> decide` 延遲再下降，TradingAgents 工具鏈 async 化 | `v2.0.0` |
 | **M4: 系統運維可視化** | runtime、memory、market data health、alerts 可集中查看 | `v2.5.0` |
 | **M5: 更高資金量治理** | 單帳號穩定通過後，支援 `$50k` 與多帳號的配置、監控、風控隔離 | `v3.0.0` |
