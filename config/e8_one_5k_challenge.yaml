@@ -8,6 +8,12 @@ symbols:
   - GBPUSD
   - USDJPY
   - AUDUSD
+  - NZDUSD
+  - USDCAD
+  - USDCHF
+
+scanner:
+  topk: 5
 
 account:
   plan: "E8 One Challenge"
@@ -52,6 +58,9 @@ websocket:
     - GBPUSD
     - USDJPY
     - AUDUSD
+    - NZDUSD
+    - USDCAD
+    - USDCHF
   reconnect_base_seconds: 2
   reconnect_max_seconds: 300
   stale_after_seconds: 45
@@ -133,6 +142,24 @@ instruments:
     pip_size: 0.0001
     pip_value: 10.0
     avg_spread_pips: 1.8
+    min_lot: 0.01
+    max_lot: 5.0
+  NZDUSD:
+    pip_size: 0.0001
+    pip_value: 10.0
+    avg_spread_pips: 1.8
+    min_lot: 0.01
+    max_lot: 5.0
+  USDCAD:
+    pip_size: 0.0001
+    pip_value: 10.0
+    avg_spread_pips: 1.7
+    min_lot: 0.01
+    max_lot: 5.0
+  USDCHF:
+    pip_size: 0.0001
+    pip_value: 10.0
+    avg_spread_pips: 1.6
     min_lot: 0.01
     max_lot: 5.0
 
