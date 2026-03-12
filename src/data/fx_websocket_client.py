@@ -154,13 +154,21 @@ class EODHDFXWebSocketClient:
 
     def get_status(self) -> dict[str, Any]:
         """Expose client runtime state for monitoring and fallback decisions."""
+        stale_symbols = sorted(self.stale_symbols())
+        if not self._connected:
+            state = "disconnected"
+        elif stale_symbols:
+            state = "degraded"
+        else:
+            state = "healthy"
         return {
+            "state": state,
             "connected": self._connected,
             "running": self._running,
             "last_error": self._last_error,
             "last_message_at": self._last_message_at,
             "subscribed_symbols": list(self._symbols),
-            "stale_symbols": sorted(self.stale_symbols()),
+            "stale_symbols": stale_symbols,
         }
 
     async def run(self) -> None:

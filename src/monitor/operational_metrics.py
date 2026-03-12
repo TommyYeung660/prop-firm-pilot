@@ -40,6 +40,14 @@ class OperationalMetrics:
         self._matchtrader_retries: int = 0
         self._telegram_retries: int = 0
         self._telegram_failures: int = 0
+        self._telegram_poll_failures: int = 0
+        self._telegram_poll_circuit_opens: int = 0
+        self._telegram_poll_probe_polls: int = 0
+        self._telegram_poll_circuit_recoveries: int = 0
+        self._market_data_websocket_cache_reads: int = 0
+        self._market_data_warm_cache_reads: int = 0
+        self._market_data_rest_fallback_reads: int = 0
+        self._market_data_rest_rows_fetched: int = 0
 
     def record_llm_result(self, result: str) -> None:
         """Record an LLM decision result.
@@ -88,6 +96,32 @@ class OperationalMetrics:
         """Record a Telegram send failure (after all retries)."""
         self._telegram_failures += 1
 
+    def record_telegram_poll_failure(self) -> None:
+        """Record a failed Telegram polling request."""
+        self._telegram_poll_failures += 1
+
+    def record_telegram_poll_circuit_open(self) -> None:
+        """Record a Telegram polling circuit-open transition."""
+        self._telegram_poll_circuit_opens += 1
+
+    def record_telegram_poll_probe(self) -> None:
+        """Record a probe poll attempted while Telegram circuit is open."""
+        self._telegram_poll_probe_polls += 1
+
+    def record_telegram_poll_recovery(self) -> None:
+        """Record a Telegram polling recovery transition."""
+        self._telegram_poll_circuit_recoveries += 1
+
+    def record_market_data_read(self, source: str, row_count: int = 0) -> None:
+        """Record market-data read source usage and fallback fetch volume."""
+        if source == "websocket_cache":
+            self._market_data_websocket_cache_reads += 1
+        elif source == "warmup_cache":
+            self._market_data_warm_cache_reads += 1
+        elif source == "rest_fallback":
+            self._market_data_rest_fallback_reads += 1
+            self._market_data_rest_rows_fetched += max(row_count, 0)
+
     def get_summary(self) -> dict[str, int | float]:
         """Return a snapshot of all metrics as a plain dict."""
         llm_total = self._llm_success + self._llm_cancel + self._llm_error
@@ -109,6 +143,14 @@ class OperationalMetrics:
             "matchtrader_retries": self._matchtrader_retries,
             "telegram_retries": self._telegram_retries,
             "telegram_failures": self._telegram_failures,
+            "telegram_poll_failures": self._telegram_poll_failures,
+            "telegram_poll_circuit_opens": self._telegram_poll_circuit_opens,
+            "telegram_poll_probe_polls": self._telegram_poll_probe_polls,
+            "telegram_poll_circuit_recoveries": self._telegram_poll_circuit_recoveries,
+            "market_data_websocket_cache_reads": self._market_data_websocket_cache_reads,
+            "market_data_warm_cache_reads": self._market_data_warm_cache_reads,
+            "market_data_rest_fallback_reads": self._market_data_rest_fallback_reads,
+            "market_data_rest_rows_fetched": self._market_data_rest_rows_fetched,
         }
 
     def reset(self) -> None:
@@ -125,3 +167,11 @@ class OperationalMetrics:
         self._matchtrader_retries = 0
         self._telegram_retries = 0
         self._telegram_failures = 0
+        self._telegram_poll_failures = 0
+        self._telegram_poll_circuit_opens = 0
+        self._telegram_poll_probe_polls = 0
+        self._telegram_poll_circuit_recoveries = 0
+        self._market_data_websocket_cache_reads = 0
+        self._market_data_warm_cache_reads = 0
+        self._market_data_rest_fallback_reads = 0
+        self._market_data_rest_rows_fetched = 0

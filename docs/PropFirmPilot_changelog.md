@@ -10,6 +10,33 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.1] — In Progress
+**Production Reliability / Observability Hardening**
+
+> **Status**: Worktree target release, not yet formally shipped  
+> **Reason**: Defined from the production incident review of `2026-03-11 16:33` to `2026-03-12 13:58` (UTC+8)
+
+### Target Scope
+- **P0**: 修復 reflection / memory result identity mapping，防止 closed-trade learning loop 被 cross-symbol outcome 污染
+- **P1**: 建立單一版本來源，消除 runtime / pack / docs version drift
+- **P1**: 收斂 WebSocket degraded 時的 REST fallback 成本，補齊 market-data source health metrics
+- **P1**: 強化 Telegram polling circuit degrade / recover 的 metrics 與告警
+- **P2**: 補齊 cooldown / cancel loop 的診斷資料與 log bundle manifest 完整性
+
+### Implemented In This Worktree
+- `src/version.py` 成為 shared version helper；runtime startup log 與 `scripts/pack_prod_logs.py` 改為共用同一版本來源，explicit `--version` mismatch 會 fail-fast
+- `TelegramBotHandler` 現在會把 polling failure、circuit open、probe、recovery transition 寫入 shared `OperationalMetrics`
+- `MarketDataHub` degraded path 改為優先重用 REST-backed warm cache，cache stale 時再做 incremental REST refresh，不再每次都回退到固定 lookback 全段重抓
+- `Scheduler` 的 `METRICS_SNAPSHOT` 現在會附帶 market-data feed status，讓 postmortem 可直接看到 websocket `healthy / degraded / disconnected` 狀態
+- `Scheduler` 現在會把 `recent_rejection_cooldown` 與 `low_confidence_cooldown` 寫成 structured `SCANNER_SKIP` event，讓 cooldown / cancel loop 可以直接回放分析
+- `scripts/pack_prod_logs.py` 現在會產生 deterministic `decisions_summary.md` / `telegram_summary.md` fallback，且 `INDEX.md` 只列出實際存在的 summary files，不再引用不存在的條目
+
+### Tracking
+- Incident report: `docs/PropFirmPilot_v1.4.1_Incident_Report.md`
+- Release checklist: `docs/PropFirmPilot_v1.4.1_Release_Checklist.md`
+
+---
+
 ## [1.4.0] — 2026-03-11
 **WebSocket-First Market Data + Closed-Trade Learning Loop**
 

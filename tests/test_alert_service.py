@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from src.monitor.alert_service import AlertService
+from src.monitor.operational_metrics import OperationalMetrics
 from src.monitor.telegram_bot import TelegramBotHandler
 
 # ── AlertService Fixtures ───────────────────────────────────────────────────
@@ -959,4 +960,58 @@ class TestTelegramBotCircuitBreaker:
         assert bot._circuit_open is False
         assert bot._consecutive_failures == 0
         assert bot._conflict_backoff > 0
+        bot._http_client = None
+
+    async def test_poll_failures_record_operational_metrics(self) -> None:
+        metrics = OperationalMetrics()
+        bot = TelegramBotHandler(
+            bot_token="fake:token",
+            chat_id="123456",
+            alert_service=AsyncMock(),
+            trading_client=AsyncMock(),
+            trade_journal=MagicMock(),
+            operational_metrics=metrics,
+        )
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectTimeout("timeout"))
+        bot._http_client = mock_client
+
+        for _ in range(3):
+            await bot._poll_updates()
+
+        summary = metrics.get_summary()
+        assert summary["telegram_poll_failures"] == 3
+        assert summary["telegram_poll_circuit_opens"] == 1
+        bot._http_client = None
+
+    async def test_circuit_recovery_records_operational_metrics(self) -> None:
+        metrics = OperationalMetrics()
+        bot = TelegramBotHandler(
+            bot_token="fake:token",
+            chat_id="123456",
+            alert_service=AsyncMock(),
+            trading_client=AsyncMock(),
+            trade_journal=MagicMock(),
+            poll_interval=0.0,
+            operational_metrics=metrics,
+        )
+        bot._CIRCUIT_RETRY_INTERVAL = 0.05
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectTimeout("timeout"))
+        bot._http_client = mock_client
+
+        for _ in range(3):
+            await bot._poll_updates()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json = MagicMock(return_value={"ok": True, "result": []})
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        await bot._poll_updates()
+
+        summary = metrics.get_summary()
+        assert summary["telegram_poll_probe_polls"] == 1
+        assert summary["telegram_poll_circuit_recoveries"] == 1
         bot._http_client = None

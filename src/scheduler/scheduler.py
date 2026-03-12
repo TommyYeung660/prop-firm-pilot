@@ -101,6 +101,7 @@ class Scheduler:
         trade_journal: TradeJournal | None = None,
         tactical_validator: TacticalValidator | None = None,
         decision_cache: StrategicDecisionCache | None = None,
+        metrics: OperationalMetrics | None = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -137,6 +138,7 @@ class Scheduler:
         self._market_data_hub: MarketDataHub | None = None
         self._market_data_task: asyncio.Task[None] | None = None
         self._market_data_ready = False
+        self._metrics = metrics or OperationalMetrics()
 
         # v1.3.7: Tactical execution module (shadow mode)
         self._tactical_validator = tactical_validator or TacticalValidator(config.tactical)
@@ -199,9 +201,6 @@ class Scheduler:
             threshold=config.scheduler.low_confidence_threshold,
         )
 
-        # v1.3.9: Operational metrics (P3.11 + P3.12)
-        self._metrics = OperationalMetrics()
-
     # ── Public API ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -242,6 +241,13 @@ class Scheduler:
             self._market_data_task.cancel()
             self._market_data_task = None
 
+    def _build_metrics_snapshot(self) -> dict[str, Any]:
+        """Build the current operational metrics snapshot with feed status."""
+        snapshot: dict[str, Any] = dict(self._metrics.get_summary())
+        if self._market_data_ready and self._market_data_hub is not None:
+            snapshot["market_data"] = self._market_data_hub.feed_status()
+        return snapshot
+
     async def _initialize_market_data_hub(self) -> None:
         """Warm up and start the WebSocket-first market-data sidecar."""
         self._market_data_ready = False
@@ -272,6 +278,7 @@ class Scheduler:
             rest_provider=self._eodhd,
             symbols=symbols,
             quote_ttl_seconds=self._config.websocket.quote_ttl_seconds,
+            operational_metrics=self._metrics,
         )
         self._volatility_monitor.set_market_data_hub(self._market_data_hub)
         await self._market_data_hub.warmup()
@@ -424,6 +431,14 @@ class Scheduler:
                             cooldown_minutes=rejection_cooldown,
                         )
                         if recently_rejected:
+                            self._log_trade_event(
+                                "SCANNER_SKIP",
+                                {
+                                    "symbol": signal.instrument,
+                                    "reason": "recent_rejection_cooldown",
+                                    "cooldown_minutes": rejection_cooldown,
+                                },
+                            )
                             logger.warning(
                                 "Scanner loop: {} was rejected within {}min cooldown, "
                                 "skipping to avoid retry loop",
@@ -437,6 +452,14 @@ class Scheduler:
                             signal.instrument, self._now_utc()
                         ):
                             count = self._low_confidence_cooldown.get_count(signal.instrument)
+                            self._log_trade_event(
+                                "SCANNER_SKIP",
+                                {
+                                    "symbol": signal.instrument,
+                                    "reason": "low_confidence_cooldown",
+                                    "consecutive_cancels": count,
+                                },
+                            )
                             logger.warning(
                                 "Scanner loop: {} in low-confidence cooldown "
                                 "({} consecutive cancels), skipping",
@@ -1973,6 +1996,8 @@ class Scheduler:
         if self._memory_journal is not None:
             try:
                 self._memory_journal.append_trade_result(
+                    intent_id=intent.id,
+                    position_id=position_id,
                     symbol=symbol,
                     pnl=pnl,
                     reason=exit_reason,
@@ -2675,7 +2700,7 @@ class Scheduler:
             logger.info("Daily summary sent for {}", date_str)
 
             # v1.3.9: Emit operational metrics snapshot (P3.11 + P3.12)
-            self._log_trade_event("METRICS_SNAPSHOT", self._metrics.get_summary())
+            self._log_trade_event("METRICS_SNAPSHOT", self._build_metrics_snapshot())
 
         except Exception as e:
             logger.error("Failed to send daily summary: {}", e)

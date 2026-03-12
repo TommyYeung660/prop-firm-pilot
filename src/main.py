@@ -46,9 +46,11 @@ from src.execution.position_sizer import PositionSizer
 from src.monitor.alert_service import AlertService
 from src.monitor.equity_monitor import EquityMonitor
 from src.monitor.memory_journal import MemoryJournal
+from src.monitor.operational_metrics import OperationalMetrics
 from src.monitor.telegram_bot import TelegramBotHandler
 from src.monitor.trade_journal import TradeJournal
 from src.signal.scanner_bridge import ScannerBridge
+from src.version import get_release_tag
 
 
 class PropFirmPilot:
@@ -413,6 +415,7 @@ async def _run_scheduler(config: AppConfig) -> None:
             session_id=os.getenv("MATCHTRADER_ACCOUNT_ID", "default"),
         ),
     )
+    operational_metrics = OperationalMetrics()
     alert_service = AlertService(
         bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
@@ -421,6 +424,7 @@ async def _run_scheduler(config: AppConfig) -> None:
         profit_target_pct=config.compliance.profit_target,
         daily_loss_pct=config.compliance.daily_drawdown_limit,
         max_drawdown_pct=config.compliance.max_drawdown_limit,
+        on_send_failure=operational_metrics.record_telegram_failure,
     )
 
     journal = TradeJournal(config.monitor.trade_journal_path)
@@ -485,6 +489,7 @@ async def _run_scheduler(config: AppConfig) -> None:
             optimization_engine=optimization_engine,
             memory_journal=memory_journal,
             trade_journal=journal,
+            metrics=operational_metrics,
         )
 
         # ── Telegram bot command handler ───────────────────────────────
@@ -494,6 +499,7 @@ async def _run_scheduler(config: AppConfig) -> None:
             alert_service=alert_service,
             trading_client=client,
             trade_journal=journal,
+            operational_metrics=operational_metrics,
         )
 
         # ── Startup recovery ───────────────────────────────────────────
@@ -598,7 +604,7 @@ def main() -> None:
     config = load_config(args.config)
     setup_logging(config)
 
-    logger.info("PropFirmPilot v1.3.9 starting")
+    logger.info("PropFirmPilot {} starting", get_release_tag())
     logger.info("Config: {}", args.config)
     logger.info("Symbols: {}", config.symbols)
 

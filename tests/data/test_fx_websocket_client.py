@@ -98,3 +98,33 @@ def test_compute_backoff_caps_at_max() -> None:
     assert client._compute_backoff_seconds(0) == 2
     assert client._compute_backoff_seconds(1) == 4
     assert client._compute_backoff_seconds(10) == 300
+
+
+def test_get_status_reports_disconnected_state() -> None:
+    client = EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"])
+
+    status = client.get_status()
+
+    assert status["state"] == "disconnected"
+
+
+def test_get_status_reports_degraded_state_for_stale_symbols() -> None:
+    client = EODHDFXWebSocketClient(
+        api_token="token",
+        symbols=["EURUSD"],
+        stale_after_seconds=30,
+    )
+    client._connected = True
+    client._record_tick(
+        WebSocketTick(
+            symbol="EURUSD",
+            bid=1.08,
+            ask=1.09,
+            timestamp_ms=1,
+        )
+    )
+
+    status = client.get_status()
+
+    assert status["state"] == "degraded"
+    assert status["stale_symbols"] == ["EURUSD"]

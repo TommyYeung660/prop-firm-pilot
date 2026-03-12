@@ -38,6 +38,8 @@ class MemoryJournal:
         self._memory_dir.mkdir(parents=True, exist_ok=True)
         # v1.3.9a: Track last decision per symbol for diff computation
         self._last_decisions: dict[str, dict[str, Any]] = {}
+        # v1.4.1: Track decision anchor file by intent_id for safe result append.
+        self._decision_files: dict[str, Path] = {}
         logger.debug("MemoryJournal: initialized at {}", self._memory_dir)
 
     # ── Public Methods ─────────────────────────────────────────────────────
@@ -111,23 +113,51 @@ class MemoryJournal:
 
         file_path = self._memory_dir / f"{date_str}.md"
         self._append_to_file(file_path, content)
+        intent_id = str(ctx.get("intent_id") or "").strip()
+        if intent_id:
+            self._decision_files[intent_id] = file_path
         logger.info("MemoryJournal: logged LLM decision for {} ({})", symbol, date_str)
 
-    def append_trade_result(self, *, symbol: str, pnl: float, reason: str) -> None:
-        """Append a trade result block to today's Markdown file."""
+    def append_trade_result(
+        self,
+        *,
+        intent_id: str,
+        position_id: str,
+        symbol: str,
+        pnl: float,
+        reason: str,
+    ) -> None:
+        """Append a trade result block to the anchored decision file."""
         now = datetime.now(timezone.utc)
-        date_str = now.strftime("%Y-%m-%d")
         time_str = now.strftime("%H:%M:%S UTC")
+
+        file_path = self._find_file_for_intent(intent_id)
+        if file_path is None:
+            logger.warning(
+                "MemoryJournal: no decision anchor for intent {} (symbol={}), skipping result",
+                intent_id,
+                symbol,
+            )
+            return
+
+        if not self._file_has_matching_anchor(file_path, intent_id=intent_id, symbol=symbol):
+            logger.warning(
+                "MemoryJournal: symbol mismatch for intent {} (symbol={}), skipping result",
+                intent_id,
+                symbol,
+            )
+            return
 
         content = self._format_trade_result_block(
             time_str=time_str,
+            intent_id=intent_id,
+            position_id=position_id,
             symbol=symbol,
             pnl=pnl,
             reason=reason,
         )
-        file_path = self._memory_dir / f"{date_str}.md"
         self._append_to_file(file_path, content)
-        logger.info("MemoryJournal: appended trade result for {} ({})", symbol, date_str)
+        logger.info("MemoryJournal: appended trade result for {} ({})", symbol, file_path.name)
 
     # ── Private Methods ────────────────────────────────────────────────────
 
@@ -247,6 +277,8 @@ class MemoryJournal:
         self,
         *,
         time_str: str,
+        intent_id: str,
+        position_id: str,
         symbol: str,
         pnl: float,
         reason: str,
@@ -256,6 +288,8 @@ class MemoryJournal:
         lines.append("### Trade Result")
         lines.append("")
         lines.append(f"- **Time**: {time_str}")
+        lines.append(f"- **Intent ID**: {intent_id}")
+        lines.append(f"- **Position ID**: {position_id}")
         lines.append(f"- **Symbol**: {symbol}")
         lines.append(f"- **PnL**: {pnl}")
         lines.append(f"- **Reason**: {reason}")
@@ -263,6 +297,51 @@ class MemoryJournal:
         lines.append("---")
         lines.append("")
         return "\n".join(lines)
+
+    def _find_file_for_intent(self, intent_id: str) -> Path | None:
+        """Resolve the Markdown file that contains the decision anchor for intent_id."""
+        cached = self._decision_files.get(intent_id)
+        if cached is not None and cached.exists():
+            return cached
+
+        for file_path in sorted(self._memory_dir.glob("*.md")):
+            if self._file_has_intent_anchor(file_path, intent_id):
+                self._decision_files[intent_id] = file_path
+                return file_path
+        return None
+
+    def _file_has_matching_anchor(self, file_path: Path, *, intent_id: str, symbol: str) -> bool:
+        """Check that a file contains a decision block for the given intent and symbol."""
+        for block in self._read_blocks(file_path):
+            if self._block_has_intent_anchor(block, intent_id) and self._block_has_symbol(
+                block, symbol
+            ):
+                return True
+        return False
+
+    def _file_has_intent_anchor(self, file_path: Path, intent_id: str) -> bool:
+        """Check whether any block in file_path references the given intent_id."""
+        return any(
+            self._block_has_intent_anchor(block, intent_id)
+            for block in self._read_blocks(file_path)
+        )
+
+    def _read_blocks(self, file_path: Path) -> list[str]:
+        """Read a Markdown file and split it into journal blocks."""
+        try:
+            text = file_path.read_text(encoding="utf-8")
+        except OSError as e:
+            logger.error("MemoryJournal: failed to read {}: {}", file_path, e)
+            return []
+        return [block.strip() for block in text.split("\n---\n") if block.strip()]
+
+    def _block_has_intent_anchor(self, block: str, intent_id: str) -> bool:
+        """Check whether a block contains the exact intent_id anchor."""
+        return f"- **intent_id**: {intent_id}" in block
+
+    def _block_has_symbol(self, block: str, symbol: str) -> bool:
+        """Check whether a block contains the exact symbol line."""
+        return f"- **Symbol**: {symbol}" in block
 
     def _compute_diff(
         self, symbol: str, current: dict[str, Any]

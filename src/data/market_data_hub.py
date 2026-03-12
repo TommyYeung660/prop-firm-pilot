@@ -14,14 +14,16 @@ Usage:
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 import httpx
 import pandas as pd
+from loguru import logger
 
 from src.data.fx_tick_aggregator import FXTickAggregator
 from src.data.fx_websocket_client import EODHDFXWebSocketClient
+from src.monitor.operational_metrics import OperationalMetrics
 
 
 @dataclass
@@ -66,6 +68,7 @@ class MarketDataHub:
         quote_ttl_seconds: int = 30,
         bar_cache_max_age_seconds: int = 3600,
         now_provider: Callable[[], datetime] | None = None,
+        operational_metrics: OperationalMetrics | None = None,
     ) -> None:
         self._aggregator = aggregator
         self._websocket_client = websocket_client
@@ -76,6 +79,7 @@ class MarketDataHub:
         self._now_provider = now_provider or (lambda: datetime.now(timezone.utc))
         self._warm_cache: dict[tuple[str, str], pd.DataFrame] = {}
         self._forced_stale_symbols: set[str] = set()
+        self._metrics = operational_metrics
 
     async def warmup(self) -> None:
         """Backfill recent intraday bars into the warm cache for all symbols."""
@@ -102,19 +106,15 @@ class MarketDataHub:
             if quote is not None and tick is not None:
                 age = self._now_provider() - tick.timestamp
                 if age <= timedelta(seconds=self._quote_ttl_seconds):
+                    self._record_market_data_read("websocket_cache")
                     return QuoteResult(symbol=symbol, source="websocket_cache", quote=quote)
-        bars = await self._fetch_rest_bars(symbol=symbol, timeframe="1m")
-        quote = None
-        if not bars.empty:
-            last = bars.iloc[-1]
-            close = float(last["close"])
-            quote = {
-                "symbol": symbol,
-                "bid": close,
-                "ask": close,
-                "mid": close,
-                "timestamp_ms": int(pd.Timestamp(last["datetime"]).timestamp() * 1000),
-            }
+        bars = self._warm_cache.get((symbol, "1m"))
+        rows_fetched = 0
+        if bars is None or bars.empty or not self._bars_are_fresh(bars):
+            bars, rows_fetched = await self._refresh_rest_cache(symbol=symbol, timeframe="1m")
+            self._log_rest_fallback(symbol=symbol, timeframe="1m", rows_fetched=rows_fetched)
+        self._record_market_data_read("rest_fallback", rows_fetched)
+        quote = self._build_quote_from_bars(symbol, bars)
         return QuoteResult(symbol=symbol, source="rest_fallback", quote=quote)
 
     async def get_bars(
@@ -122,7 +122,7 @@ class MarketDataHub:
         symbol: str,
         timeframe: Literal["1m", "5m", "1h"],
         limit: int,
-    ) -> BarResult:
+        ) -> BarResult:
         """Resolve closed bars from websocket cache, warm cache, or REST fallback."""
         if symbol not in self._forced_stale_symbols:
             websocket_bars = self._bars_from_aggregator(
@@ -131,6 +131,7 @@ class MarketDataHub:
                 limit=limit,
             )
             if not websocket_bars.empty and self._bars_are_fresh(websocket_bars):
+                self._record_market_data_read("websocket_cache")
                 return BarResult(
                     symbol=symbol,
                     timeframe=timeframe,
@@ -138,14 +139,17 @@ class MarketDataHub:
                     bars=websocket_bars,
                 )
         warm = self._warm_cache.get((symbol, timeframe))
-        if warm is not None and not warm.empty:
+        if warm is not None and not warm.empty and self._bars_are_fresh(warm):
+            self._record_market_data_read("warmup_cache")
             return BarResult(
                 symbol=symbol,
                 timeframe=timeframe,
                 source="warmup_cache",
                 bars=warm.tail(limit).reset_index(drop=True),
             )
-        bars = await self._fetch_rest_bars(symbol=symbol, timeframe=timeframe)
+        bars, rows_fetched = await self._refresh_rest_cache(symbol=symbol, timeframe=timeframe)
+        self._record_market_data_read("rest_fallback", rows_fetched)
+        self._log_rest_fallback(symbol=symbol, timeframe=timeframe, rows_fetched=rows_fetched)
         return BarResult(
             symbol=symbol,
             timeframe=timeframe,
@@ -192,14 +196,97 @@ class MarketDataHub:
         age = self._now_provider() - latest_ts
         return age <= timedelta(seconds=self._bar_cache_max_age_seconds)
 
+    def _build_quote_from_bars(
+        self,
+        symbol: str,
+        bars: pd.DataFrame | None,
+    ) -> dict[str, Any] | None:
+        """Build a synthetic quote from the latest available 1m bar."""
+        if bars is None or bars.empty:
+            return None
+        last = bars.iloc[-1]
+        close = float(last["close"])
+        return {
+            "symbol": symbol,
+            "bid": close,
+            "ask": close,
+            "mid": close,
+            "timestamp_ms": int(pd.Timestamp(last["datetime"]).timestamp() * 1000),
+        }
+
+    def _normalize_bars(self, bars: pd.DataFrame) -> pd.DataFrame:
+        """Sort and normalize provider bars to the expected schema."""
+        if bars.empty:
+            return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+        return bars.sort_values("datetime").reset_index(drop=True)
+
+    def _resolve_rest_window(
+        self,
+        symbol: str,
+        timeframe: Literal["1m", "5m", "1h"],
+    ) -> tuple[date, date]:
+        """Resolve bounded REST backfill window using the latest cached tail when available."""
+        end_date = self._now_provider().date()
+        start_date = end_date - timedelta(days=self._LOOKBACK_DAYS[timeframe])
+        warm = self._warm_cache.get((symbol, timeframe))
+        if warm is None or warm.empty:
+            return start_date, end_date
+        latest_ts = pd.Timestamp(warm.iloc[-1]["datetime"]).to_pydatetime()
+        if latest_ts.tzinfo is None:
+            latest_ts = latest_ts.replace(tzinfo=timezone.utc)
+        return max(latest_ts.date(), start_date), end_date
+
+    async def _refresh_rest_cache(
+        self,
+        symbol: str,
+        timeframe: Literal["1m", "5m", "1h"],
+    ) -> tuple[pd.DataFrame, int]:
+        """Refresh the REST-backed cache incrementally from the latest cached tail."""
+        bars = await self._fetch_rest_bars(symbol=symbol, timeframe=timeframe)
+        rows_fetched = len(bars)
+        if bars.empty:
+            cached = self._warm_cache.get((symbol, timeframe))
+            if cached is None:
+                cached = self._normalize_bars(pd.DataFrame())
+            self._warm_cache[(symbol, timeframe)] = self._normalize_bars(cached)
+            return self._warm_cache[(symbol, timeframe)], rows_fetched
+        cached = self._warm_cache.get((symbol, timeframe))
+        if cached is not None and not cached.empty:
+            bars = pd.concat([cached, bars], ignore_index=True)
+            bars = bars.drop_duplicates(subset=["datetime"], keep="last")
+        normalized = self._normalize_bars(bars)
+        self._warm_cache[(symbol, timeframe)] = normalized
+        return normalized, rows_fetched
+
+    def _record_market_data_read(self, source: str, row_count: int = 0) -> None:
+        """Record market-data source usage in shared operational metrics."""
+        if self._metrics is not None:
+            self._metrics.record_market_data_read(source, row_count=row_count)
+
+    def _log_rest_fallback(
+        self,
+        symbol: str,
+        timeframe: Literal["1m", "5m", "1h"],
+        rows_fetched: int,
+    ) -> None:
+        """Log degraded market-data fallback with current websocket health context."""
+        status = self._websocket_client.get_status()
+        logger.warning(
+            "MarketDataHub: REST fallback for {} {} (rows_fetched={}, ws_state={}, last_error={})",
+            symbol,
+            timeframe,
+            rows_fetched,
+            status.get("state"),
+            status.get("last_error") or "none",
+        )
+
     async def _fetch_rest_bars(
         self,
         symbol: str,
         timeframe: Literal["1m", "5m", "1h"],
     ) -> pd.DataFrame:
         """Fetch bars from the configured REST provider."""
-        end_date = self._now_provider().date()
-        start_date = end_date - timedelta(days=self._LOOKBACK_DAYS[timeframe])
+        start_date, end_date = self._resolve_rest_window(symbol, timeframe)
         interval = self._INTERVAL_MAP[timeframe]
         async with httpx.AsyncClient() as client:
             bars = await self._rest_provider.fetch_bars(
@@ -209,7 +296,4 @@ class MarketDataHub:
                 client,
                 interval=interval,
             )
-        if bars.empty:
-            return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
-        bars = bars.sort_values("datetime").reset_index(drop=True)
-        return bars
+        return self._normalize_bars(bars)

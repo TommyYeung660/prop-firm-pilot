@@ -6,9 +6,10 @@ LLM-optimized summaries via gpt-5.4, builds an INDEX, and zips
 everything into a single archive.
 
 Usage:
-    python scripts/pack_prod_logs.py --config config/e8_one_5k_challenge.yaml --version v1.3.9
-    python scripts/pack_prod_logs.py --config config/e8_one_5k_challenge.yaml --version v1.3.9 --days 5
-    python scripts/pack_prod_logs.py --config config/e8_one_5k_challenge.yaml --version v1.3.9 --no-summarize
+    python scripts/pack_prod_logs.py --config config/e8_one_5k_challenge.yaml
+    python scripts/pack_prod_logs.py --config config/e8_one_5k_challenge.yaml \
+        --version v1.4.1 --days 5
+    python scripts/pack_prod_logs.py --config config/e8_one_5k_challenge.yaml --no-summarize
 """
 
 import argparse
@@ -18,15 +19,18 @@ import os
 import shutil
 import sqlite3
 import zipfile
+from collections import Counter
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import httpx
 import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
+from src.version import get_app_version, get_release_tag
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -47,8 +51,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--version",
-        required=True,
-        help="Version string like v1.3.9",
+        default=None,
+        help=f"Version string like {get_release_tag()} (defaults to current release tag)",
     )
     parser.add_argument(
         "--days",
@@ -67,6 +71,30 @@ def _parse_args() -> argparse.Namespace:
         help="Output directory for the zip archive (default: .)",
     )
     return parser.parse_args()
+
+
+def _normalize_release_tag(version: str) -> str:
+    """Normalize a bare semantic version or v-prefixed tag to release-tag form."""
+    normalized = version.strip()
+    if not normalized:
+        raise ValueError("Version must not be empty")
+    if not normalized.startswith("v"):
+        normalized = f"v{normalized}"
+    return normalized
+
+
+def _resolve_version(version: str | None) -> str:
+    """Resolve the effective packer version and fail fast on drift."""
+    current_tag = get_release_tag()
+    if version is None:
+        return current_tag
+    requested_tag = _normalize_release_tag(version)
+    if requested_tag != current_tag:
+        raise ValueError(
+            f"Explicit version '{requested_tag}' does not match current project version "
+            f"'{current_tag}' ({get_app_version()})"
+        )
+    return current_tag
 
 
 # ── Config Loading ──────────────────────────────────────────────────────────
@@ -306,6 +334,38 @@ async def _summarize_all(
     api_key = os.getenv("RIGHTCODE_API_KEY")
     if not api_key:
         logger.warning("RIGHTCODE_API_KEY not set; skipping LLM summaries")
+        _write_summary(
+            summary_dir / "log_summary.md",
+            _build_placeholder_summary(
+                "Log Summary (Fallback)",
+                "LLM summary unavailable",
+                log_content,
+            ),
+        )
+        _write_summary(
+            summary_dir / "trades_summary.md",
+            _build_placeholder_summary(
+                "Trades Summary (Fallback)",
+                "LLM summary unavailable",
+                trade_content,
+            ),
+        )
+        _write_summary(
+            summary_dir / "decisions_summary.md",
+            _build_decisions_fallback_summary(trade_content),
+        )
+        _write_summary(
+            summary_dir / "memory_summary.md",
+            _build_placeholder_summary(
+                "Memory Summary (Fallback)",
+                "LLM summary unavailable",
+                memory_content,
+            ),
+        )
+        _write_summary(
+            summary_dir / "telegram_summary.md",
+            _build_telegram_fallback_summary(telegram_content),
+        )
         return
 
     async with httpx.AsyncClient() as client:
@@ -314,12 +374,21 @@ async def _summarize_all(
                 client,
                 BASE_URL,
                 api_key,
-                "你是一個生產環境日誌分析專家。分析以下 prop-firm-pilot 交易系統日誌，生成結構化摘要。",
+                "你是一個生產環境日誌分析專家。"
+                "分析以下 prop-firm-pilot 交易系統日誌，生成結構化摘要。",
                 log_content,
             )
             _write_summary(summary_dir / "log_summary.md", log_summary)
         except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
             logger.error("Failed to summarize logs: {}", exc)
+            _write_summary(
+                summary_dir / "log_summary.md",
+                _build_placeholder_summary(
+                    "Log Summary (Fallback)",
+                    f"LLM summary failed: {exc}",
+                    log_content,
+                ),
+            )
 
         try:
             trades_summary = await _call_llm(
@@ -332,6 +401,14 @@ async def _summarize_all(
             _write_summary(summary_dir / "trades_summary.md", trades_summary)
         except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
             logger.error("Failed to summarize trades: {}", exc)
+            _write_summary(
+                summary_dir / "trades_summary.md",
+                _build_placeholder_summary(
+                    "Trades Summary (Fallback)",
+                    f"LLM summary failed: {exc}",
+                    trade_content,
+                ),
+            )
 
         try:
             decisions_summary = await _call_llm(
@@ -344,6 +421,10 @@ async def _summarize_all(
             _write_summary(summary_dir / "decisions_summary.md", decisions_summary)
         except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
             logger.error("Failed to summarize decisions: {}", exc)
+            _write_summary(
+                summary_dir / "decisions_summary.md",
+                _build_decisions_fallback_summary(trade_content),
+            )
 
         try:
             memory_summary = await _call_llm(
@@ -356,6 +437,14 @@ async def _summarize_all(
             _write_summary(summary_dir / "memory_summary.md", memory_summary)
         except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
             logger.error("Failed to summarize memory: {}", exc)
+            _write_summary(
+                summary_dir / "memory_summary.md",
+                _build_placeholder_summary(
+                    "Memory Summary (Fallback)",
+                    f"LLM summary failed: {exc}",
+                    memory_content,
+                ),
+            )
 
         try:
             telegram_summary = await _call_llm(
@@ -368,6 +457,10 @@ async def _summarize_all(
             _write_summary(summary_dir / "telegram_summary.md", telegram_summary)
         except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
             logger.error("Failed to summarize Telegram: {}", exc)
+            _write_summary(
+                summary_dir / "telegram_summary.md",
+                _build_telegram_fallback_summary(telegram_content),
+            )
 
 
 # ── Data Extraction ─────────────────────────────────────────────────────────
@@ -481,11 +574,207 @@ def _collect_raw_file_listing(raw_dir: Path) -> list[str]:
     return entries
 
 
+def _collect_summary_file_listing(summary_dir: Path) -> list[str]:
+    entries: list[str] = []
+    if not summary_dir.exists():
+        return entries
+    for path in sorted(summary_dir.glob("*.md")):
+        if path.is_dir():
+            continue
+        size = path.stat().st_size
+        rel = path.relative_to(summary_dir.parent)
+        entries.append(f"- {rel.as_posix()} ({size} bytes)")
+    return entries
+
+
+def _parse_jsonl_objects(content: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
+
+
+def _event_timestamp(payload: dict[str, Any]) -> datetime | None:
+    candidates = [
+        payload.get("timestamp"),
+        payload.get("created_at"),
+        payload.get("trade_time"),
+        payload.get("open_time"),
+        payload.get("closed_at"),
+        payload.get("time"),
+    ]
+    for value in candidates:
+        parsed = _parse_datetime(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _event_day(payload: dict[str, Any]) -> str:
+    parsed = _event_timestamp(payload)
+    if parsed is not None:
+        return parsed.astimezone(timezone.utc).date().isoformat()
+    trade_date = payload.get("trade_date")
+    if isinstance(trade_date, str):
+        return trade_date
+    return ""
+
+
+def _build_placeholder_summary(title: str, reason: str, content: str = "") -> str:
+    non_empty_lines = sum(1 for line in content.splitlines() if line.strip())
+    return "\n".join(
+        [
+            f"# {title}",
+            "",
+            f"- {reason}",
+            f"- Non-empty lines: {non_empty_lines}",
+        ]
+    )
+
+
+def _build_telegram_fallback_summary(telegram_content: str) -> str:
+    messages = [line.strip() for line in telegram_content.splitlines() if line.strip()]
+    lines = [
+        "# Telegram Summary (Deterministic Fallback)",
+        "",
+        f"- Exported text messages: {len(messages)}",
+    ]
+    if not messages:
+        lines.append("- No Telegram text messages were exported in this bundle.")
+        return "\n".join(lines)
+    lines.extend(["", "## Sample Messages"])
+    lines.extend(f"- {message[:160]}" for message in messages[:5])
+    return "\n".join(lines)
+
+
+def _build_decisions_fallback_summary(trade_content: str) -> str:
+    records = _parse_jsonl_objects(trade_content)
+    event_counts = Counter(
+        payload["type"]
+        for payload in records
+        if isinstance(payload.get("type"), str)
+    )
+    cancel_reasons = Counter(
+        str(payload["reason"])
+        for payload in records
+        if payload.get("type") == "INTENT_CANCELLED" and payload.get("reason")
+    )
+    skip_reasons = Counter(
+        str(payload["reason"])
+        for payload in records
+        if payload.get("type") == "SCANNER_SKIP" and payload.get("reason")
+    )
+
+    ordered_records = sorted(
+        enumerate(records),
+        key=lambda item: (
+            _event_timestamp(item[1]) or datetime.min.replace(tzinfo=timezone.utc),
+            item[0],
+        ),
+    )
+    shadow_rows: dict[tuple[str, str], dict[str, int | float]] = {}
+    for idx, (_, payload) in enumerate(ordered_records):
+        event_type = payload.get("type")
+        reason = payload.get("reason")
+        symbol = payload.get("symbol")
+        day = _event_day(payload)
+        if event_type not in ("INTENT_CANCELLED", "SCANNER_SKIP"):
+            continue
+        if not isinstance(reason, str) or not isinstance(symbol, str) or not day:
+            continue
+        follow_up_events = [
+            later_payload
+            for _, later_payload in ordered_records[idx + 1 :]
+            if later_payload.get("symbol") == symbol and _event_day(later_payload) == day
+        ]
+        opened = any(item.get("type") == "TRADE_OPENED" for item in follow_up_events)
+        closed = [item for item in follow_up_events if item.get("type") == "TRADE_CLOSED"]
+        pnl = sum(float(item.get("pnl", 0.0) or 0.0) for item in closed)
+        key = (symbol, reason)
+        bucket = shadow_rows.setdefault(
+            key,
+            {
+                "count": 0,
+                "same_day_follow_up_opens": 0,
+                "same_day_follow_up_closes": 0,
+                "same_day_follow_up_pnl": 0.0,
+            },
+        )
+        bucket["count"] += 1
+        bucket["same_day_follow_up_opens"] += int(opened)
+        bucket["same_day_follow_up_closes"] += int(bool(closed))
+        bucket["same_day_follow_up_pnl"] += pnl
+
+    lines = [
+        "# Decisions Summary (Deterministic Fallback)",
+        "",
+        "## Lifecycle Counts",
+        "| Event | Count |",
+        "|------|------:|",
+    ]
+    for event_type in (
+        "INTENT_CREATED",
+        "INTENT_CANCELLED",
+        "SCANNER_SKIP",
+        "TRADE_OPENED",
+        "TRADE_CLOSED",
+    ):
+        lines.append(f"| {event_type} | {event_counts.get(event_type, 0)} |")
+
+    lines.extend(["", "## Cancellation Reasons", "| Reason | Count |", "|------|------:|"])
+    if cancel_reasons:
+        for reason, count in cancel_reasons.most_common():
+            lines.append(f"| {reason} | {count} |")
+    else:
+        lines.append("| none | 0 |")
+
+    lines.extend(["", "## Scanner Skip Reasons", "| Reason | Count |", "|------|------:|"])
+    if skip_reasons:
+        for reason, count in skip_reasons.most_common():
+            lines.append(f"| {reason} | {count} |")
+    else:
+        lines.append("| none | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Shadow Analysis",
+            "| Symbol | Reason | Events | Same-day Opens | Same-day Closes | Same-day PnL |",
+            "|------|------|------:|------:|------:|------:|",
+        ]
+    )
+    if shadow_rows:
+        for (symbol, reason), summary in sorted(shadow_rows.items()):
+            lines.append(
+                "| {} | {} | {} | {} | {} | {:.2f} |".format(
+                    symbol,
+                    reason,
+                    int(summary["count"]),
+                    int(summary["same_day_follow_up_opens"]),
+                    int(summary["same_day_follow_up_closes"]),
+                    float(summary["same_day_follow_up_pnl"]),
+                )
+            )
+    else:
+        lines.append("| none | none | 0 | 0 | 0 | 0.00 |")
+
+    return "\n".join(lines)
+
+
 def _write_index(
     index_path: Path,
     version: str,
     date_range: str,
     timestamp: str,
+    summary_listing: list[str],
     raw_listing: list[str],
 ) -> None:
     lines = [
@@ -498,16 +787,11 @@ def _write_index(
         "## 快速導覽",
         "",
         "### 摘要文件 (建議先讀)",
-        "| 文件 | 說明 |",
-        "|------|------|",
-        "| summary/log_summary.md | 主日誌摘要 — 錯誤/警告/關鍵事件 |",
-        "| summary/trades_summary.md | 交易統計 — 勝率/PnL/每筆詳情 |",
-        "| summary/decisions_summary.md | 決策分析 — BUY/SELL/HOLD 分佈 |",
-        "| summary/memory_summary.md | 記憶日誌 — LLM 推理品質 |",
-        "| summary/telegram_summary.md | Telegram 通知 — 系統事件 |",
-        "",
-        "### 原始文件 (深挖用)",
     ]
+    lines.extend(
+        summary_listing if summary_listing else ["- summary/ (no summary files generated)"]
+    )
+    lines.extend(["", "### 原始文件 (深挖用)"])
     lines.extend(raw_listing if raw_listing else ["- raw/ (no files collected)"])
     lines.extend(["", "## 已知問題", "{placeholder for user to fill}"])
     try:
@@ -537,6 +821,7 @@ def _zip_directory(src_dir: Path, output_zip: Path) -> None:
 
 async def _run() -> None:
     args = _parse_args()
+    version = _resolve_version(args.version)
     load_dotenv()
 
     config_path = Path(args.config)
@@ -544,7 +829,7 @@ async def _run() -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
     date_range = f"{cutoff.date().isoformat()} to {datetime.now(timezone.utc).date().isoformat()}"
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    folder_name = f"prod_logs_{datetime.now(timezone.utc).strftime('%Y%m%d')}_{args.version}"
+    folder_name = f"prod_logs_{datetime.now(timezone.utc).strftime('%Y%m%d')}_{version}"
 
     output_base = Path(args.output_dir).resolve()
     output_dir = output_base / folder_name
@@ -603,11 +888,38 @@ async def _run() -> None:
 
     if args.no_summarize:
         logger.info("Skipping LLM summaries")
-        _write_summary(summary_dir / "log_summary.md", "Summaries skipped (--no-summarize).")
-        _write_summary(summary_dir / "trades_summary.md", "Summaries skipped (--no-summarize).")
-        _write_summary(summary_dir / "decisions_summary.md", "Summaries skipped (--no-summarize).")
-        _write_summary(summary_dir / "memory_summary.md", "Summaries skipped (--no-summarize).")
-        _write_summary(summary_dir / "telegram_summary.md", "Summaries skipped (--no-summarize).")
+        _write_summary(
+            summary_dir / "log_summary.md",
+            _build_placeholder_summary(
+                "Log Summary (Fallback)",
+                "Summaries skipped (--no-summarize).",
+                log_content,
+            ),
+        )
+        _write_summary(
+            summary_dir / "trades_summary.md",
+            _build_placeholder_summary(
+                "Trades Summary (Fallback)",
+                "Summaries skipped (--no-summarize).",
+                trade_content,
+            ),
+        )
+        _write_summary(
+            summary_dir / "decisions_summary.md",
+            _build_decisions_fallback_summary(trade_content),
+        )
+        _write_summary(
+            summary_dir / "memory_summary.md",
+            _build_placeholder_summary(
+                "Memory Summary (Fallback)",
+                "Summaries skipped (--no-summarize).",
+                memory_content,
+            ),
+        )
+        _write_summary(
+            summary_dir / "telegram_summary.md",
+            _build_telegram_fallback_summary(telegram_content),
+        )
     else:
         logger.info("Generating LLM summaries sequentially")
         await _summarize_all(
@@ -619,8 +931,16 @@ async def _run() -> None:
             telegram_content,
         )
 
+    summary_listing = _collect_summary_file_listing(summary_dir)
     raw_listing = _collect_raw_file_listing(raw_dir)
-    _write_index(output_dir / "INDEX.md", args.version, date_range, timestamp, raw_listing)
+    _write_index(
+        output_dir / "INDEX.md",
+        version,
+        date_range,
+        timestamp,
+        summary_listing,
+        raw_listing,
+    )
 
     output_zip = output_base / f"{folder_name}.zip"
     _zip_directory(output_dir, output_zip)

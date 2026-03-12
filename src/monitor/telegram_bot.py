@@ -23,6 +23,8 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from src.monitor.operational_metrics import OperationalMetrics
+
 
 class TelegramBotHandler:
     """Async polling handler for Telegram bot commands (/profit, /orders).
@@ -51,6 +53,7 @@ class TelegramBotHandler:
         trading_client: Any,
         trade_journal: Any,
         poll_interval: float = 1.0,
+        operational_metrics: OperationalMetrics | None = None,
     ) -> None:
         self._bot_token = bot_token
         self._chat_id = chat_id
@@ -63,6 +66,7 @@ class TelegramBotHandler:
         self._running = False
         self._http_client: httpx.AsyncClient | None = None
         self._enabled = bool(bot_token and chat_id)
+        self._metrics = operational_metrics
 
         # ── Circuit Breaker State ──────────────────────────────────────
         self._consecutive_failures: int = 0
@@ -170,6 +174,8 @@ class TelegramBotHandler:
                 "TelegramBotHandler: circuit open for {:.0f}s, attempting probe poll",
                 time.monotonic() - self._circuit_opened_at,
             )
+            if self._metrics is not None:
+                self._metrics.record_telegram_poll_probe()
 
         # M1: Back off when a 409 conflict was recently detected
         if self._conflict_backoff > 0:
@@ -213,6 +219,8 @@ class TelegramBotHandler:
                 type(e).__name__,
                 e or "no details",
             )
+            if self._metrics is not None:
+                self._metrics.record_telegram_poll_failure()
             self._record_failure()  # Circuit breaker: failure
             return []
 
@@ -224,6 +232,8 @@ class TelegramBotHandler:
         if not self._circuit_open and self._consecutive_failures >= self._CIRCUIT_OPEN_THRESHOLD:
             self._circuit_open = True
             self._circuit_opened_at = time.monotonic()
+            if self._metrics is not None:
+                self._metrics.record_telegram_poll_circuit_open()
             logger.warning(
                 "TelegramBotHandler: circuit OPEN after {} consecutive failures "
                 "— polling will sleep for {:.0f}s between probes",
@@ -234,6 +244,8 @@ class TelegramBotHandler:
     def _reset_circuit(self) -> None:
         """Reset circuit breaker to closed state."""
         if self._circuit_open:
+            if self._metrics is not None:
+                self._metrics.record_telegram_poll_recovery()
             logger.info(
                 "TelegramBotHandler: circuit CLOSED — Telegram recovered after {:.0f}s",
                 time.monotonic() - self._circuit_opened_at,

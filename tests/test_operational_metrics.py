@@ -110,6 +110,20 @@ class TestOperationalMetrics:
         m.record_telegram_failure()
         assert m.get_summary()["telegram_failures"] == 2
 
+    def test_record_telegram_poll_degradation_transitions(self):
+        m = OperationalMetrics()
+        m.record_telegram_poll_failure()
+        m.record_telegram_poll_failure()
+        m.record_telegram_poll_circuit_open()
+        m.record_telegram_poll_probe()
+        m.record_telegram_poll_recovery()
+
+        summary = m.get_summary()
+        assert summary["telegram_poll_failures"] == 2
+        assert summary["telegram_poll_circuit_opens"] == 1
+        assert summary["telegram_poll_probe_polls"] == 1
+        assert summary["telegram_poll_circuit_recoveries"] == 1
+
     def test_reset_clears_all(self):
         m = OperationalMetrics()
         m.record_llm_result("success")
@@ -117,6 +131,8 @@ class TestOperationalMetrics:
         m.record_trade_close("sl_hit")
         m.record_api_retry("matchtrader")
         m.record_telegram_failure()
+        m.record_telegram_poll_failure()
+        m.record_telegram_poll_circuit_open()
         m.reset()
         summary = m.get_summary()
         assert summary["llm_success"] == 0
@@ -124,6 +140,8 @@ class TestOperationalMetrics:
         assert summary["sl_hits"] == 0
         assert summary["api_retries"] == 0
         assert summary["telegram_failures"] == 0
+        assert summary["telegram_poll_failures"] == 0
+        assert summary["telegram_poll_circuit_opens"] == 0
 
     def test_get_summary_returns_dict(self):
         """get_summary returns a plain dict suitable for JSON serialization."""

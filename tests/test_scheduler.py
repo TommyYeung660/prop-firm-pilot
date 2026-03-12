@@ -7,6 +7,7 @@ scanner, LLM worker, execution, janitor, and equity monitor.
 """
 
 import asyncio
+import json
 import unittest.mock
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -221,6 +222,42 @@ class TestScannerLoop:
         intents = store.get_intents_by_date(today)
         symbols = {i.symbol for i in intents}
         assert symbols == {"EURUSD", "GBPUSD"}
+
+    async def test_logs_structured_cooldown_skip_event(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        from src.monitor.trade_journal import TradeJournal
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            trade_journal=journal,
+        )
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("EURUSD")]
+        now = sched._now_utc()
+        sched._low_confidence_cooldown.record_low_confidence("EURUSD", now)
+        sched._low_confidence_cooldown.record_low_confidence("EURUSD", now)
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+        events = [json.loads(line) for line in lines]
+        skip_event = next(e for e in events if e["type"] == "SCANNER_SKIP")
+        assert skip_event["symbol"] == "EURUSD"
+        assert skip_event["reason"] == "low_confidence_cooldown"
+        assert skip_event["consecutive_cancels"] == 2
 
     async def test_skips_duplicate_intents(
         self,
@@ -3276,6 +3313,83 @@ async def test_handle_position_closed_reflect_failure_does_not_break_close_flow(
     assert reflect_payload["risk_report"] == "test"
 
 
+async def test_handle_position_closed_passes_identity_to_memory_journal(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Closed trade journaling should pass intent_id and position_id to MemoryJournal."""
+    import json
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+    sched._alert_service = AsyncMock()
+    sched._memory_journal = MagicMock()
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+    store.update_intent_decision(
+        claimed.id, "BUY", sl_pips=50.0, tp_pips=100.0, risk_report="test", state_json="{}"
+    )
+    store.mark_ready_for_exec(claimed.id)
+    store.mark_executing(claimed.id)
+    store.mark_opened(claimed.id, position_id="pos-journal")
+    store.update_execution_meta(
+        claimed.id,
+        json.dumps(
+            {
+                "fill_price": 1.085,
+                "volume": 0.05,
+                "side": "BUY",
+                "sl_price": 1.080,
+                "tp_price": 1.095,
+            }
+        ),
+    )
+
+    closed_pos = MagicMock(
+        position_id="pos-journal",
+        profit=18.0,
+        close_price=1.0950,
+        open_price=1.085,
+        volume=0.05,
+    )
+    mock_matchtrader.get_closed_positions = AsyncMock(return_value=[closed_pos])
+    mock_matchtrader.get_balance.return_value = MagicMock(
+        balance=50018.0,
+        equity=50018.0,
+        margin=0.0,
+        free_margin=50018.0,
+    )
+
+    opened_intent = store.get_intent(claimed.id)
+    await sched._handle_position_closed(opened_intent)
+
+    sched._memory_journal.append_trade_result.assert_called_once_with(
+        intent_id=claimed.id,
+        position_id="pos-journal",
+        symbol="EURUSD",
+        pnl=18.0,
+        reason="tp_hit",
+    )
+
+
 # ── v1.3.9: Tactical Gate Enforcement Tests ──────────────────────────────
 
 
@@ -3766,6 +3880,35 @@ async def test_fetch_tactical_data_uses_hub_rest_fallback_for_stale_symbol(
     assert data.bars_5min.equals(bars_5min)
     assert data.bars_1h.equals(bars_1h)
     assert data.data_source == "rest_fallback"
+
+
+def test_build_metrics_snapshot_includes_market_data_feed_status(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+    sched._market_data_ready = True
+    sched._market_data_hub = MagicMock()
+    sched._market_data_hub.feed_status.return_value = {
+        "websocket": {"state": "degraded", "last_error": "ping timeout"},
+        "forced_stale_symbols": ["EURUSD"],
+    }
+
+    snapshot = sched._build_metrics_snapshot()
+
+    assert snapshot["market_data"]["websocket"]["state"] == "degraded"
+    assert snapshot["market_data"]["forced_stale_symbols"] == ["EURUSD"]
 
 
 async def test_fetch_tactical_data_uses_quote_timestamp(
