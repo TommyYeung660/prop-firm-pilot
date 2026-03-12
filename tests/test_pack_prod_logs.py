@@ -53,7 +53,7 @@ def test_write_index_uses_actual_summary_listing(tmp_path: Path) -> None:
 
     pack_prod_logs._write_index(
         index_path=index_path,
-        version="v1.4.1",
+        version="v1.4.2",
         date_range="2026-03-11 to 2026-03-12",
         timestamp="2026-03-12 06:00:00 UTC",
         summary_listing=summary_listing,

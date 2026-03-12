@@ -8,7 +8,7 @@ everything into a single archive.
 Usage:
     python scripts/pack_prod_logs.py --config config/e8_one_5k_challenge.yaml
     python scripts/pack_prod_logs.py --config config/e8_one_5k_challenge.yaml \
-        --version v1.4.1 --days 5
+        --version v1.4.2 --days 5
     python scripts/pack_prod_logs.py --config config/e8_one_5k_challenge.yaml --no-summarize
 """
 

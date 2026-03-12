@@ -2,7 +2,7 @@
 
 > **更新日期**: 2026-03-12
 >
-> **當前版本**: v1.4.1（Production Reliability / Observability Hardening）
+> **當前版本**: v1.4.2（Runtime Hardening + Observability）
 >
 > **涵蓋範圍**: `prop-firm-pilot` · `qlib_market_scanner` · `TradingAgents` 三倉庫協作
 >
