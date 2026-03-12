@@ -1,9 +1,12 @@
 # PropFirmPilot v1.4.0 之後 — 發展路線圖
 
-> **更新日期**: 2026-03-12  
-> **當前版本**: v1.4.1（Production Reliability / Observability Hardening）  
-> **涵蓋範圍**: `prop-firm-pilot` · `qlib_market_scanner` · `TradingAgents` 三倉庫協作  
-> **帳戶階段**: E8 Markets One-Phase $5,000 Challenge  
+> **更新日期**: 2026-03-12
+>
+> **當前版本**: v1.4.1（Production Reliability / Observability Hardening）
+>
+> **涵蓋範圍**: `prop-firm-pilot` · `qlib_market_scanner` · `TradingAgents` 三倉庫協作
+>
+> **帳戶階段**: E8 Markets One-Phase $5,000 Challenge
 
 ---
 
@@ -106,7 +109,7 @@
 - bull / bear / judge 等其他 agent node 仍可能沒有共享同等程度的歷史教訓
 - 學習效果仍偏單點增益，而不是整張 decision graph 的共同記憶
 
-**結論**：下一步不是再做「有沒有 lessons」，而是做「lessons 分佈到哪些節點」。  
+**結論**：下一步不是再做「有沒有 lessons」，而是做「lessons 分佈到哪些節點」。
 
 ### 3.2 WebSocket-first 目前主要覆蓋 market data path
 
@@ -116,7 +119,7 @@
 - equity / account state 仍不是真正串流
 - REST fallback 的即時性，仍不等於 live tick feed
 
-**結論**：下一步要做的是 runtime hardening、status telemetry、fallback quality，而不是宣稱整個系統都已 fully streaming。  
+**結論**：下一步要做的是 runtime hardening、status telemetry、fallback quality，而不是宣稱整個系統都已 fully streaming。
 
 ### 3.3 MarketDataHub 缺少更清楚的 ops observability
 
@@ -126,7 +129,7 @@
 - feed stale 是偶發還是系統性問題
 - warmup 視窗、hub lookback 與實際 downstream 需求是否一致
 
-**結論**：若沒有把 source telemetry 與狀態輸出做好，WebSocket-first 只會變成「理論上更快」，而不是「營運上更透明」。  
+**結論**：若沒有把 source telemetry 與狀態輸出做好，WebSocket-first 只會變成「理論上更快」，而不是「營運上更透明」。
 
 ### 3.4 Exit quality 仍落後於 entry quality
 
@@ -136,7 +139,7 @@
 - 波動 regime 變化對 stop/target 的調整仍有限
 - 緊急事件下的分級反應仍不夠明確
 
-**結論**：若下一版不補 exit management，系統會出現「進場比以前聰明，但出場仍偏保守靜態」的結構失衡。  
+**結論**：若下一版不補 exit management，系統會出現「進場比以前聰明，但出場仍偏保守靜態」的結構失衡。
 
 ### 3.5 缺少 portfolio-level risk view
 
@@ -146,7 +149,7 @@
 - 高相關幣對同向持倉
 - 同一事件下多筆倉位同時承受跳空風險
 
-**結論**：相關性檢測與組合曝險限制，應該在 learning loop 之後成為下一個高優先交易品質項目。  
+**結論**：相關性檢測與組合曝險限制，應該在 learning loop 之後成為下一個高優先交易品質項目。
 
 ### 3.6 Scanner 與 LLM 工具鏈仍有延遲壓縮空間
 
@@ -156,7 +159,7 @@
 - `TradingAgents` 周邊工具鏈尚未全面 async 化
 - `observe -> rescan -> decide` 的事件傳播延遲還可再縮短
 
-**結論**：`v2.0.0` 的重點不應只是「更多功能」，而應是把現有控制面再往事件驅動與低延遲推進一步。  
+**結論**：`v2.0.0` 的重點不應只是「更多功能」，而應是把現有控制面再往事件驅動與低延遲推進一步。
 
 ---
 
@@ -262,7 +265,7 @@ Dashboard 仍然值得做，但它的正確時機是在控制面成熟之後，�
 
 #### 判斷原則
 
-Dashboard 的價值在於讓成熟系統更可控，而不是替不穩定系統做漂亮外殼。  
+Dashboard 的價值在於讓成熟系統更可控，而不是替不穩定系統做漂亮外殼。
 
 ### 4.5 v3.0.0 — 擴張到 $50k 與多帳號治理
 
@@ -284,7 +287,7 @@ Dashboard 的價值在於讓成熟系統更可控，而不是替不穩定系統�
 
 #### 判斷原則
 
-多帳號與大資金不是功能伸展，而是治理能力伸展；在此之前，必須先把單帳號控制面做到穩、快、可學習、可解釋。  
+多帳號與大資金不是功能伸展，而是治理能力伸展；在此之前，必須先把單帳號控制面做到穩、快、可學習、可解釋。
 
 ---
 
