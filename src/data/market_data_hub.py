@@ -133,6 +133,8 @@ class MarketDataHub:
                 bars=bars,
             )
         self._record_market_data_read("rest_fallback", rows_fetched)
+        if bars is None or bars.empty or not self._bars_are_fresh(bars):
+            return QuoteResult(symbol=symbol, source="rest_fallback", quote=None)
         quote = self._build_quote_from_bars(symbol, bars)
         return QuoteResult(symbol=symbol, source="rest_fallback", quote=quote)
 

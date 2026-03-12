@@ -747,15 +747,16 @@ class DecisionStore:
         side: str,
         trade_date: str,
     ) -> int:
-        """Count intents that reached execution for this symbol+direction today.
+        """Count still-active same-direction execution intents for this trade date.
 
-        Counts opened + closed intents (any that got past the 'executing' stage).
+        Closed trades do not count. Once the symbol is flat again, same-day
+        re-entry should still be allowed.
         """
         row = self._conn.execute(
             """SELECT COUNT(*) as cnt FROM intents
                WHERE symbol = :symbol AND trade_date = :td
                  AND suggested_side = :side
-                 AND status IN ('opened', 'closed')""",
+                 AND status IN ('ready_for_exec', 'executing', 'opened')""",
             {"symbol": symbol, "td": trade_date, "side": side},
         ).fetchone()
         return row["cnt"] if row else 0

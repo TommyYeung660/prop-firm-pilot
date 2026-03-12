@@ -220,6 +220,50 @@ async def test_market_data_hub_quote_fallback_refreshes_from_cached_tail() -> No
 
 
 @pytest.mark.asyncio
+async def test_market_data_hub_returns_no_quote_when_rest_fallback_tail_is_still_stale() -> None:
+    now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
+    provider = DummyProvider(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T10:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    hub = MarketDataHub(
+        aggregator=FXTickAggregator(),
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=provider,
+        symbols=["EURUSD"],
+        bar_cache_max_age_seconds=60,
+        now_provider=lambda: now,
+    )
+    hub._warm_cache[("EURUSD", "1m")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T10:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    hub.mark_symbol_stale("EURUSD")
+
+    result = await hub.get_quote("EURUSD")
+
+    assert result.source == "rest_fallback"
+    assert result.quote is None
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_market_data_hub_refreshes_stale_warm_cache_incrementally() -> None:
     now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
     provider = DummyProvider(

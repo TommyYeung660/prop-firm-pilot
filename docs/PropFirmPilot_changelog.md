@@ -40,6 +40,36 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.5a] — 2026-03-13
+**Tactical Re-entry And Stale Quote Guard**
+
+> **Status**: Released hotfix for the first `v1.4.5` production run
+> **Reason**: Post-`2026-03-12 23:00` production artifacts showed same-direction entry blocking after flat closes, and `MarketDataHub` was still emitting synthetic quotes from clearly stale REST `1m` tails during websocket degradation
+
+### Fixed
+- `same-direction` duplicate entry guard no longer counts `closed` intents as active same-day attempts
+- same-day re-entry is now allowed again once the symbol is flat, while still counting `ready_for_exec` / `executing` / `opened` intents as active
+- `MarketDataHub.get_quote()` no longer returns a synthetic quote when REST fallback `1m` bars are still stale after refresh / no-progress suppression
+- stale REST `1m` fallback data can no longer feed downstream quote consumers such as volatility monitoring as if it were current market data
+
+### Root Cause
+- `DecisionStore.count_same_direction_today()` counted both `opened` and `closed` intents
+- with `max_same_direction_per_day = 1`, one completed AUDUSD SELL on `2026-03-12` caused later flat-state AUDUSD SELL intents to be cancelled with `Same-direction limit ... already attempted 1x today`
+- `MarketDataHub.get_quote()` used bar freshness only to decide whether to refresh REST cache, but still built and returned a quote from the stale cached tail when that refresh produced no fresh progress
+
+### Added
+- regression coverage proving closed same-direction trades do not block re-entry when flat
+- regression coverage proving stale REST fallback tails do not produce a usable quote
+
+### Files
+- `src/decision_store/sqlite_store.py`
+- `src/data/market_data_hub.py`
+- `tests/test_duplicate_entry_limit.py`
+- `tests/data/test_market_data_hub.py`
+- `pyproject.toml`
+
+---
+
 ## [1.4.1] — 2026-03-12
 **Production Reliability / Observability Hardening**
 

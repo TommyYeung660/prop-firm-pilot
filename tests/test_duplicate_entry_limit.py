@@ -3,8 +3,8 @@ Tests for same-symbol same-direction duplicate entry limit (P2.6).
 
 Validates:
 1. has_active_position_for_symbol detects opened intents for a symbol
-2. count_same_direction_today counts executed trades in same direction
-3. Different direction still allowed (SELL blocked, BUY allowed)
+2. count_same_direction_today counts active same-direction intents only
+3. Closed trades do not block same-day re-entry when flat
 4. Different date or symbol does not count
 """
 
@@ -95,34 +95,39 @@ class TestCountSameDirectionToday:
         return DecisionStore(db_path=f"{tmp_path}/test.db")
 
     def test_count_same_direction_basic(self, store: DecisionStore) -> None:
-        """2 EURUSD SELL today → count returns 2."""
-        _make_closed_intent(store, side="SELL")
-        _make_closed_intent(store, side="SELL")
+        """2 opened EURUSD SELL today → count returns 2."""
+        _make_opened_intent(store, side="SELL")
+        _make_opened_intent(store, side="SELL")
         assert store.count_same_direction_today("EURUSD", "SELL", "2026-03-09") == 2
 
     def test_count_ignores_different_direction(self, store: DecisionStore) -> None:
         """EURUSD BUY doesn't count toward SELL."""
-        _make_closed_intent(store, side="SELL")
-        _make_closed_intent(store, side="BUY")
+        _make_opened_intent(store, side="SELL")
+        _make_opened_intent(store, side="BUY")
         assert store.count_same_direction_today("EURUSD", "SELL", "2026-03-09") == 1
 
     def test_count_ignores_different_date(self, store: DecisionStore) -> None:
         """Different trade_date doesn't count."""
-        _make_closed_intent(store, trade_date="2026-03-09")
-        _make_closed_intent(store, trade_date="2026-03-08")
+        _make_opened_intent(store, trade_date="2026-03-09")
+        _make_opened_intent(store, trade_date="2026-03-08")
         assert store.count_same_direction_today("EURUSD", "SELL", "2026-03-09") == 1
 
     def test_count_ignores_different_symbol(self, store: DecisionStore) -> None:
         """GBPUSD SELL doesn't count toward EURUSD SELL."""
-        _make_closed_intent(store, symbol="EURUSD", side="SELL")
-        _make_closed_intent(store, symbol="GBPUSD", side="SELL")
+        _make_opened_intent(store, symbol="EURUSD", side="SELL")
+        _make_opened_intent(store, symbol="GBPUSD", side="SELL")
         assert store.count_same_direction_today("EURUSD", "SELL", "2026-03-09") == 1
 
-    def test_count_includes_opened_and_closed(self, store: DecisionStore) -> None:
-        """Both opened and closed intents count."""
+    def test_count_ignores_closed_trades_when_flat(self, store: DecisionStore) -> None:
+        """A closed EURUSD SELL should not block same-day re-entry when flat."""
+        _make_closed_intent(store)
+        assert store.count_same_direction_today("EURUSD", "SELL", "2026-03-09") == 0
+
+    def test_count_includes_opened_but_not_closed(self, store: DecisionStore) -> None:
+        """Only still-open same-direction intents count."""
         _make_closed_intent(store)
         _make_opened_intent(store, side="SELL")
-        assert store.count_same_direction_today("EURUSD", "SELL", "2026-03-09") == 2
+        assert store.count_same_direction_today("EURUSD", "SELL", "2026-03-09") == 1
 
     def test_count_zero(self, store: DecisionStore) -> None:
         """No matching intents → 0."""

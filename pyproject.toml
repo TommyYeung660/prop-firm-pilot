@@ -1,6 +1,6 @@
 [project]
 name = "prop-firm-pilot"
-version = "1.4.2"
+version = "1.4.5a"
 description = "Fully automated FX trading system for E8 Markets prop firm accounts"
 requires-python = ">=3.10,<3.11"
 dependencies = [
