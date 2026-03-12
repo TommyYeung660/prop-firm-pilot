@@ -554,7 +554,8 @@ async def _run_scheduler(config: AppConfig) -> None:
 
 def setup_logging(config: AppConfig) -> None:
     """Configure loguru logging from config."""
-    log_dir = Path(config.logging.file).parent
+    run_log_path = _build_run_log_path(Path(config.logging.file))
+    log_dir = run_log_path.parent
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logger.remove()  # Remove default handler
@@ -564,12 +565,28 @@ def setup_logging(config: AppConfig) -> None:
         format="<green>{time:HH:mm:ss}</green> | <level>{level:8}</level> | {message}",
     )
     logger.add(
-        config.logging.file,
+        run_log_path,
         level=config.logging.level,
         rotation=config.logging.rotation,
         retention=config.logging.retention,
         encoding="utf-8",
     )
+
+
+def _build_run_log_path(
+    base_path: Path,
+    now: datetime | None = None,
+    release_tag: str | None = None,
+) -> Path:
+    """Build a per-run log file path from the configured base log path."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if release_tag is None:
+        release_tag = get_release_tag()
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+    suffix = base_path.suffix or ".log"
+    filename = f"{base_path.stem}_{timestamp}_{release_tag}{suffix}"
+    return base_path.with_name(filename)
 
 
 def main() -> None:

@@ -1276,6 +1276,8 @@ class Scheduler:
         5-min and 1-hour OHLCV bars required by ATR, EMA, RSI, and candle gates.
         """
         data = TacticalData()
+        hub_supplied_data = False
+        hub_quote_has_timestamp = False
         instrument = self._config.instruments.get(symbol)
         if instrument:
             data.typical_spread = instrument.avg_spread_pips * instrument.pip_size
@@ -1292,6 +1294,7 @@ class Scheduler:
                 data.current_spread = abs(ask - bid)
                 if ts_ms:
                     data.latest_bar_time = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+                    hub_quote_has_timestamp = True
             except Exception as e:
                 logger.warning("Failed to fetch hub quote for {}: {}", symbol, e)
 
@@ -1332,7 +1335,10 @@ class Scheduler:
                     data.data_source = next(iter(sources))
                 elif sources:
                     data.data_source = "mixed"
-                if data.current_spread > 0 or not data.bars_5min.empty or not data.bars_1h.empty:
+                hub_supplied_data = (
+                    data.current_spread > 0 or not data.bars_5min.empty or not data.bars_1h.empty
+                )
+                if hub_supplied_data and hub_quote_has_timestamp:
                     return data
             except Exception as e:
                 logger.warning("Failed to fetch hub intraday bars for {}: {}", symbol, e)
@@ -1367,6 +1373,14 @@ class Scheduler:
                     )
         except Exception as e:
             logger.debug("Failed to fetch quote for {}: {}", symbol, e)
+
+        if hub_supplied_data:
+            if data.latest_bar_time is None and not data.bars_5min.empty:
+                latest_bar = pd.Timestamp(data.bars_5min.iloc[-1]["datetime"]).to_pydatetime()
+                if latest_bar.tzinfo is None:
+                    latest_bar = latest_bar.replace(tzinfo=timezone.utc)
+                data.latest_bar_time = latest_bar
+            return data
 
         # ── Intraday bars from EODHD ────────────────────────────────────────
         if self._eodhd:

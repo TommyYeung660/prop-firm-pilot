@@ -40,6 +40,35 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.6b] — 2026-03-13
+**Tactical Freshness Recovery + Prod Bundle Dropbox Sync**
+
+> **Status**: Released tactical-entry hotfix and diagnostics workflow upgrade
+> **Reason**: Tactical WAITs were still getting stuck on `data_freshness` during degraded market-data periods, and prod diagnostics packaging/export was still too manual for fast incident analysis
+
+### Fixed
+- `Scheduler._fetch_tactical_data()` 不再因為 hub 只拿到 bars 就提早返回；現在若 hub 沒有提供可用 quote timestamp，仍會回退到 MatchTrader quote 取得 freshness timestamp
+- tactical hard gate 的 `data_freshness` 在 websocket degraded / mixed-source 情境下，不會再因為略過 broker quote fallback 而錯誤卡住進場
+- 針對這次 `NZDUSD` / `USDCHF` 症狀做了 live probe；EODHD websocket 已驗證可對 7 個配置貨幣對持續出 tick，新增 pair 不是根因
+- `DropboxArtifactsClient` 對 Dropbox `not_found` 的判斷改為只接受真正的 `LookupError.not_found`，避免把其他 path 類錯誤誤當成缺資料夾
+- `pack_prod_logs.py` 生成 log summary 時，現在會正確讀取 run-specific log files，不會因為新的 logging 策略而漏讀主要執行日誌
+
+### Added
+- `scripts/pack_prod_logs.py` 現在會把 diagnostics zip 自動上傳到 Dropbox 路徑 `/prop-firm-pilot/prod_logs/<account_name>/`
+- 新增 `scripts/unpack_prod_logs.py`，可從 Dropbox 下載最新 prod bundle 並解壓到 repo 根目錄
+- prod bundle 內新增 `bundle_manifest.json`、`raw/config/` config snapshots，以及 manifest 內的 included config file listing，方便 LLM 對齊版本、account、config 與 included files
+- 新增回歸測試，覆蓋「hub 只有 bars、沒有 freshness quote 時仍須回退到 MatchTrader」以及 Dropbox `not_found` 錯誤辨識
+
+### Changed
+- runtime logging 改為每次程序啟動建立新的 run-specific log file，而不是持續增長單一 `prop_firm_pilot.log`
+- `pack_prod_logs.py` 的 log 收集與摘要來源改為優先匹配 `prop_firm_pilot_*.log*` 與舊格式 `prop_firm_pilot.log*`，減少無關 log 噪音並對齊新的 per-run logging
+
+### Operational Notes
+- `2026-03-13` live websocket probe 已證實：`EURUSD / GBPUSD / USDJPY / AUDUSD / NZDUSD / USDCAD / USDCHF` 全部都有 websocket ticks
+- 同一次 probe 也再次證實：EODHD REST `1min` bar 仍明顯落後當前時間，因此 degraded 狀態下仍可能看到 `REST fallback` warning；本版修的是 tactical freshness 不再因此被誤卡死，不是根治 EODHD REST lag
+
+---
+
 ## [1.4.5a] — 2026-03-13
 **Tactical Re-entry And Stale Quote Guard**
 

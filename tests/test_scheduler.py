@@ -3882,6 +3882,80 @@ async def test_fetch_tactical_data_uses_hub_rest_fallback_for_stale_symbol(
     assert data.data_source == "rest_fallback"
 
 
+async def test_fetch_tactical_data_uses_matchtrader_quote_when_hub_has_bars_only(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """When hub only has bars, scheduler should still fetch broker quote for freshness."""
+    import time
+
+    import pandas as pd
+
+    now_ms = int(time.time() * 1000)
+    mock_matchtrader.get_quote.return_value = {
+        "ask": 0.6012,
+        "bid": 0.6009,
+        "timestampMs": now_ms - 15_000,
+    }
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    bars_5min = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T22:00:00Z"),
+                "open": 0.6010,
+                "high": 0.6020,
+                "low": 0.6000,
+                "close": 0.6015,
+                "volume": 0,
+            }
+        ]
+    )
+    bars_1h = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T22:00:00Z"),
+                "open": 0.5990,
+                "high": 0.6030,
+                "low": 0.5980,
+                "close": 0.6015,
+                "volume": 0,
+            }
+        ]
+    )
+    sched._market_data_ready = True
+    sched._market_data_hub = MagicMock()
+    sched._market_data_hub.get_quote = AsyncMock(
+        return_value=MagicMock(source="rest_fallback", quote=None)
+    )
+    sched._market_data_hub.get_bars = AsyncMock(
+        side_effect=[
+            MagicMock(source="rest_fallback", bars=bars_5min),
+            MagicMock(source="rest_fallback", bars=bars_1h),
+        ]
+    )
+
+    data = await sched._fetch_tactical_data("NZDUSD")
+
+    mock_matchtrader.get_quote.assert_awaited_once()
+    assert data.bars_5min.equals(bars_5min)
+    assert data.bars_1h.equals(bars_1h)
+    assert data.current_spread == pytest.approx(0.0003)
+    assert data.latest_bar_time is not None
+
+
 def test_build_metrics_snapshot_includes_market_data_feed_status(
     config: AppConfig,
     store: DecisionStore,

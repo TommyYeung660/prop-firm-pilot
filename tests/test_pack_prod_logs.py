@@ -1,5 +1,6 @@
-"""Tests for production log packer fallback summaries and INDEX generation."""
+"""Tests for production log packer fallback summaries and bundle metadata."""
 
+import json
 from pathlib import Path
 
 from scripts import pack_prod_logs
@@ -64,3 +65,138 @@ def test_write_index_uses_actual_summary_listing(tmp_path: Path) -> None:
     assert "summary/log_summary.md" in content
     assert "summary/decisions_summary.md" in content
     assert "summary/telegram_summary.md" not in content
+
+
+def test_build_dropbox_bundle_dir_uses_account_name() -> None:
+    remote_dir = pack_prod_logs._build_dropbox_bundle_dir("e8_one_5k_challenge")
+
+    assert remote_dir == "/prop-firm-pilot/prod_logs/e8_one_5k_challenge"
+
+
+def test_write_config_snapshots_writes_default_account_and_merged(tmp_path: Path) -> None:
+    default_config_path = tmp_path / "config" / "default.yaml"
+    account_config_path = tmp_path / "config" / "e8_one_5k_challenge.yaml"
+    default_config_path.parent.mkdir(parents=True, exist_ok=True)
+    default_config_path.write_text("symbols:\n  - EURUSD\n", encoding="utf-8")
+    account_config_path.write_text("account_name: e8_one_5k_challenge\n", encoding="utf-8")
+
+    raw_config_dir = tmp_path / "raw" / "config"
+    merged_config = {
+        "account_name": "e8_one_5k_challenge",
+        "symbols": ["EURUSD", "GBPUSD"],
+    }
+
+    pack_prod_logs._write_config_snapshots(
+        raw_config_dir=raw_config_dir,
+        default_config_path=default_config_path,
+        account_config_path=account_config_path,
+        merged_config=merged_config,
+    )
+
+    assert (raw_config_dir / "default.yaml").exists()
+    assert (raw_config_dir / "e8_one_5k_challenge.yaml").exists()
+    merged_snapshot = raw_config_dir / "merged_config.yaml"
+    assert merged_snapshot.exists()
+    assert "GBPUSD" in merged_snapshot.read_text(encoding="utf-8")
+
+
+def test_write_bundle_manifest_records_metadata_and_included_files(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "bundle_manifest.json"
+
+    pack_prod_logs._write_bundle_manifest(
+        manifest_path=manifest_path,
+        account_name="e8_one_5k_challenge",
+        config_path="config/e8_one_5k_challenge.yaml",
+        version="v1.4.5a",
+        app_version="1.4.5a",
+        generated_at_utc="2026-03-13T10:00:00+00:00",
+        days=7,
+        date_range="2026-03-06 to 2026-03-13",
+        bundle_folder="prod_logs_20260313_v1.4.5a",
+        zip_name="prod_logs_20260313_v1.4.5a.zip",
+        git_commit="abc123",
+        git_branch="main",
+        included_logs=["raw/logs/prop_firm_pilot_20260313_091530_v1.4.5a.log"],
+        included_data_files=["raw/data/trade_journal_e8_one_5k.jsonl"],
+        included_config_files=[
+            "raw/config/default.yaml",
+            "raw/config/e8_one_5k_challenge.yaml",
+            "raw/config/merged_config.yaml",
+        ],
+        included_summary_files=["summary/log_summary.md"],
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["account_name"] == "e8_one_5k_challenge"
+    assert payload["config_path"] == "config/e8_one_5k_challenge.yaml"
+    assert payload["version"] == "v1.4.5a"
+    assert payload["git_commit"] == "abc123"
+    assert payload["included_logs"] == ["raw/logs/prop_firm_pilot_20260313_091530_v1.4.5a.log"]
+    assert payload["included_config_files"] == [
+        "raw/config/default.yaml",
+        "raw/config/e8_one_5k_challenge.yaml",
+        "raw/config/merged_config.yaml",
+    ]
+
+
+def test_upload_bundle_zip_uses_expected_dropbox_path(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, str] = {}
+    zip_path = tmp_path / "prod_logs_20260313_v1.4.5a.zip"
+    zip_path.write_text("zip", encoding="utf-8")
+
+    class _FakeClient:
+        def upload_file(self, local_path: Path, remote_path: str) -> None:
+            captured["local_path"] = str(local_path)
+            captured["remote_path"] = remote_path
+
+    monkeypatch.setattr("scripts.pack_prod_logs.DropboxArtifactsClient", lambda: _FakeClient())
+
+    remote_path = pack_prod_logs._upload_bundle_zip(
+        zip_path=zip_path,
+        account_name="e8_one_5k_challenge",
+    )
+
+    assert remote_path == (
+        "/prop-firm-pilot/prod_logs/e8_one_5k_challenge/prod_logs_20260313_v1.4.5a.zip"
+    )
+    assert captured["local_path"] == str(zip_path)
+    assert captured["remote_path"] == remote_path
+
+
+def test_upload_bundle_zip_keeps_local_zip_when_upload_fails(tmp_path: Path, monkeypatch) -> None:
+    zip_path = tmp_path / "prod_logs_20260313_v1.4.5a.zip"
+    zip_path.write_text("zip", encoding="utf-8")
+
+    class _FakeClient:
+        def upload_file(self, local_path: Path, remote_path: str) -> None:
+            raise RuntimeError("upload failed")
+
+    monkeypatch.setattr("scripts.pack_prod_logs.DropboxArtifactsClient", lambda: _FakeClient())
+
+    try:
+        pack_prod_logs._upload_bundle_zip(
+            zip_path=zip_path,
+            account_name="e8_one_5k_challenge",
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "upload failed"
+    else:
+        raise AssertionError("Expected upload failure to propagate")
+
+    assert zip_path.exists()
+
+
+def test_load_log_content_uses_run_specific_logs_when_base_log_missing(tmp_path: Path) -> None:
+    cutoff = pack_prod_logs.datetime(2000, 1, 1, 0, 0, tzinfo=pack_prod_logs.timezone.utc)
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    run_log = logs_dir / "prop_firm_pilot_20260313_091530_v1.4.5a.log"
+    run_log.write_text("run-specific content", encoding="utf-8")
+
+    content = pack_prod_logs._load_log_content(
+        log_file=logs_dir / "prop_firm_pilot.log",
+        cutoff=cutoff,
+        max_chars=1000,
+    )
+
+    assert "run-specific content" in content

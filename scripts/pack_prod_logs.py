@@ -2,8 +2,8 @@
 Pack production logs, data artifacts, and LLM summaries for PropFirmPilot.
 
 Collects raw production outputs, exports Telegram messages, generates
-LLM-optimized summaries via gpt-5.4, builds an INDEX, and zips
-everything into a single archive.
+LLM-optimized summaries via gpt-5.4, writes bundle metadata, zips
+everything into a single archive, and uploads the archive to Dropbox.
 
 Usage:
     python scripts/pack_prod_logs.py --config config/e8_one_5k_challenge.yaml
@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import zipfile
 from collections import Counter
 from collections.abc import Iterable
@@ -30,6 +31,7 @@ import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
+from src.ops.dropbox_artifacts import DropboxArtifactsClient
 from src.version import get_app_version, get_release_tag
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -139,6 +141,117 @@ def _get_config_value(config: dict[str, Any], keys: list[str], default: str) -> 
     return str(cursor)
 
 
+def _resolve_account_name(config: dict[str, Any], config_path: Path) -> str:
+    """Resolve account_name from config, falling back to the config file stem."""
+    return _get_config_value(config, ["account_name"], config_path.stem)
+
+
+def _build_dropbox_bundle_dir(account_name: str) -> str:
+    """Build the Dropbox folder path for a given account's prod bundles."""
+    return f"/prop-firm-pilot/prod_logs/{account_name}"
+
+
+def _build_dropbox_bundle_path(account_name: str, zip_name: str) -> str:
+    """Build the Dropbox file path for a bundle zip."""
+    return f"{_build_dropbox_bundle_dir(account_name)}/{zip_name}"
+
+
+def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
+    """Write a YAML file with stable formatting for bundle snapshots."""
+    try:
+        _ensure_dir(path.parent)
+        path.write_text(
+            yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        logger.info("Wrote YAML snapshot {}", path)
+    except OSError as exc:
+        logger.error("Failed to write YAML {}: {}", path, exc)
+
+
+def _write_config_snapshots(
+    raw_config_dir: Path,
+    default_config_path: Path,
+    account_config_path: Path,
+    merged_config: dict[str, Any],
+) -> None:
+    """Persist default, account, and merged YAML snapshots into the bundle."""
+    _ensure_dir(raw_config_dir)
+    _copy_file(default_config_path, raw_config_dir / default_config_path.name)
+    _copy_file(account_config_path, raw_config_dir / account_config_path.name)
+    _write_yaml(raw_config_dir / "merged_config.yaml", merged_config)
+
+
+def _git_output(args: list[str]) -> str | None:
+    """Run a small git command and return stripped stdout when available."""
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    output = result.stdout.strip()
+    return output or None
+
+
+def _write_bundle_manifest(
+    manifest_path: Path,
+    account_name: str,
+    config_path: str,
+    version: str,
+    app_version: str,
+    generated_at_utc: str,
+    days: int,
+    date_range: str,
+    bundle_folder: str,
+    zip_name: str,
+    git_commit: str | None,
+    git_branch: str | None,
+    included_logs: list[str],
+    included_data_files: list[str],
+    included_config_files: list[str],
+    included_summary_files: list[str],
+) -> None:
+    """Write machine-readable bundle metadata for downstream tooling and LLMs."""
+    payload = {
+        "account_name": account_name,
+        "config_path": config_path,
+        "version": version,
+        "app_version": app_version,
+        "generated_at_utc": generated_at_utc,
+        "days": days,
+        "date_range": date_range,
+        "bundle_folder": bundle_folder,
+        "zip_name": zip_name,
+        "git_commit": git_commit,
+        "git_branch": git_branch,
+        "included_logs": included_logs,
+        "included_data_files": included_data_files,
+        "included_config_files": included_config_files,
+        "included_summary_files": included_summary_files,
+    }
+    try:
+        _ensure_dir(manifest_path.parent)
+        manifest_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info("Wrote bundle manifest {}", manifest_path)
+    except OSError as exc:
+        logger.error("Failed to write bundle manifest {}: {}", manifest_path, exc)
+
+
+def _upload_bundle_zip(zip_path: Path, account_name: str) -> str:
+    """Upload the generated bundle zip to Dropbox and return the remote path."""
+    remote_path = _build_dropbox_bundle_path(account_name, zip_path.name)
+    client = DropboxArtifactsClient()
+    client.upload_file(zip_path, remote_path)
+    return remote_path
+
+
 # ── File Utilities ──────────────────────────────────────────────────────────
 
 
@@ -192,19 +305,47 @@ def _read_text_file(path: Path, max_chars: int | None = None) -> str:
     return content
 
 
-def _collect_logs(log_file: Path, logs_dir: Path, cutoff: datetime) -> None:
+def _select_log_files(log_file: Path, cutoff: datetime) -> list[Path]:
+    """Return deduplicated log files relevant to the bundle, ordered by mtime."""
+    selected: list[Path] = []
+    seen: set[Path] = set()
     if log_file.exists():
-        if _within_days(log_file, cutoff):
-            _copy_file(log_file, logs_dir / log_file.name)
-        else:
-            _copy_file(log_file, logs_dir / log_file.name)
-            logger.warning("Log file older than cutoff, still included: {}", log_file)
-    else:
-        logger.warning("Missing log file: {}", log_file)
+        selected.append(log_file)
+        seen.add(log_file)
     if log_file.parent.exists():
-        for path in log_file.parent.glob("*.log*"):
-            if _within_days(path, cutoff):
-                _copy_file(path, logs_dir / path.name)
+        patterns = [f"{log_file.stem}_*.log*", f"{log_file.name}*"]
+        for pattern in patterns:
+            for path in log_file.parent.glob(pattern):
+                if path.is_dir() or path in seen:
+                    continue
+                if not _within_days(path, cutoff):
+                    continue
+                selected.append(path)
+                seen.add(path)
+    return sorted(selected, key=lambda path: path.stat().st_mtime)
+
+
+def _collect_logs(log_file: Path, logs_dir: Path, cutoff: datetime) -> None:
+    selected_logs = _select_log_files(log_file, cutoff)
+    if not selected_logs and not log_file.exists():
+        logger.warning("Missing log file: {}", log_file)
+    for path in selected_logs:
+        _copy_file(path, logs_dir / path.name)
+        if path == log_file and not _within_days(path, cutoff):
+            logger.warning("Log file older than cutoff, still included: {}", log_file)
+
+
+def _load_log_content(log_file: Path, cutoff: datetime, max_chars: int | None = None) -> str:
+    """Load concatenated content from selected log files for summarization."""
+    contents: list[str] = []
+    for path in _select_log_files(log_file, cutoff):
+        content = _read_text_file(path)
+        if content:
+            contents.append(content)
+    combined = "\n\n".join(contents)
+    if max_chars is not None and len(combined) > max_chars:
+        return combined[-max_chars:]
+    return combined
 
 
 def _collect_data_files(raw_data_dir: Path, paths: Iterable[Path], cutoff: datetime) -> None:
@@ -587,6 +728,17 @@ def _collect_summary_file_listing(summary_dir: Path) -> list[str]:
     return entries
 
 
+def _collect_relative_paths(base_dir: Path, root_dir: Path) -> list[str]:
+    """Collect sorted file paths relative to the bundle root."""
+    if not base_dir.exists():
+        return []
+    return [
+        path.relative_to(root_dir).as_posix()
+        for path in sorted(base_dir.rglob("*"))
+        if path.is_file()
+    ]
+
+
 def _parse_jsonl_objects(content: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for line in content.splitlines():
@@ -786,6 +938,9 @@ def _write_index(
         "",
         "## 快速導覽",
         "",
+        "### Bundle Metadata",
+        "- bundle_manifest.json (machine-readable bundle context and included-file listing)",
+        "",
         "### 摘要文件 (建議先讀)",
     ]
     lines.extend(
@@ -826,6 +981,7 @@ async def _run() -> None:
 
     config_path = Path(args.config)
     config = _load_merged_config(config_path)
+    account_name = _resolve_account_name(config, config_path)
     cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
     date_range = f"{cutoff.date().isoformat()} to {datetime.now(timezone.utc).date().isoformat()}"
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -837,10 +993,19 @@ async def _run() -> None:
     raw_dir = output_dir / "raw"
     raw_logs_dir = raw_dir / "logs"
     raw_data_dir = raw_dir / "data"
+    raw_config_dir = raw_dir / "config"
 
     _ensure_dir(summary_dir)
     _ensure_dir(raw_logs_dir)
     _ensure_dir(raw_data_dir)
+    _ensure_dir(raw_config_dir)
+
+    _write_config_snapshots(
+        raw_config_dir=raw_config_dir,
+        default_config_path=Path("config/default.yaml"),
+        account_config_path=config_path,
+        merged_config=config,
+    )
 
     trade_journal_path = Path(
         _get_config_value(config, ["monitor", "trade_journal_path"], "data/trade_journal.jsonl")
@@ -880,7 +1045,7 @@ async def _run() -> None:
     logger.info("Exporting Telegram messages")
     telegram_texts = await _export_telegram(raw_dir)
 
-    log_content = _read_text_file(log_file_path, MAX_LOG_CHARS)
+    log_content = _load_log_content(log_file_path, cutoff, MAX_LOG_CHARS)
     trade_content = _load_trade_journal(trade_journal_path, cutoff)
     decisions_dump = _dump_sqlite_db(decisions_db_path)
     memory_content = _load_memory_files(memory_files)
@@ -941,9 +1106,29 @@ async def _run() -> None:
         summary_listing,
         raw_listing,
     )
+    _write_bundle_manifest(
+        manifest_path=output_dir / "bundle_manifest.json",
+        account_name=account_name,
+        config_path=config_path.as_posix(),
+        version=version,
+        app_version=get_app_version(),
+        generated_at_utc=datetime.now(timezone.utc).isoformat(),
+        days=args.days,
+        date_range=date_range,
+        bundle_folder=folder_name,
+        zip_name=f"{folder_name}.zip",
+        git_commit=_git_output(["git", "rev-parse", "HEAD"]),
+        git_branch=_git_output(["git", "branch", "--show-current"]),
+        included_logs=_collect_relative_paths(raw_logs_dir, output_dir),
+        included_data_files=_collect_relative_paths(raw_data_dir, output_dir),
+        included_config_files=_collect_relative_paths(raw_config_dir, output_dir),
+        included_summary_files=_collect_relative_paths(summary_dir, output_dir),
+    )
 
     output_zip = output_base / f"{folder_name}.zip"
     _zip_directory(output_dir, output_zip)
+    remote_path = _upload_bundle_zip(output_zip, account_name)
+    logger.info("Uploaded prod bundle to Dropbox: {}", remote_path)
 
 
 def main() -> None:
