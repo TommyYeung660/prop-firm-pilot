@@ -414,6 +414,46 @@ class TacticalIntentDedupConfig(BaseModel):
     )
 
 
+class TacticalExitConfig(BaseModel):
+    """Dynamic exit settings for tactical open-position management."""
+
+    enabled: bool = Field(default=True, description="Enable tactical exit management")
+    evaluation_interval_seconds: int = Field(
+        default=60, description="Evaluation cadence for open positions"
+    )
+    breakeven_activation_r: float = Field(
+        default=0.3, description="Move stop to breakeven after this many R of open profit"
+    )
+    atr_trailing_multiplier: float = Field(
+        default=2.5, description="ATR multiplier for trailing stop calculations"
+    )
+    trend_extension_tp_atr_multiplier: float = Field(
+        default=1.5, description="ATR multiplier for take-profit extension in healthy trends"
+    )
+    profit_protection_tp_atr_multiplier: float = Field(
+        default=0.75, description="ATR multiplier for take-profit contraction in weakening regimes"
+    )
+    partial_close_ratio: float = Field(default=0.5, description="One-time partial close ratio")
+    partial_close_min_r: float = Field(
+        default=0.8, description="Minimum open profit in R before partial close is allowed"
+    )
+    modify_cooldown_seconds: int = Field(
+        default=300, description="Cooldown between SL/TP modifying actions"
+    )
+    tp_reprice_cooldown_seconds: int = Field(
+        default=600, description="Cooldown between take-profit repricing actions"
+    )
+    min_sl_improvement_pips: float = Field(
+        default=2.0, description="Minimum stop-loss improvement required before writing"
+    )
+    min_tp_improvement_pips: float = Field(
+        default=3.0, description="Minimum take-profit delta required before writing"
+    )
+    use_llm_exception_path: bool = Field(
+        default=True, description="Allow LLM re-evaluation only for tactical exception cases"
+    )
+
+
 class TacticalConfig(BaseModel):
     """v1.3.7: Tactical execution module configuration.
 
@@ -435,6 +475,7 @@ class TacticalConfig(BaseModel):
     retry: TacticalRetryConfig = Field(default_factory=TacticalRetryConfig)
     decision_cache: TacticalDecisionCacheConfig = Field(default_factory=TacticalDecisionCacheConfig)
     intent_dedup: TacticalIntentDedupConfig = Field(default_factory=TacticalIntentDedupConfig)
+    exit: TacticalExitConfig = Field(default_factory=TacticalExitConfig)
 
 
 class WebSocketConfig(BaseModel):

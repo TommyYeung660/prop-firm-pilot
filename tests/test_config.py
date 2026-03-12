@@ -112,6 +112,16 @@ class TestTacticalConfig:
         tc = TacticalConfig()
         assert tc.intent_dedup.cooldown_after_close_seconds == 1800
 
+    def test_tactical_exit_defaults(self) -> None:
+        from src.config import TacticalConfig
+
+        tc = TacticalConfig()
+        assert tc.exit.enabled is True
+        assert tc.exit.evaluation_interval_seconds == 60
+        assert tc.exit.breakeven_activation_r == 0.3
+        assert tc.exit.partial_close_ratio == 0.5
+        assert tc.exit.use_llm_exception_path is True
+
 
 def test_breakeven_activation_pct_from_config():
     """v1.3.9: breakeven_activation_pct should be 0.3 in e8_one_5k_challenge."""

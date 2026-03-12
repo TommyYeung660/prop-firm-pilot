@@ -12,3 +12,6 @@ class TestTacticalConfigFromYAML:
         assert config.tactical.soft_gates.min_score == 1
         assert config.tactical.decision_cache.ttl_seconds == 14400
         assert config.tactical.intent_dedup.cooldown_after_close_seconds == 1800
+        assert config.tactical.exit.enabled is True
+        assert config.tactical.exit.modify_cooldown_seconds == 300
+        assert config.tactical.exit.tp_reprice_cooldown_seconds == 600

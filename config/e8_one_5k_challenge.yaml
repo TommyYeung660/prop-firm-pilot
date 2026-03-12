@@ -167,3 +167,17 @@ tactical:
     ttl_seconds: 14400
   intent_dedup:
     cooldown_after_close_seconds: 1800
+  exit:
+    enabled: true
+    evaluation_interval_seconds: 60
+    breakeven_activation_r: 0.3
+    atr_trailing_multiplier: 2.5
+    trend_extension_tp_atr_multiplier: 1.5
+    profit_protection_tp_atr_multiplier: 0.75
+    partial_close_ratio: 0.5
+    partial_close_min_r: 0.8
+    modify_cooldown_seconds: 300
+    tp_reprice_cooldown_seconds: 600
+    min_sl_improvement_pips: 2.0
+    min_tp_improvement_pips: 3.0
+    use_llm_exception_path: true
