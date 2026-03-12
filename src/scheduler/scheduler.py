@@ -2465,8 +2465,234 @@ class Scheduler:
         evaluation: TacticalExitEvaluation,
     ) -> None:
         """Handle non-broker side effects of a tactical exit evaluation."""
+        if evaluation.decision.action != "HOLD":
+            await self._execute_tactical_exit_action(pos, intent, evaluation)
+            return
+
+        if evaluation.skip_reason:
+            event_type = (
+                "TACTICAL_EXIT_BUDGET_BLOCKED"
+                if evaluation.skip_reason == "write_budget_blocked"
+                else "TACTICAL_EXIT_SKIPPED"
+            )
+            self._log_trade_event(
+                event_type,
+                {
+                    "position_id": str(pos.position_id),
+                    "intent_id": intent.id,
+                    "symbol": intent.symbol,
+                    "reason": evaluation.skip_reason,
+                },
+            )
+
         if evaluation.requires_llm_exception_review:
             await self._reevaluate_open_positions([pos], [intent])
+
+    def _calculate_partial_close_volume(
+        self,
+        symbol: str,
+        current_volume: float,
+        ratio: float,
+    ) -> float | None:
+        """Calculate a valid partial-close volume respecting broker minimum lot size."""
+        config_symbol = symbol
+        if self._registry is not None:
+            config_symbol = self._registry.to_config_safe(symbol)
+        else:
+            config_symbol = symbol.rstrip(".")
+
+        instrument = self._config.instruments.get(config_symbol)
+        min_lot = instrument.min_lot if instrument is not None else 0.01
+        step = min_lot
+        precision = max(0, len(f"{step:.8f}".rstrip("0").split(".")[-1]))
+
+        raw_close_volume = current_volume * ratio
+        close_volume = int(raw_close_volume / step) * step
+        close_volume = round(close_volume, precision)
+        remaining_volume = round(current_volume - close_volume, precision)
+
+        if close_volume < min_lot:
+            return None
+        if remaining_volume < min_lot:
+            return None
+        return close_volume
+
+    def _update_tactical_exit_meta(
+        self,
+        intent: TradeIntent,
+        decision: Any,
+        *,
+        partial_close_volume: float | None = None,
+    ) -> None:
+        """Persist tactical exit metadata back into execution_meta."""
+        meta = self._load_execution_meta_dict(intent)
+        meta["tactical_exit_state"] = decision.state
+        meta["last_tactical_exit_action"] = decision.action
+        meta["last_tactical_exit_at"] = self._now_utc().isoformat()
+        meta["tactical_exit_reason"] = decision.reason
+
+        if decision.action == "MOVE_TO_BREAKEVEN" and decision.new_sl is not None:
+            meta["breakeven_sl"] = decision.new_sl
+        if decision.action == "TRAIL_SL" and decision.new_sl is not None:
+            meta["trailing_sl"] = decision.new_sl
+        if decision.action == "REPRICE_TP" and decision.new_tp is not None:
+            meta["dynamic_tp"] = decision.new_tp
+        if decision.action == "PARTIAL_CLOSE":
+            meta["partial_close_done"] = True
+            meta["partial_close_ratio"] = decision.partial_close_ratio
+            meta["partial_close_volume"] = partial_close_volume
+            meta["partial_close_at"] = self._now_utc().isoformat()
+
+        meta_json = json.dumps(meta, default=str)
+        self._store.update_execution_meta(intent.id, meta_json)
+
+    async def _execute_tactical_exit_action(
+        self,
+        pos: Any,
+        intent: TradeIntent,
+        evaluation: TacticalExitEvaluation,
+    ) -> None:
+        """Execute a tactical exit action and persist the result on success."""
+        decision = evaluation.decision
+        position_id = str(pos.position_id)
+
+        if decision.action == "PARTIAL_CLOSE":
+            close_volume = self._calculate_partial_close_volume(
+                intent.symbol,
+                current_volume=pos.volume,
+                ratio=decision.partial_close_ratio or 0.0,
+            )
+            if close_volume is None:
+                self._log_trade_event(
+                    "TACTICAL_EXIT_SKIPPED",
+                    {
+                        "position_id": position_id,
+                        "intent_id": intent.id,
+                        "symbol": intent.symbol,
+                        "reason": "invalid_partial_close_volume",
+                    },
+                )
+                return
+
+            result = await self._matchtrader.close_position(
+                position_id=position_id,
+                symbol=pos.symbol,
+                side=pos.side,
+                volume=close_volume,
+            )
+            if not result.success:
+                self._log_trade_event(
+                    "TACTICAL_EXIT_SKIPPED",
+                    {
+                        "position_id": position_id,
+                        "intent_id": intent.id,
+                        "symbol": intent.symbol,
+                        "reason": result.message,
+                    },
+                )
+                return
+
+            self._update_tactical_exit_meta(
+                intent,
+                decision,
+                partial_close_volume=close_volume,
+            )
+            self._log_trade_event(
+                "TACTICAL_EXIT_ACTION",
+                {
+                    "position_id": position_id,
+                    "intent_id": intent.id,
+                    "symbol": intent.symbol,
+                    "action": decision.action,
+                    "volume": close_volume,
+                },
+            )
+            return
+
+        if decision.action == "EXIT_NOW":
+            result = await self._matchtrader.close_position(
+                position_id=position_id,
+                symbol=pos.symbol,
+                side=pos.side,
+                volume=pos.volume,
+            )
+            if not result.success:
+                self._log_trade_event(
+                    "TACTICAL_EXIT_SKIPPED",
+                    {
+                        "position_id": position_id,
+                        "intent_id": intent.id,
+                        "symbol": intent.symbol,
+                        "reason": result.message,
+                    },
+                )
+                return
+
+            self._update_tactical_exit_meta(intent, decision)
+            self._log_trade_event(
+                "TACTICAL_EXIT_ACTION",
+                {
+                    "position_id": position_id,
+                    "intent_id": intent.id,
+                    "symbol": intent.symbol,
+                    "action": decision.action,
+                    "volume": pos.volume,
+                },
+            )
+            return
+
+        expected_sl = decision.new_sl if decision.new_sl is not None else pos.sl_price
+        expected_tp = decision.new_tp if decision.new_tp is not None else pos.tp_price
+        result = await self._matchtrader.modify_position(
+            position_id=position_id,
+            symbol=pos.symbol,
+            side=pos.side,
+            volume=pos.volume,
+            sl=expected_sl,
+            tp=expected_tp,
+        )
+        if not result.success:
+            self._log_trade_event(
+                "TACTICAL_EXIT_SKIPPED",
+                {
+                    "position_id": position_id,
+                    "intent_id": intent.id,
+                    "symbol": intent.symbol,
+                    "reason": result.message,
+                },
+            )
+            return
+
+        verified = await self._matchtrader.verify_sl_tp(
+            position_id=position_id,
+            expected_sl=expected_sl,
+            expected_tp=expected_tp,
+        )
+        if not verified:
+            self._log_trade_event(
+                "TACTICAL_EXIT_SKIPPED",
+                {
+                    "position_id": position_id,
+                    "intent_id": intent.id,
+                    "symbol": intent.symbol,
+                    "reason": "verify_failed",
+                },
+            )
+            return
+
+        if decision.action == "MOVE_TO_BREAKEVEN":
+            self._breakeven_applied.add(position_id)
+
+        self._update_tactical_exit_meta(intent, decision)
+        self._log_trade_event(
+            "TACTICAL_EXIT_ACTION",
+            {
+                "position_id": position_id,
+                "intent_id": intent.id,
+                "symbol": intent.symbol,
+                "action": decision.action,
+            },
+        )
 
     async def _run_tactical_exit_cycle(
         self,
