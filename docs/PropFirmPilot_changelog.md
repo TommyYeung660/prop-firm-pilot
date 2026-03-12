@@ -10,10 +10,10 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [1.4.1] — In Progress
+## [1.4.1] — 2026-03-12
 **Production Reliability / Observability Hardening**
 
-> **Status**: Worktree target release, not yet formally shipped  
+> **Status**: Released reliability / observability hardening release
 > **Reason**: Defined from the production incident review of `2026-03-11 16:33` to `2026-03-12 13:58` (UTC+8)
 
 ### Target Scope
@@ -27,13 +27,23 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - `src/version.py` 成為 shared version helper；runtime startup log 與 `scripts/pack_prod_logs.py` 改為共用同一版本來源，explicit `--version` mismatch 會 fail-fast
 - `TelegramBotHandler` 現在會把 polling failure、circuit open、probe、recovery transition 寫入 shared `OperationalMetrics`
 - `MarketDataHub` degraded path 改為優先重用 REST-backed warm cache，cache stale 時再做 incremental REST refresh，不再每次都回退到固定 lookback 全段重抓
+- `MarketDataHub` 新增 same-tail REST refresh suppression：當 stale `1m` fallback 沒有拿到更晚的最新 bar 時，短時間內不再重複整段重抓，並在 warning 補上 `latest_rest_bar_time` / `latest_rest_bar_age_sec`
 - `Scheduler` 的 `METRICS_SNAPSHOT` 現在會附帶 market-data feed status，讓 postmortem 可直接看到 websocket `healthy / degraded / disconnected` 狀態
 - `Scheduler` 現在會把 `recent_rejection_cooldown` 與 `low_confidence_cooldown` 寫成 structured `SCANNER_SKIP` event，讓 cooldown / cancel loop 可以直接回放分析
 - `scripts/pack_prod_logs.py` 現在會產生 deterministic `decisions_summary.md` / `telegram_summary.md` fallback，且 `INDEX.md` 只列出實際存在的 summary files，不再引用不存在的條目
+- 新增 `scripts/check_eodhd_websocket_live.py` 與 `src/diagnostics/eodhd_websocket_live.py`，可在 target environment 直接驗證 websocket tick flow、per-symbol tick gap，以及 EODHD REST `1min` bar lag
 
 ### Tracking
 - Incident report: `docs/PropFirmPilot_v1.4.1_Incident_Report.md`
 - Release checklist: `docs/PropFirmPilot_v1.4.1_Release_Checklist.md`
+- Websocket / fallback design: `docs/plans/2026-03-12-websocket-rest-fallback-design.md`
+- Websocket / fallback implementation plan: `docs/plans/2026-03-12-websocket-rest-fallback-fix.md`
+- Next planned continuation: `docs/PropFirmPilot_v1.4.0_road_map.md` (`v1.4.2`)
+
+### Operational Notes
+- 2026-03-12 的 live probe 已證實：EODHD websocket 在 target environment 可持續收到 `EURUSD / GBPUSD / USDJPY / AUDUSD` ticks，問題不在 parser 或 subscribe path
+- 同一次 probe 也證實：EODHD REST `1min` 當日資料最新 bar 仍明顯落後當前時間；因此 repeated fallback 的主要成本來自 stale REST tail，而非 websocket 無法出數
+- `v1.4.1` 對這個現象的處理目標是先壓制 repeated same-tail refresh 並強化診斷，不是把 EODHD REST `1min` provider lag 視為已被根治
 
 ---
 
