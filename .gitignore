@@ -11,6 +11,7 @@ build/
 .env
 .venv/
 .worktrees/
+.sisyphus/
 venv/
 
 # IDE
@@ -20,6 +21,7 @@ venv/
 *.swo
 
 # Data
+data/*
 data/raw/
 data/qlib_binary/
 *.duckdb
@@ -33,6 +35,7 @@ logs/
 .DS_Store
 Thumbs.db
 nul
+nunl
 
 # UV
 uv.lock
@@ -55,6 +58,9 @@ data/trade_journal.jsonl
 
 # Eval results
 eval_results/
+
+# Production bundles
+prod_logs_*/
 
 # Temp directories
 tmp/
