@@ -16,6 +16,26 @@ Versioning: [Semantic Versioning](https://semver.org/).
 > **Status**: Planned roadmap alignment
 > **Reason**: Tactical entry / exit stabilization now takes priority over the broader unfinished `v1.4.5` scope
 
+### Current Worktree Fixes
+
+#### Fixed
+- `scripts/unpack_prod_logs.py` 現在會先把 project root 加入 `sys.path`，修復 Windows 直接以 `uv run python .\scripts\unpack_prod_logs.py` 執行時的 `ModuleNotFoundError: scripts.pack_prod_logs`
+- `scripts/pack_prod_logs.py` 對 memory / decisions / Telegram 摘要輸入先做 normalization 與長度截斷，避免超大 payload 或空內容把 LLM 摘要流程打成 `400` / `502`
+- `scripts/pack_prod_logs.py` 對空 Telegram / 空 memory 內容改走 deterministic fallback，不再對無內容 payload 發送摘要請求
+- `MarketDataHub.get_quote()` 在 REST fallback refresh cooldown 期間，不再對同一個 stale `1m` tail 重複刷出 warning；只有實際 refresh 時才記錄 fallback warning
+- `ScannerBridge.run_pipeline()` 若 scanner 已成功產生 `signals.csv`，但後續 benchmark / backtest 報表階段失敗，現在會把該錯誤視為 recoverable，直接回退讀取 signals，避免 prop-firm-pilot 掃描流程被非關鍵後處理中斷
+
+#### Added
+- 回歸測試覆蓋 Windows 直接執行 `unpack_prod_logs.py`
+- 回歸測試覆蓋超大 memory / decisions 摘要輸入截斷與空 Telegram 摘要略過
+- 回歸測試覆蓋 stale quote warning suppression 與 recoverable scanner pipeline failure fallback
+
+#### Cross-Repo Note
+- `../qlib_market_scanner` 已同步修正 benchmark / backtest 配置根因，但該 repo 的版本控制與發版獨立於本 changelog
+
+### Planned: Near-Term Release Packaging
+- 將上述 bundle hardening、scanner recoverability 與 stale-warning suppression 納入下一個 `v1.4.6` 後續 hotfix 發版
+
 ### Planned: v1.4.6 — Tactical Entry Fixes & Optimization
 - tactical entry gate correctness、資料 freshness 邊界、degraded path 行為修正
 - `WAIT` / retry / degrade / cancel 分流規則整理，避免 intent churn 與過早取消

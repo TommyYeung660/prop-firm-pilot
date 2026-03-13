@@ -1,8 +1,26 @@
+import subprocess
+import sys
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from src.ops.dropbox_artifacts import DropboxArtifactEntry
+
+
+def test_unpack_script_runs_via_direct_path_invocation() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    script_path = repo_root / "scripts" / "unpack_prod_logs.py"
+
+    result = subprocess.run(
+        [sys.executable, str(script_path), "--help"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Download and unpack latest prod bundle" in result.stdout
 
 
 def test_select_latest_bundle_uses_server_modified() -> None:

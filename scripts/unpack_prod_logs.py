@@ -7,18 +7,24 @@ Usage:
 
 import argparse
 import shutil
+import sys
 import zipfile
 from pathlib import Path
 
-from dotenv import load_dotenv
-from loguru import logger
+# ── Add project root to path ────────────────────────────────────────────────
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.pack_prod_logs import (
+from dotenv import load_dotenv  # noqa: E402
+from loguru import logger  # noqa: E402
+
+from scripts.pack_prod_logs import (  # noqa: E402
     _build_dropbox_bundle_dir,
     _load_merged_config,
     _resolve_account_name,
 )
-from src.ops.dropbox_artifacts import DropboxArtifactEntry, DropboxArtifactsClient
+from src.ops.dropbox_artifacts import DropboxArtifactEntry, DropboxArtifactsClient  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:

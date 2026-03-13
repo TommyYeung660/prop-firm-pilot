@@ -155,6 +155,11 @@ class ScannerBridge:
         """Clear the pipeline cache.  Called externally when a cache bust is needed."""
         self._cache = None
 
+    def _is_recoverable_pipeline_failure(self, stdout: str, stderr: str) -> bool:
+        """Return True when the subprocess failed after already generating usable signals."""
+        failure_text = f"{stdout}\n{stderr}".lower()
+        return "the benchmark [" in failure_text and "does not exist" in failure_text
+
     # ── Main pipeline ───────────────────────────────────────────────────
 
     def run_pipeline(
@@ -230,29 +235,41 @@ class ScannerBridge:
             )
 
             if result.returncode != 0:
-                logger.error(
-                    "ScannerBridge: pipeline failed (exit={}):\nstdout: {}\nstderr: {}",
-                    result.returncode,
-                    result.stdout[-1000:],  # Last 1000 chars
-                    result.stderr[-1000:],
-                )
-                # Fallback: Try to read the output file anyway if it exists
-                # This is useful if the pipeline failed at a later stage but signals were generated,
-                # or if we are in a dev environment where we manually placed a mock signal file.
                 signals_path = self._scanner_path / "outputs" / "signals" / "signals.csv"
                 if signals_path.exists():
-                    logger.warning(
-                        "ScannerBridge: attempting fallback to existing signals file: {}",
-                        signals_path,
-                    )
                     signals, signal_date = self.load_signals_from_file(
                         signals_path,
                         target_date=date,
                         max_signal_age_days=max_signal_age_days,
                     )
                     if signals:
+                        if self._is_recoverable_pipeline_failure(result.stdout, result.stderr):
+                            logger.warning(
+                                "ScannerBridge: recoverable pipeline failure after signals "
+                                "generated (exit={}) — using signals file {}",
+                                result.returncode,
+                                signals_path,
+                            )
+                        else:
+                            logger.error(
+                                "ScannerBridge: pipeline failed (exit={}):\nstdout: {}\nstderr: {}",
+                                result.returncode,
+                                result.stdout[-1000:],  # Last 1000 chars
+                                result.stderr[-1000:],
+                            )
+                            logger.warning(
+                                "ScannerBridge: attempting fallback to existing signals file: {}",
+                                signals_path,
+                            )
                         self._update_cache(date, interval, signals, signal_date)
-                    return signals
+                        return signals
+
+                logger.error(
+                    "ScannerBridge: pipeline failed (exit={}):\nstdout: {}\nstderr: {}",
+                    result.returncode,
+                    result.stdout[-1000:],  # Last 1000 chars
+                    result.stderr[-1000:],
+                )
 
                 return []
 

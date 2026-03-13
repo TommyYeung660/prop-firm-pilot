@@ -39,6 +39,7 @@ from src.version import get_app_version, get_release_tag
 BASE_URL = "https://right.codes/codex/v1"
 MODEL_NAME = "gpt-5.4"
 MAX_LOG_CHARS = 100_000
+MAX_LLM_INPUT_CHARS = 100_000
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -455,6 +456,19 @@ async def _call_llm(
     return data["choices"][0]["message"]["content"]
 
 
+def _prepare_llm_input(content: str, max_chars: int = MAX_LLM_INPUT_CHARS) -> str:
+    """Normalize and bound summary input before sending it to the LLM."""
+    normalized = content.strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[-max_chars:]
+
+
+def _has_meaningful_content(content: str) -> bool:
+    """Return True when the content has any non-whitespace payload."""
+    return bool(content and content.strip())
+
+
 def _write_summary(path: Path, content: str) -> None:
     try:
         _ensure_dir(path.parent)
@@ -473,6 +487,11 @@ async def _summarize_all(
     telegram_content: str,
 ) -> None:
     api_key = os.getenv("RIGHTCODE_API_KEY")
+    prepared_log_content = _prepare_llm_input(log_content)
+    prepared_trade_content = _prepare_llm_input(trade_content)
+    prepared_decisions_dump = _prepare_llm_input(decisions_dump)
+    prepared_memory_content = _prepare_llm_input(memory_content)
+    prepared_telegram_content = _prepare_llm_input(telegram_content)
     if not api_key:
         logger.warning("RIGHTCODE_API_KEY not set; skipping LLM summaries")
         _write_summary(
@@ -480,7 +499,7 @@ async def _summarize_all(
             _build_placeholder_summary(
                 "Log Summary (Fallback)",
                 "LLM summary unavailable",
-                log_content,
+                prepared_log_content,
             ),
         )
         _write_summary(
@@ -488,24 +507,24 @@ async def _summarize_all(
             _build_placeholder_summary(
                 "Trades Summary (Fallback)",
                 "LLM summary unavailable",
-                trade_content,
+                prepared_trade_content,
             ),
         )
         _write_summary(
             summary_dir / "decisions_summary.md",
-            _build_decisions_fallback_summary(trade_content),
+            _build_decisions_fallback_summary(prepared_trade_content),
         )
         _write_summary(
             summary_dir / "memory_summary.md",
             _build_placeholder_summary(
                 "Memory Summary (Fallback)",
                 "LLM summary unavailable",
-                memory_content,
+                prepared_memory_content,
             ),
         )
         _write_summary(
             summary_dir / "telegram_summary.md",
-            _build_telegram_fallback_summary(telegram_content),
+            _build_telegram_fallback_summary(prepared_telegram_content),
         )
         return
 
@@ -517,7 +536,7 @@ async def _summarize_all(
                 api_key,
                 "你是一個生產環境日誌分析專家。"
                 "分析以下 prop-firm-pilot 交易系統日誌，生成結構化摘要。",
-                log_content,
+                prepared_log_content,
             )
             _write_summary(summary_dir / "log_summary.md", log_summary)
         except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
@@ -527,7 +546,7 @@ async def _summarize_all(
                 _build_placeholder_summary(
                     "Log Summary (Fallback)",
                     f"LLM summary failed: {exc}",
-                    log_content,
+                    prepared_log_content,
                 ),
             )
 
@@ -537,7 +556,7 @@ async def _summarize_all(
                 BASE_URL,
                 api_key,
                 "你是一個交易績效分析專家。分析以下 JSONL 格式的交易日誌。",
-                trade_content,
+                prepared_trade_content,
             )
             _write_summary(summary_dir / "trades_summary.md", trades_summary)
         except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
@@ -547,61 +566,83 @@ async def _summarize_all(
                 _build_placeholder_summary(
                     "Trades Summary (Fallback)",
                     f"LLM summary failed: {exc}",
-                    trade_content,
+                    prepared_trade_content,
                 ),
             )
 
-        try:
-            decisions_summary = await _call_llm(
-                client,
-                BASE_URL,
-                api_key,
-                "你是一個 AI 決策系統分析專家。分析以下 SQLite 決策數據庫的 dump。",
-                decisions_dump,
-            )
-            _write_summary(summary_dir / "decisions_summary.md", decisions_summary)
-        except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
-            logger.error("Failed to summarize decisions: {}", exc)
+        if not _has_meaningful_content(prepared_decisions_dump):
             _write_summary(
                 summary_dir / "decisions_summary.md",
-                _build_decisions_fallback_summary(trade_content),
+                _build_decisions_fallback_summary(prepared_trade_content),
             )
+        else:
+            try:
+                decisions_summary = await _call_llm(
+                    client,
+                    BASE_URL,
+                    api_key,
+                    "你是一個 AI 決策系統分析專家。分析以下 SQLite 決策數據庫的 dump。",
+                    prepared_decisions_dump,
+                )
+                _write_summary(summary_dir / "decisions_summary.md", decisions_summary)
+            except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
+                logger.error("Failed to summarize decisions: {}", exc)
+                _write_summary(
+                    summary_dir / "decisions_summary.md",
+                    _build_decisions_fallback_summary(prepared_trade_content),
+                )
 
-        try:
-            memory_summary = await _call_llm(
-                client,
-                BASE_URL,
-                api_key,
-                "你是一個交易記憶分析專家。分析以下每日 Markdown 交易記憶日誌。",
-                memory_content,
-            )
-            _write_summary(summary_dir / "memory_summary.md", memory_summary)
-        except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
-            logger.error("Failed to summarize memory: {}", exc)
+        if not _has_meaningful_content(prepared_memory_content):
             _write_summary(
                 summary_dir / "memory_summary.md",
                 _build_placeholder_summary(
                     "Memory Summary (Fallback)",
-                    f"LLM summary failed: {exc}",
-                    memory_content,
+                    "No memory content available",
+                    prepared_memory_content,
                 ),
             )
+        else:
+            try:
+                memory_summary = await _call_llm(
+                    client,
+                    BASE_URL,
+                    api_key,
+                    "你是一個交易記憶分析專家。分析以下每日 Markdown 交易記憶日誌。",
+                    prepared_memory_content,
+                )
+                _write_summary(summary_dir / "memory_summary.md", memory_summary)
+            except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
+                logger.error("Failed to summarize memory: {}", exc)
+                _write_summary(
+                    summary_dir / "memory_summary.md",
+                    _build_placeholder_summary(
+                        "Memory Summary (Fallback)",
+                        f"LLM summary failed: {exc}",
+                        prepared_memory_content,
+                    ),
+                )
 
-        try:
-            telegram_summary = await _call_llm(
-                client,
-                BASE_URL,
-                api_key,
-                "你是一個交易通知分析專家。分析以下 Telegram 交易通知歷史。",
-                telegram_content,
-            )
-            _write_summary(summary_dir / "telegram_summary.md", telegram_summary)
-        except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
-            logger.error("Failed to summarize Telegram: {}", exc)
+        if not _has_meaningful_content(prepared_telegram_content):
             _write_summary(
                 summary_dir / "telegram_summary.md",
-                _build_telegram_fallback_summary(telegram_content),
+                _build_telegram_fallback_summary(prepared_telegram_content),
             )
+        else:
+            try:
+                telegram_summary = await _call_llm(
+                    client,
+                    BASE_URL,
+                    api_key,
+                    "你是一個交易通知分析專家。分析以下 Telegram 交易通知歷史。",
+                    prepared_telegram_content,
+                )
+                _write_summary(summary_dir / "telegram_summary.md", telegram_summary)
+            except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
+                logger.error("Failed to summarize Telegram: {}", exc)
+                _write_summary(
+                    summary_dir / "telegram_summary.md",
+                    _build_telegram_fallback_summary(prepared_telegram_content),
+                )
 
 
 # ── Data Extraction ─────────────────────────────────────────────────────────

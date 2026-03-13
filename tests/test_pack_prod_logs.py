@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts import pack_prod_logs
 
 
@@ -200,3 +202,66 @@ def test_load_log_content_uses_run_specific_logs_when_base_log_missing(tmp_path:
     )
 
     assert "run-specific content" in content
+
+
+@pytest.mark.asyncio
+async def test_summarize_all_skips_telegram_llm_when_no_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RIGHTCODE_API_KEY", "test-key")
+    calls: list[tuple[str, str]] = []
+
+    async def fake_call_llm(
+        client, base_url: str, api_key: str, system_prompt: str, user_content: str
+    ) -> str:
+        del client, base_url, api_key
+        calls.append((system_prompt, user_content))
+        return f"summary:{system_prompt}"
+
+    monkeypatch.setattr(pack_prod_logs, "_call_llm", fake_call_llm)
+
+    await pack_prod_logs._summarize_all(
+        summary_dir=tmp_path,
+        log_content="log content",
+        trade_content="trade content",
+        decisions_dump="decision content",
+        memory_content="memory content",
+        telegram_content="",
+    )
+
+    assert not any("交易通知分析專家" in prompt for prompt, _ in calls)
+    telegram_summary = (tmp_path / "telegram_summary.md").read_text(encoding="utf-8")
+    assert "Exported text messages: 0" in telegram_summary
+
+
+@pytest.mark.asyncio
+async def test_summarize_all_truncates_large_memory_and_decisions_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RIGHTCODE_API_KEY", "test-key")
+    captured: dict[str, str] = {}
+    oversized = "x" * 250_000
+
+    async def fake_call_llm(
+        client, base_url: str, api_key: str, system_prompt: str, user_content: str
+    ) -> str:
+        del client, base_url, api_key
+        captured[system_prompt] = user_content
+        return "ok"
+
+    monkeypatch.setattr(pack_prod_logs, "_call_llm", fake_call_llm)
+
+    await pack_prod_logs._summarize_all(
+        summary_dir=tmp_path,
+        log_content="log content",
+        trade_content="trade content",
+        decisions_dump=oversized,
+        memory_content=oversized,
+        telegram_content="telegram message",
+    )
+
+    decisions_input = captured["你是一個 AI 決策系統分析專家。分析以下 SQLite 決策數據庫的 dump。"]
+    memory_input = captured["你是一個交易記憶分析專家。分析以下每日 Markdown 交易記憶日誌。"]
+
+    assert len(decisions_input) == pack_prod_logs.MAX_LLM_INPUT_CHARS
+    assert len(memory_input) == pack_prod_logs.MAX_LLM_INPUT_CHARS

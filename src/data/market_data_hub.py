@@ -122,16 +122,19 @@ class MarketDataHub:
         bars = self._warm_cache.get((symbol, "1m"))
         rows_fetched = 0
         if bars is None or bars.empty or not self._bars_are_fresh(bars):
+            refreshed = False
             if self._should_refresh_rest_cache(symbol=symbol, timeframe="1m"):
                 bars, rows_fetched = await self._refresh_rest_cache(symbol=symbol, timeframe="1m")
+                refreshed = True
             else:
                 bars = self._warm_cache.get((symbol, "1m"))
-            self._log_rest_fallback(
-                symbol=symbol,
-                timeframe="1m",
-                rows_fetched=rows_fetched,
-                bars=bars,
-            )
+            if refreshed:
+                self._log_rest_fallback(
+                    symbol=symbol,
+                    timeframe="1m",
+                    rows_fetched=rows_fetched,
+                    bars=bars,
+                )
         self._record_market_data_read("rest_fallback", rows_fetched)
         if bars is None or bars.empty or not self._bars_are_fresh(bars):
             return QuoteResult(symbol=symbol, source="rest_fallback", quote=None)

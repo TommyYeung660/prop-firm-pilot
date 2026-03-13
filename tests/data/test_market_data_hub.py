@@ -1,6 +1,7 @@
 """Tests for the market-data hub and symbol-level fallback behavior."""
 
 from datetime import date, datetime, timezone
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -353,3 +354,50 @@ async def test_market_data_hub_skips_repeated_quote_refresh_when_rest_tail_has_n
     assert first.source == "rest_fallback"
     assert second.source == "rest_fallback"
     assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_market_data_hub_suppresses_repeated_stale_quote_warnings_within_cooldown() -> None:
+    current_now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
+    provider = DummyProvider(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T10:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    hub = MarketDataHub(
+        aggregator=FXTickAggregator(),
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=provider,
+        symbols=["EURUSD"],
+        bar_cache_max_age_seconds=60,
+        rest_refresh_cooldown_seconds=300,
+        now_provider=lambda: current_now,
+    )
+    hub._warm_cache[("EURUSD", "1m")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T10:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    hub.mark_symbol_stale("EURUSD")
+
+    with patch("src.data.market_data_hub.logger.warning") as mock_warning:
+        await hub.get_quote("EURUSD")
+        current_now = datetime(2026, 3, 12, 12, 0, 30, tzinfo=timezone.utc)
+        await hub.get_quote("EURUSD")
+
+    assert len(provider.calls) == 1
+    assert mock_warning.call_count == 1

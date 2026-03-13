@@ -211,6 +211,34 @@ class TestScannerBridgeInit:
         assert len(signals) == 1
         assert signals[0].instrument == "EURUSD"
 
+    def test_run_pipeline_recovers_benchmark_failure_without_error_log(
+        self, tmp_path: Path
+    ) -> None:
+        """Benchmark/report failure after signal generation should be treated as recoverable."""
+        signals_dir = tmp_path / "outputs" / "signals"
+        signals_dir.mkdir(parents=True)
+        src_csv = FIXTURES_DIR / "signals_single.csv"
+        shutil.copy(src_csv, signals_dir / "signals.csv")
+
+        bridge = ScannerBridge(scanner_path=tmp_path)
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = "scanner output"
+        mock_result.stderr = (
+            "ValueError: The benchmark ['EURUSD'] does not exist. "
+            "Please provide the right benchmark"
+        )
+
+        with (
+            patch("subprocess.run", return_value=mock_result),
+            patch("src.signal.scanner_bridge.logger.error") as mock_error,
+        ):
+            signals = bridge.run_pipeline(date="2026-02-16")
+
+        assert len(signals) == 1
+        mock_error.assert_not_called()
+
     def test_run_pipeline_timeout(self, tmp_path: Path) -> None:
         """subprocess.TimeoutExpired → empty list."""
         bridge = ScannerBridge(scanner_path=tmp_path)
