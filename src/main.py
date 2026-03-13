@@ -75,6 +75,7 @@ class PropFirmPilot:
             topk=config.scanner.topk,
             profile="fx",  # Explicitly use FX profile
             entry_timeframe=config.scheduler.entry_timeframe,
+            benchmark=config.scanner.benchmark,
         )
         self.agents = AgentBridge(
             agents_path=config.agents.project_path,
@@ -405,6 +406,7 @@ async def _run_scheduler(config: AppConfig) -> None:
         topk=config.scanner.topk,
         profile="fx",
         entry_timeframe=config.scheduler.entry_timeframe,
+        benchmark=config.scanner.benchmark,
     )
     agents = AgentBridge(
         agents_path=config.agents.project_path,

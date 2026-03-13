@@ -596,6 +596,36 @@ class DecisionStore:
             self._conn.commit()
         logger.info("Intent {} cancelled: {}", intent_id, reason)
 
+    def mark_timed_out(self, intent_id: str, reason: str) -> None:
+        """Time out an intent from claimed or tactical_pending state."""
+        now = datetime.now(timezone.utc)
+        with self._write_lock:
+            updated = self._conn.execute(
+                """UPDATE intents
+                   SET status = 'timed_out',
+                       execution_error = :reason,
+                       executed_at = :executed_at
+                   WHERE id = :id AND status IN ('claimed', 'tactical_pending')""",
+                {
+                    "reason": reason,
+                    "executed_at": _dt_to_str(now),
+                    "id": intent_id,
+                },
+            ).rowcount
+            if not updated:
+                self._conn.rollback()
+                raise InvalidTransitionError(
+                    f"Cannot time out {intent_id}: not in 'claimed' or 'tactical_pending' state"
+                )
+            self._conn.execute(
+                """UPDATE decisions
+                   SET status = 'timed_out', failure_reason = :reason
+                   WHERE intent_id = :intent_id""",
+                {"reason": reason, "intent_id": intent_id},
+            )
+            self._conn.commit()
+        logger.warning("Intent {} timed out: {}", intent_id, reason)
+
     def mark_closed(
         self,
         intent_id: str,
@@ -773,7 +803,7 @@ class DecisionStore:
     # ── Claim Management ────────────────────────────────────────────
 
     def recycle_expired_claims(self) -> int:
-        """Find claimed intents past their TTL and set them to timed_out.
+        """Find claimed/tactical_pending intents past their TTL and set them to timed_out.
 
         Returns:
             Number of intents recycled.
@@ -783,8 +813,10 @@ class DecisionStore:
         with self._write_lock:
             cursor = self._conn.execute(
                 """UPDATE intents
-                   SET status = 'timed_out'
-                   WHERE status = 'claimed'
+                   SET status = 'timed_out',
+                       execution_error = 'Claim TTL expired',
+                       executed_at = :now
+                   WHERE status IN ('claimed', 'tactical_pending')
                      AND expires_at IS NOT NULL
                      AND expires_at < :now""",
                 {"now": now_str},
@@ -798,7 +830,7 @@ class DecisionStore:
                            failure_reason = 'Claim TTL expired'
                        WHERE intent_id IN (
                            SELECT id FROM intents WHERE status = 'timed_out'
-                       ) AND status = 'claimed'"""
+                       ) AND status IN ('claimed', 'tactical_pending')"""
                 )
             self._conn.commit()
         if count > 0:

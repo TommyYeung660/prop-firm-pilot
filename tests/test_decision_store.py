@@ -487,6 +487,36 @@ class TestClaimManagement:
         assert recycled is not None
         assert recycled.status == "timed_out"
 
+    def test_recycle_expired_tactical_pending_claims(self, store: DecisionStore) -> None:
+        """recycle_expired_claims should also time out expired tactical_pending intents."""
+        intent = TradeIntent(trade_date="2026-02-16", symbol="EURUSD", claim_ttl_minutes=0)
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+        store.update_intent_decision(
+            intent.id,
+            "BUY",
+            sl_pips=40,
+            tp_pips=80,
+            risk_report="test",
+            state_json="{}",
+        )
+        store.mark_tactical_pending(intent.id)
+
+        past = datetime.now(timezone.utc) - timedelta(minutes=1)
+        store._conn.execute(
+            "UPDATE intents SET expires_at = ? WHERE id = ?",
+            (past.isoformat(), intent.id),
+        )
+        store._conn.commit()
+
+        count = store.recycle_expired_claims()
+        assert count == 1
+
+        recycled = store.get_intent(intent.id)
+        assert recycled is not None
+        assert recycled.status == "timed_out"
+
     def test_recycle_zero_rows_does_not_block_next_claim(self, store: DecisionStore) -> None:
         """A zero-row recycle should not leave an open transaction."""
         intent = TradeIntent(trade_date="2026-02-16", symbol="EURUSD")

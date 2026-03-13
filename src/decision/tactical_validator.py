@@ -206,8 +206,12 @@ class TacticalValidator:
             detail=f"atr_ratio={ratio:.2f}, range=[{min_r}, {max_r}]",
         )
 
-    def _check_data_freshness_gate(self, latest_bar_time: datetime) -> GateResult:
-        """Check if latest bar data is recent enough."""
+    def _check_data_freshness_gate(
+        self,
+        latest_bar_time: datetime,
+        label: str = "data",
+    ) -> GateResult:
+        """Check if latest market data is recent enough."""
         now = datetime.now(timezone.utc)
         age_seconds = (now - latest_bar_time).total_seconds()
         max_age = self._config.hard_gates.data_max_age_seconds
@@ -217,8 +221,17 @@ class TacticalValidator:
             passed=passed,
             value=age_seconds,
             threshold=f"< {max_age}s",
-            detail=f"age={age_seconds:.0f}s, max={max_age}s",
+            detail=f"{label}_age={age_seconds:.0f}s, max={max_age}s",
         )
+
+    def _latest_dataframe_time(self, bars: pd.DataFrame) -> datetime | None:
+        """Return the latest bar timestamp from a tactical bar DataFrame."""
+        if bars.empty or "datetime" not in bars.columns:
+            return None
+        latest_ts = pd.Timestamp(bars.iloc[-1]["datetime"]).to_pydatetime()
+        if latest_ts.tzinfo is None:
+            return latest_ts.replace(tzinfo=timezone.utc)
+        return latest_ts.astimezone(timezone.utc)
 
     def check_hard_gates(self, data: TacticalData) -> list[GateResult]:
         """Run all hard gate checks. ALL must pass.
@@ -277,8 +290,21 @@ class TacticalValidator:
             )
 
         # 3. Data freshness gate
-        if data.latest_bar_time is not None:
-            results.append(self._check_data_freshness_gate(data.latest_bar_time))
+        freshness_results: list[GateResult] = []
+        latest_5min_time = self._latest_dataframe_time(data.bars_5min)
+        latest_1h_time = self._latest_dataframe_time(data.bars_1h)
+        if latest_5min_time is not None:
+            freshness_results.append(
+                self._check_data_freshness_gate(latest_5min_time, label="5min")
+            )
+        if latest_1h_time is not None:
+            freshness_results.append(self._check_data_freshness_gate(latest_1h_time, label="1h"))
+        if not freshness_results and data.latest_bar_time is not None:
+            freshness_results.append(
+                self._check_data_freshness_gate(data.latest_bar_time, label="quote")
+            )
+        if freshness_results:
+            results.extend(freshness_results)
         else:
             results.append(
                 GateResult(

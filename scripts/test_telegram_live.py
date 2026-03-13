@@ -9,14 +9,14 @@ import asyncio
 import os
 import sys
 
+from dotenv import load_dotenv
+
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dotenv import load_dotenv
-
 load_dotenv()
 
-from src.monitor.alert_service import AlertService
+from src.monitor.alert_service import AlertService  # noqa: E402
 
 
 async def main() -> None:

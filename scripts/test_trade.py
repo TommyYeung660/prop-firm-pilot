@@ -223,7 +223,8 @@ async def main() -> None:
         logger.info("  Waiting 2s before closing...")
         await asyncio.sleep(2)
 
-        # Use position's own symbol/side for close — not the constants, in case fallback found a different position
+        # Use the resolved position symbol/side for close in case fallback
+        # matched a different position than the original constants.
         close_symbol = our_position.symbol if our_position else SYMBOL
         close_side = our_position.side if our_position else SIDE
         close_volume = our_position.volume if our_position else VOLUME

@@ -8,9 +8,12 @@ scanner, LLM worker, execution, janitor, and equity monitor.
 
 import asyncio
 import json
+import time
 import unittest.mock
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from src.config import (
@@ -791,6 +794,29 @@ class TestLLMWorkerLoop:
         updated = store.get_intent(intent.id)
         assert updated is not None
         assert updated.status == "cancelled"  # NOT "failed"
+
+    async def test_marks_timed_out_on_agent_timeout(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """LLM timeout should end in timed_out rather than generic cancellation."""
+        mock_agents.decide.side_effect = TimeoutError("LLM API timeout")
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.85,
+            scanner_confidence="high",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "timed_out"
+        assert "LLM API timeout" in (updated.execution_error or "")
 
     async def test_sleeps_when_no_pending(
         self,
@@ -3442,7 +3468,63 @@ async def test_tactical_wait_retries_then_cancels_when_expire_action_cancel(
         await sched._process_claimed_intent("llm-0", claimed)
 
     final = store.get_intent(claimed.id)
-    assert final.status == "cancelled"
+    assert final is not None
+    assert final.status == "timed_out"
+    assert "Tactical gate WAIT" in (final.execution_error or "")
+    assert mock_tac.await_count == 2
+
+
+async def test_tactical_wait_retries_then_times_out_when_expire_action_cancel(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Retry exhaustion should classify tactical WAIT expiry as timed_out."""
+    from src.decision.tactical_validator import TacticalResult
+
+    config.tactical.enabled = True
+    config.tactical.shadow_mode = False
+    config.tactical.retry.max_retries = 1
+    config.tactical.retry.interval_seconds = 0
+    config.tactical.retry.jitter_seconds = 0
+    config.tactical.retry.expire_action = "cancel"
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+
+    tactical_wait = TacticalResult(
+        action="WAIT",
+        detail="Spread too wide (0.0005 > 0.0003)",
+    )
+    with (
+        patch.object(sched, "_run_tactical_validation", new_callable=AsyncMock) as mock_tac,
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        mock_tac.side_effect = [tactical_wait, tactical_wait]
+        await sched._process_claimed_intent("llm-0", claimed)
+
+    final = store.get_intent(claimed.id)
+    assert final is not None
+    assert final.status == "timed_out"
     assert "Tactical gate WAIT" in (final.execution_error or "")
     assert mock_tac.await_count == 2
 
@@ -3607,6 +3689,7 @@ async def test_process_claimed_intent_uses_decision_cache_for_repeated_signal(
 ):
     """Repeated strategic inputs should reuse the cached LLM decision."""
     config.tactical.enabled = False
+    config.scheduler.max_same_direction_per_day = 0
 
     sched = Scheduler(
         config=config,
@@ -3891,11 +3974,8 @@ async def test_fetch_tactical_data_uses_matchtrader_quote_when_hub_has_bars_only
     mock_matchtrader: AsyncMock,
 ):
     """When hub only has bars, scheduler should still fetch broker quote for freshness."""
-    import time
-
-    import pandas as pd
-
     now_ms = int(time.time() * 1000)
+    expected_quote_time = datetime.fromtimestamp((now_ms - 15_000) / 1000, tz=timezone.utc)
     mock_matchtrader.get_quote.return_value = {
         "ask": 0.6012,
         "bid": 0.6009,
@@ -3953,7 +4033,72 @@ async def test_fetch_tactical_data_uses_matchtrader_quote_when_hub_has_bars_only
     assert data.bars_5min.equals(bars_5min)
     assert data.bars_1h.equals(bars_1h)
     assert data.current_spread == pytest.approx(0.0003)
-    assert data.latest_bar_time is not None
+    assert data.latest_bar_time == expected_quote_time
+
+
+async def test_fetch_tactical_data_hub_bars_only_without_quote_timestamp_keeps_freshness_missing(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Hub bars without any quote timestamp must not backfill freshness from bar time."""
+    import pandas as pd
+
+    mock_matchtrader.get_quote.return_value = {"ask": 0.6012, "bid": 0.6009}
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    bars_5min = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T22:00:00Z"),
+                "open": 0.6010,
+                "high": 0.6020,
+                "low": 0.6000,
+                "close": 0.6015,
+                "volume": 0,
+            }
+        ]
+    )
+    bars_1h = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T22:00:00Z"),
+                "open": 0.5990,
+                "high": 0.6030,
+                "low": 0.5980,
+                "close": 0.6015,
+                "volume": 0,
+            }
+        ]
+    )
+    sched._market_data_ready = True
+    sched._market_data_hub = MagicMock()
+    sched._market_data_hub.get_quote = AsyncMock(
+        return_value=MagicMock(source="rest_fallback", quote=None)
+    )
+    sched._market_data_hub.get_bars = AsyncMock(
+        side_effect=[
+            MagicMock(source="rest_fallback", bars=bars_5min),
+            MagicMock(source="rest_fallback", bars=bars_1h),
+        ]
+    )
+
+    data = await sched._fetch_tactical_data("NZDUSD")
+
+    assert data.bars_5min.equals(bars_5min)
+    assert data.bars_1h.equals(bars_1h)
+    assert data.latest_bar_time is None
 
 
 def test_build_metrics_snapshot_includes_market_data_feed_status(

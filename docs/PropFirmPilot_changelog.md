@@ -24,17 +24,28 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - `scripts/pack_prod_logs.py` 對空 Telegram / 空 memory 內容改走 deterministic fallback，不再對無內容 payload 發送摘要請求
 - `MarketDataHub.get_quote()` 在 REST fallback refresh cooldown 期間，不再對同一個 stale `1m` tail 重複刷出 warning；只有實際 refresh 時才記錄 fallback warning
 - `ScannerBridge.run_pipeline()` 若 scanner 已成功產生 `signals.csv`，但後續 benchmark / backtest 報表階段失敗，現在會把該錯誤視為 recoverable，直接回退讀取 signals，避免 prop-firm-pilot 掃描流程被非關鍵後處理中斷
+- tactical `data_freshness` hard gate 現在會優先檢查 `5min` / `1h` bars 的最新時間，不再被 fresh quote timestamp 掩蓋 stale bars，修復 `MarketDataHub` mixed-source 情境下的誤判放行
+- LLM worker timeout 現在會將 `TimeoutError` / `asyncio.TimeoutError` intent 明確標記為 `timed_out`，不再與一般執行錯誤一樣走 `cancelled`
+- tactical `WAIT` retry 到期且 `expire_action=cancel` 時，intent 現在改為 `timed_out`，避免把 timeout 類故障誤記為一般取消
+- scanner benchmark 設定正式收斂為 `FX`，並從 `config/default.yaml` / `config/e8_one_5k_challenge.yaml` 一路傳入 scanner CLI，避免 benchmark / backtest 參數漂移
+- 清理多個 operational scripts 的 Ruff 問題（import order、E402、typing-only imports、長行與無效 f-string），讓 repo lint 可再次通過
 
 #### Added
 - 回歸測試覆蓋 Windows 直接執行 `unpack_prod_logs.py`
 - 回歸測試覆蓋超大 memory / decisions 摘要輸入截斷與空 Telegram 摘要略過
 - 回歸測試覆蓋 stale quote warning suppression 與 recoverable scanner pipeline failure fallback
+- RED-first 測試覆蓋 stale feed hard gate、LLM timeout recovery、tactical timeout lifecycle、scanner benchmark config 與 tactical validator stale-bar freshness 判斷
+- store 層新增 timeout / expired tactical pending recycle 測試，鎖定 `claimed` / `tactical_pending -> timed_out` 狀態轉移
+
+#### Validated
+- `uv run pytest tests/test_scheduler.py tests/test_decision_store.py tests/test_tactical_validator.py tests/test_config.py tests/test_scanner_bridge.py` → `265 passed`
+- `uv run ruff check . --exclude .claude` → `All checks passed!`
 
 #### Cross-Repo Note
 - `../qlib_market_scanner` 已同步修正 benchmark / backtest 配置根因，但該 repo 的版本控制與發版獨立於本 changelog
 
 ### Planned: Near-Term Release Packaging
-- 將上述 bundle hardening、scanner recoverability 與 stale-warning suppression 納入下一個 `v1.4.6` 後續 hotfix 發版
+- 將上述 bundle hardening、scanner recoverability、stale-warning suppression、tactical timeout/freshness 修正與 benchmark config 對齊納入下一個 hotfix 發版
 
 ### Planned: v1.4.6 — Tactical Entry Fixes & Optimization
 - tactical entry gate correctness、資料 freshness 邊界、degraded path 行為修正

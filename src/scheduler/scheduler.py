@@ -29,7 +29,6 @@ from numbers import Real
 from typing import Any
 
 import httpx
-import pandas as pd
 from loguru import logger
 
 from src.compliance.best_day_tracker import BestDayTracker
@@ -622,12 +621,21 @@ class Scheduler:
                 # Intent is in "claimed" state — valid transitions are:
                 # ready_for_exec, cancelled, timed_out (NOT failed)
                 if intent is not None:
-                    await self._cancel_intent_safe(
-                        worker_id=worker_id,
-                        intent_id=intent.id,
-                        reason=f"LLM error: {e}",
-                        context="worker_error_recovery",
-                    )
+                    timeout_reason = f"LLM timeout: {e}"
+                    if isinstance(e, TimeoutError | asyncio.TimeoutError):
+                        await self._timeout_intent_safe(
+                            worker_id=worker_id,
+                            intent_id=intent.id,
+                            reason=timeout_reason,
+                            context="worker_timeout_recovery",
+                        )
+                    else:
+                        await self._cancel_intent_safe(
+                            worker_id=worker_id,
+                            intent_id=intent.id,
+                            reason=f"LLM error: {e}",
+                            context="worker_error_recovery",
+                        )
                 await self._send_alert(
                     f"⚠️ <b>LLM Worker Error</b>\n"
                     f"• Worker: {worker_id}\n"
@@ -1235,7 +1243,7 @@ class Scheduler:
             )
             return True
 
-        await self._cancel_intent_safe(
+        await self._timeout_intent_safe(
             worker_id=worker_id,
             intent_id=intent.id,
             reason=f"Tactical gate WAIT: {initial_result.detail}",
@@ -1317,11 +1325,6 @@ class Scheduler:
                 if not bars_1h_result.bars.empty:
                     data.bars_1h = bars_1h_result.bars
                     data.bars_1h_source = bars_1h_result.source
-                if data.latest_bar_time is None and not data.bars_5min.empty:
-                    latest_bar = pd.Timestamp(data.bars_5min.iloc[-1]["datetime"]).to_pydatetime()
-                    if latest_bar.tzinfo is None:
-                        latest_bar = latest_bar.replace(tzinfo=timezone.utc)
-                    data.latest_bar_time = latest_bar
                 sources = {
                     source
                     for source in (
@@ -1375,11 +1378,6 @@ class Scheduler:
             logger.debug("Failed to fetch quote for {}: {}", symbol, e)
 
         if hub_supplied_data:
-            if data.latest_bar_time is None and not data.bars_5min.empty:
-                latest_bar = pd.Timestamp(data.bars_5min.iloc[-1]["datetime"]).to_pydatetime()
-                if latest_bar.tzinfo is None:
-                    latest_bar = latest_bar.replace(tzinfo=timezone.utc)
-                data.latest_bar_time = latest_bar
             return data
 
         # ── Intraday bars from EODHD ────────────────────────────────────────
@@ -1459,6 +1457,44 @@ class Scheduler:
         except Exception as e:
             logger.error(
                 "LLM worker {}: failed to cancel intent {} during {}: {}",
+                worker_id,
+                intent_id,
+                context,
+                e,
+            )
+            return False
+
+    async def _timeout_intent_safe(
+        self,
+        *,
+        worker_id: str,
+        intent_id: str,
+        reason: str,
+        context: str,
+    ) -> bool:
+        """Attempt intent timeout transition and tolerate state races.
+
+        Returns:
+            True when timeout succeeded, False when it was skipped/failed.
+        """
+        try:
+            await asyncio.to_thread(self._store.mark_timed_out, intent_id, reason)
+            return True
+        except InvalidTransitionError as e:
+            latest = await asyncio.to_thread(self._store.get_intent, intent_id)
+            latest_status = latest.status if latest is not None else "missing"
+            logger.warning(
+                "LLM worker {}: skip timeout for intent {} during {} (status={}, reason={})",
+                worker_id,
+                intent_id,
+                context,
+                latest_status,
+                e,
+            )
+            return False
+        except Exception as e:
+            logger.error(
+                "LLM worker {}: failed to time out intent {} during {}: {}",
                 worker_id,
                 intent_id,
                 context,

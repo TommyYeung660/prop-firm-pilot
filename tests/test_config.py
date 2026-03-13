@@ -9,6 +9,20 @@ def test_scheduler_config_llm_worker_count_default():
     assert config.llm_worker_count == 2
 
 
+def test_scanner_config_benchmark_default():
+    """P1.5: Scanner benchmark should default to broad FX benchmark, not a symbol-specific value."""
+    config = ScannerConfig()
+    assert config.benchmark == "FX"
+
+
+def test_e8_one_5k_scanner_benchmark_from_config():
+    """P1.5: e8_one_5k_challenge should explicitly pin scanner benchmark."""
+    from src.config import load_config
+
+    config = load_config("config/e8_one_5k_challenge.yaml")
+    assert config.scanner.benchmark == "FX"
+
+
 def test_scheduler_config_reeval_interval_default():
     """v1.2.0: Default reeval interval should be 2h (7200s)."""
     config = SchedulerConfig()

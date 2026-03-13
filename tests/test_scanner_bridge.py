@@ -211,6 +211,28 @@ class TestScannerBridgeInit:
         assert len(signals) == 1
         assert signals[0].instrument == "EURUSD"
 
+    def test_run_pipeline_includes_configured_benchmark(self, tmp_path: Path) -> None:
+        """Configured benchmark should be passed to qlib scanner CLI."""
+        signals_dir = tmp_path / "outputs" / "signals"
+        signals_dir.mkdir(parents=True)
+        src_csv = FIXTURES_DIR / "signals_single.csv"
+        shutil.copy(src_csv, signals_dir / "signals.csv")
+
+        bridge = ScannerBridge(scanner_path=tmp_path, benchmark="FX")
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "ok"
+        mock_result.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            signals = bridge.run_pipeline(date="2026-02-16")
+
+        assert len(signals) == 1
+        cmd = mock_run.call_args.args[0]
+        assert "--benchmark" in cmd
+        assert cmd[cmd.index("--benchmark") + 1] == "FX"
+
     def test_run_pipeline_recovers_benchmark_failure_without_error_log(
         self, tmp_path: Path
     ) -> None:

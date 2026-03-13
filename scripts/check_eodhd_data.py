@@ -18,25 +18,28 @@ Usage:
     python scripts/check_eodhd_data.py --symbols EURUSD --verbose
 """
 
+from __future__ import annotations
+
 import asyncio
 import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 import pandas as pd
+from dotenv import load_dotenv
 
 # ── Add project root to path ────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Load .env file if present
-from dotenv import load_dotenv  # noqa: E402
 load_dotenv(PROJECT_ROOT / ".env")
 
-from src.data.fx_data_fetcher import EodhdProvider  # noqa: E402
-from src.decision.tactical_validator import compute_atr  # noqa: E402
+if TYPE_CHECKING:
+    from src.data.fx_data_fetcher import EodhdProvider
 
 
 # ── Config (mirrors scheduler._fetch_tactical_data) ─────────────────────────
@@ -95,10 +98,8 @@ def _check_time_gaps(df: pd.DataFrame, interval: str) -> list[str]:
     diffs = df["datetime"].diff().dropna()
 
     if interval == "5min":
-        expected_gap = pd.Timedelta(minutes=5)
         max_acceptable = pd.Timedelta(minutes=15)  # Allow up to 3× gap
     else:  # 1h
-        expected_gap = pd.Timedelta(hours=1)
         max_acceptable = pd.Timedelta(hours=3)  # Allow up to 3× gap
 
     big_gaps = diffs[diffs > max_acceptable]
@@ -117,6 +118,8 @@ def _check_time_gaps(df: pd.DataFrame, interval: str) -> list[str]:
 
 def _simulate_atr_regime(df_1h: pd.DataFrame) -> dict:
     """Simulate ATR regime gate logic from TacticalValidator."""
+    from src.decision.tactical_validator import compute_atr
+
     result = {
         "has_enough_data": False,
         "current_atr": float("nan"),
@@ -264,10 +267,10 @@ async def check_symbol(
 
     # ── Verbose output ───────────────────────────────────────────────────
     if verbose and not bars_5min.empty:
-        print(f"\n  [5min bars -- last 5 rows]")
+        print("\n  [5min bars -- last 5 rows]")
         print(bars_5min.tail(5).to_string(index=False))
     if verbose and not bars_1h.empty:
-        print(f"\n  [1h bars -- last 5 rows]")
+        print("\n  [1h bars -- last 5 rows]")
         print(bars_1h.tail(5).to_string(index=False))
 
     return result
@@ -275,6 +278,8 @@ async def check_symbol(
 
 async def main(symbols: list[str] | None = None, verbose: bool = False) -> None:
     """Run EODHD data completeness check for all configured symbols."""
+    from src.data.fx_data_fetcher import EodhdProvider
+
     api_key = os.getenv("EODHD_API_KEY", "")
     if not api_key:
         print("[X] EODHD_API_KEY not set. Set it in .env or environment.")
@@ -287,7 +292,7 @@ async def main(symbols: list[str] | None = None, verbose: bool = False) -> None:
     now = datetime.now(timezone.utc)
 
     print("=" * 70)
-    print(f"EODHD FX Intraday Data Completeness Report")
+    print("EODHD FX Intraday Data Completeness Report")
     print(f"Time: {now.strftime('%Y-%m-%d %H:%M:%S UTC')} (weekday: {now.strftime('%A')})")
     print(f"Symbols: {', '.join(symbols)}")
     print(
@@ -310,7 +315,11 @@ async def main(symbols: list[str] | None = None, verbose: bool = False) -> None:
             results.append(result)
 
             # Print result
-            status_icon = {"OK": "[OK]", "WARNING": "[!]", "CRITICAL": "[X]"}.get(result["status"], "?")
+            status_icon = {
+                "OK": "[OK]",
+                "WARNING": "[!]",
+                "CRITICAL": "[X]",
+            }.get(result["status"], "?")
             print(f"  Status: {status_icon} {result['status']}")
             print(
                 f"  5min bars: {result['bars_5min_count']} "
@@ -324,12 +333,12 @@ async def main(symbols: list[str] | None = None, verbose: bool = False) -> None:
             if result["latest_5min_age_s"] is not None:
                 print(f"  Latest 5min bar age: {_fmt_age(result['latest_5min_age_s'])}")
             else:
-                print(f"  Latest 5min bar age: N/A (no data)")
+                print("  Latest 5min bar age: N/A (no data)")
 
             if result["latest_1h_age_s"] is not None:
                 print(f"  Latest 1h bar age:   {_fmt_age(result['latest_1h_age_s'])}")
             else:
-                print(f"  Latest 1h bar age:   N/A (no data)")
+                print("  Latest 1h bar age:   N/A (no data)")
 
             atr = result["atr_regime"]
             if atr.get("has_enough_data"):
@@ -357,7 +366,7 @@ async def main(symbols: list[str] | None = None, verbose: bool = False) -> None:
     print(f"  [OK] OK: {ok_count}  [!] Warning: {warn_count}  [X] Critical: {crit_count}")
 
     # Diagnosis for atr_regime / data_freshness gate failures
-    print(f"\n-- Gate Failure Diagnosis --")
+    print("\n-- Gate Failure Diagnosis --")
 
     any_atr_fail = any(
         r["atr_regime"].get("has_enough_data") and not r["atr_regime"].get("would_pass")
@@ -387,9 +396,9 @@ async def main(symbols: list[str] | None = None, verbose: bool = False) -> None:
     print("  If data_freshness fails, check MatchTrader API connectivity & quote availability.")
 
     if any_freshness_fail:
-        print(f"\n  [!] EODHD bar staleness detected (>10min) -- but this does NOT directly")
-        print(f"    cause data_freshness gate failure (which uses broker quote timestamp).")
-        print(f"    However, stale EODHD bars affect ATR/EMA/RSI accuracy.")
+        print("\n  [!] EODHD bar staleness detected (>10min) -- but this does NOT directly")
+        print("    cause data_freshness gate failure (which uses broker quote timestamp).")
+        print("    However, stale EODHD bars affect ATR/EMA/RSI accuracy.")
 
     print()
 

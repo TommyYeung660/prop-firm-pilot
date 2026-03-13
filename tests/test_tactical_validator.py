@@ -151,6 +151,35 @@ class TestHardGateDataFreshness:
         result = validator._check_data_freshness_gate(latest_bar_time=old)
         assert result.passed is False
 
+    def test_stale_5min_bars_fail_even_with_fresh_quote_timestamp(self) -> None:
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        stale_5min = datetime.now(timezone.utc) - timedelta(minutes=15)
+        fresh_quote = datetime.now(timezone.utc) - timedelta(seconds=30)
+        data = TacticalData(
+            bars_5min=pd.DataFrame(
+                [
+                    {
+                        "datetime": stale_5min,
+                        "open": 1.1000,
+                        "high": 1.1010,
+                        "low": 1.0990,
+                        "close": 1.1005,
+                    }
+                ]
+            ),
+            bars_1h=pd.DataFrame(),
+            current_spread=0.00015,
+            typical_spread=0.00015,
+            latest_bar_time=fresh_quote,
+        )
+
+        results = validator.check_hard_gates(data)
+
+        freshness_result = next(r for r in results if r.gate_name == "data_freshness")
+        assert freshness_result.passed is False
+        assert "5min" in freshness_result.detail.lower()
+
 
 # ── Soft Gate Tests ────────────────────────────────────────────────────────
 

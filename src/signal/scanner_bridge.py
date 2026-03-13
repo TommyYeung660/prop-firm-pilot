@@ -99,11 +99,13 @@ class ScannerBridge:
         topk: int = 3,
         profile: str = "fx",
         entry_timeframe: str = "4h",
+        benchmark: str = "FX",
     ) -> None:
         self._scanner_path = Path(scanner_path).resolve()
         self._topk = topk
         self._profile = profile
         self._entry_timeframe = entry_timeframe
+        self._benchmark = benchmark
         self._cache: _PipelineCache | None = None
 
         if not self._scanner_path.exists():
@@ -206,6 +208,8 @@ class ScannerBridge:
             "src.main",
             "--profile",
             self._profile,
+            "--benchmark",
+            self._benchmark,
         ]
 
         # Force retrain to avoid stale cached models producing identical scores

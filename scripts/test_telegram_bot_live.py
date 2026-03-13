@@ -12,8 +12,9 @@ Usage:
 
 import asyncio
 import os
-import signal
 import sys
+
+from dotenv import load_dotenv
 
 # Fix Windows console encoding for emoji output
 if sys.platform == "win32":
@@ -23,13 +24,11 @@ if sys.platform == "win32":
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dotenv import load_dotenv
-
 load_dotenv()
 
-from src.execution.matchtrader_client import MatchTraderClient
-from src.monitor.alert_service import AlertService
-from src.monitor.telegram_bot import TelegramBotHandler
+from src.execution.matchtrader_client import MatchTraderClient  # noqa: E402
+from src.monitor.alert_service import AlertService  # noqa: E402
+from src.monitor.telegram_bot import TelegramBotHandler  # noqa: E402
 
 
 async def main() -> None:
