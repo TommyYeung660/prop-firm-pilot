@@ -71,6 +71,27 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.6c] — 2026-03-13
+**Scanner CLI Backward-Compatibility Hotfix**
+
+> **Status**: Released production compatibility hotfix
+> **Reason**: Production target still had an older `qlib_market_scanner` CLI that rejected `--benchmark FX`, causing scanner subprocess failure even though the new pilot release expected benchmark-aware scanner versions
+
+### Fixed
+- `ScannerBridge.run_pipeline()` 現在遇到 scanner CLI 回報 `unrecognized arguments: --benchmark ...` 時，會自動移除 `--benchmark <value>` 後重試一次，保持對舊版 `qlib_market_scanner` 的向下相容
+- benchmark-aware 新版 scanner 仍維持原本 `--benchmark FX` 呼叫路徑，不影響已升級環境
+- 若舊版 CLI 只是不支援 benchmark 參數，prop-firm-pilot 掃描流程不再因參數不相容而中斷
+
+### Added
+- 回歸測試覆蓋「第一次 subprocess 因 `--benchmark` 不被支援而失敗，第二次自動改成不帶 benchmark 重試」的 prod 相容性案例
+
+### Validated
+- `uv run pytest tests/test_scanner_bridge.py::TestScannerBridgeInit::test_run_pipeline_retries_without_benchmark_when_cli_rejects_argument` → `1 passed`
+- `uv run pytest tests/test_scanner_bridge.py` → `39 passed`
+- `uv run ruff check src/signal/scanner_bridge.py tests/test_scanner_bridge.py` → `All checks passed!`
+
+---
+
 ## [1.4.6b] — 2026-03-13
 **Tactical Freshness Recovery + Prod Bundle Dropbox Sync**
 
