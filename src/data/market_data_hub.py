@@ -12,6 +12,7 @@ Usage:
     bars = await hub.get_bars("EURUSD", "5m", 50)
 """
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -61,6 +62,11 @@ class MarketDataHub:
         "5m": "5min",
         "1h": "1h",
     }
+    _TIMEFRAME_SECONDS = {
+        "1m": 60,
+        "5m": 300,
+        "1h": 3600,
+    }
     _LOOKBACK_DAYS = {
         "1m": 2,
         "5m": 3,
@@ -89,6 +95,7 @@ class MarketDataHub:
         self._now_provider = now_provider or (lambda: datetime.now(timezone.utc))
         self._warm_cache: dict[tuple[str, str], pd.DataFrame] = {}
         self._rest_refresh_state: dict[tuple[str, str], _RestRefreshState] = {}
+        self._rest_refresh_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._forced_stale_symbols: set[str] = set()
         self._metrics = operational_metrics
 
@@ -122,12 +129,10 @@ class MarketDataHub:
         bars = self._warm_cache.get((symbol, "1m"))
         rows_fetched = 0
         if bars is None or bars.empty or not self._bars_are_fresh(bars):
-            refreshed = False
-            if self._should_refresh_rest_cache(symbol=symbol, timeframe="1m"):
-                bars, rows_fetched = await self._refresh_rest_cache(symbol=symbol, timeframe="1m")
-                refreshed = True
-            else:
-                bars = self._warm_cache.get((symbol, "1m"))
+            bars, rows_fetched, refreshed = await self._refresh_rest_cache_serialized(
+                symbol=symbol,
+                timeframe="1m",
+            )
             if refreshed:
                 self._log_rest_fallback(
                     symbol=symbol,
@@ -173,18 +178,17 @@ class MarketDataHub:
                 bars=warm.tail(limit).reset_index(drop=True),
             )
         rows_fetched = 0
-        if self._should_refresh_rest_cache(symbol=symbol, timeframe=timeframe):
-            bars, rows_fetched = await self._refresh_rest_cache(symbol=symbol, timeframe=timeframe)
+        bars, rows_fetched, refreshed = await self._refresh_rest_cache_serialized(
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+        if refreshed:
             self._log_rest_fallback(
                 symbol=symbol,
                 timeframe=timeframe,
                 rows_fetched=rows_fetched,
                 bars=bars,
             )
-        else:
-            bars = self._warm_cache.get((symbol, timeframe))
-            if bars is None:
-                bars = self._normalize_bars(pd.DataFrame())
         self._record_market_data_read("rest_fallback", rows_fetched)
         return BarResult(
             symbol=symbol,
@@ -276,7 +280,11 @@ class MarketDataHub:
         if state is None:
             return True
         now = self._now_provider()
-        if now - state.attempted_at >= timedelta(seconds=self._rest_refresh_cooldown_seconds):
+        cooldown_seconds = max(
+            self._rest_refresh_cooldown_seconds,
+            self._TIMEFRAME_SECONDS[timeframe],
+        )
+        if now - state.attempted_at >= timedelta(seconds=cooldown_seconds):
             return True
         cached_latest = self._latest_bar_time(self._warm_cache.get(key))
         if state.latest_bar_at is None:
@@ -284,6 +292,26 @@ class MarketDataHub:
         if cached_latest is None:
             return False
         return cached_latest > state.latest_bar_at
+
+    async def _refresh_rest_cache_serialized(
+        self,
+        symbol: str,
+        timeframe: Literal["1m", "5m", "1h"],
+    ) -> tuple[pd.DataFrame, int, bool]:
+        """Serialize same-key REST refreshes so concurrent callers share one attempt."""
+        key = (symbol, timeframe)
+        lock = self._rest_refresh_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._rest_refresh_locks[key] = lock
+        async with lock:
+            if not self._should_refresh_rest_cache(symbol=symbol, timeframe=timeframe):
+                cached = self._warm_cache.get(key)
+                if cached is None:
+                    cached = self._normalize_bars(pd.DataFrame())
+                return cached, 0, False
+            bars, rows_fetched = await self._refresh_rest_cache(symbol=symbol, timeframe=timeframe)
+            return bars, rows_fetched, True
 
     def _resolve_rest_window(
         self,

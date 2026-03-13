@@ -1,5 +1,6 @@
 """Tests for the market-data hub and symbol-level fallback behavior."""
 
+import asyncio
 from datetime import date, datetime, timezone
 from unittest.mock import patch
 
@@ -490,6 +491,97 @@ async def test_market_data_hub_skips_repeated_1h_bar_refresh_when_rest_tail_has_
 
     first = await hub.get_bars("EURUSD", "1h", 10)
     current_now = datetime(2026, 3, 12, 12, 0, 30, tzinfo=timezone.utc)
+    second = await hub.get_bars("EURUSD", "1h", 10)
+
+    assert first.source == "rest_fallback"
+    assert second.source == "rest_fallback"
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_market_data_hub_deduplicates_concurrent_quote_refreshes() -> None:
+    current_now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
+    provider = DummyProvider(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T10:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    hub = MarketDataHub(
+        aggregator=FXTickAggregator(),
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=provider,
+        symbols=["EURUSD"],
+        bar_cache_max_age_seconds=60,
+        rest_refresh_cooldown_seconds=300,
+        now_provider=lambda: current_now,
+    )
+    hub._warm_cache[("EURUSD", "1m")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T10:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    hub.mark_symbol_stale("EURUSD")
+
+    first, second = await asyncio.gather(hub.get_quote("EURUSD"), hub.get_quote("EURUSD"))
+
+    assert first.source == "rest_fallback"
+    assert second.source == "rest_fallback"
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_market_data_hub_uses_timeframe_sized_cooldown_for_1h_refreshes() -> None:
+    current_now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
+    provider = DummyProvider(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T08:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    hub = MarketDataHub(
+        aggregator=FXTickAggregator(),
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=provider,
+        symbols=["EURUSD"],
+        bar_cache_max_age_seconds=300,
+        rest_refresh_cooldown_seconds=300,
+        now_provider=lambda: current_now,
+    )
+    hub._warm_cache[("EURUSD", "1h")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T08:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+
+    first = await hub.get_bars("EURUSD", "1h", 10)
+    current_now = datetime(2026, 3, 12, 12, 6, tzinfo=timezone.utc)
     second = await hub.get_bars("EURUSD", "1h", 10)
 
     assert first.source == "rest_fallback"

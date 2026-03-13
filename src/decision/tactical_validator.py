@@ -233,6 +233,43 @@ class TacticalValidator:
             return latest_ts.replace(tzinfo=timezone.utc)
         return latest_ts.astimezone(timezone.utc)
 
+    def _build_data_freshness_gate(self, data: TacticalData) -> GateResult:
+        """Build one authoritative freshness gate with optional diagnostic ages."""
+        latest_5min_time = self._latest_dataframe_time(data.bars_5min)
+        latest_1h_time = self._latest_dataframe_time(data.bars_1h)
+
+        authoritative_label = ""
+        authoritative_time: datetime | None = None
+        if data.latest_bar_time is not None:
+            authoritative_label = "quote"
+            authoritative_time = data.latest_bar_time
+        elif latest_5min_time is not None:
+            authoritative_label = "5min"
+            authoritative_time = latest_5min_time
+        elif latest_1h_time is not None:
+            authoritative_label = "1h"
+            authoritative_time = latest_1h_time
+
+        if authoritative_time is None:
+            return GateResult(
+                gate_name="data_freshness",
+                passed=False,
+                detail="No bar timestamp available",
+            )
+
+        freshness_result = self._check_data_freshness_gate(
+            latest_bar_time=authoritative_time,
+            label=authoritative_label,
+        )
+        detail_parts = [freshness_result.detail]
+        for label, latest_time in (("5min", latest_5min_time), ("1h", latest_1h_time)):
+            if latest_time is None:
+                continue
+            age_seconds = (datetime.now(timezone.utc) - latest_time).total_seconds()
+            detail_parts.append(f"{label}_age={age_seconds:.0f}s")
+        freshness_result.detail = ", ".join(detail_parts)
+        return freshness_result
+
     def check_hard_gates(self, data: TacticalData) -> list[GateResult]:
         """Run all hard gate checks. ALL must pass.
 
@@ -290,29 +327,7 @@ class TacticalValidator:
             )
 
         # 3. Data freshness gate
-        freshness_results: list[GateResult] = []
-        latest_5min_time = self._latest_dataframe_time(data.bars_5min)
-        latest_1h_time = self._latest_dataframe_time(data.bars_1h)
-        if latest_5min_time is not None:
-            freshness_results.append(
-                self._check_data_freshness_gate(latest_5min_time, label="5min")
-            )
-        if latest_1h_time is not None:
-            freshness_results.append(self._check_data_freshness_gate(latest_1h_time, label="1h"))
-        if not freshness_results and data.latest_bar_time is not None:
-            freshness_results.append(
-                self._check_data_freshness_gate(data.latest_bar_time, label="quote")
-            )
-        if freshness_results:
-            results.extend(freshness_results)
-        else:
-            results.append(
-                GateResult(
-                    gate_name="data_freshness",
-                    passed=False,
-                    detail="No bar timestamp available",
-                )
-            )
+        results.append(self._build_data_freshness_gate(data))
 
         return results
 

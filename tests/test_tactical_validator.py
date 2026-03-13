@@ -151,10 +151,11 @@ class TestHardGateDataFreshness:
         result = validator._check_data_freshness_gate(latest_bar_time=old)
         assert result.passed is False
 
-    def test_stale_5min_bars_fail_even_with_fresh_quote_timestamp(self) -> None:
+    def test_fresh_quote_timestamp_produces_single_passing_data_freshness_gate(self) -> None:
         config = TacticalConfig()
         validator = TacticalValidator(config)
         stale_5min = datetime.now(timezone.utc) - timedelta(minutes=15)
+        stale_1h = datetime.now(timezone.utc) - timedelta(hours=4)
         fresh_quote = datetime.now(timezone.utc) - timedelta(seconds=30)
         data = TacticalData(
             bars_5min=pd.DataFrame(
@@ -168,7 +169,17 @@ class TestHardGateDataFreshness:
                     }
                 ]
             ),
-            bars_1h=pd.DataFrame(),
+            bars_1h=pd.DataFrame(
+                [
+                    {
+                        "datetime": stale_1h,
+                        "open": 1.0950,
+                        "high": 1.1015,
+                        "low": 1.0940,
+                        "close": 1.1005,
+                    }
+                ]
+            ),
             current_spread=0.00015,
             typical_spread=0.00015,
             latest_bar_time=fresh_quote,
@@ -176,9 +187,50 @@ class TestHardGateDataFreshness:
 
         results = validator.check_hard_gates(data)
 
-        freshness_result = next(r for r in results if r.gate_name == "data_freshness")
-        assert freshness_result.passed is False
-        assert "5min" in freshness_result.detail.lower()
+        freshness_results = [r for r in results if r.gate_name == "data_freshness"]
+        assert len(freshness_results) == 1
+        assert freshness_results[0].passed is True
+        assert "quote_age" in freshness_results[0].detail.lower()
+
+    def test_fresh_5min_bar_can_pass_when_1h_bar_is_older_and_no_quote_timestamp(self) -> None:
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        fresh_5min = datetime.now(timezone.utc) - timedelta(minutes=4)
+        stale_1h = datetime.now(timezone.utc) - timedelta(hours=3)
+        data = TacticalData(
+            bars_5min=pd.DataFrame(
+                [
+                    {
+                        "datetime": fresh_5min,
+                        "open": 1.1000,
+                        "high": 1.1010,
+                        "low": 1.0990,
+                        "close": 1.1005,
+                    }
+                ]
+            ),
+            bars_1h=pd.DataFrame(
+                [
+                    {
+                        "datetime": stale_1h,
+                        "open": 1.0950,
+                        "high": 1.1015,
+                        "low": 1.0940,
+                        "close": 1.1005,
+                    }
+                ]
+            ),
+            current_spread=0.00015,
+            typical_spread=0.00015,
+            latest_bar_time=None,
+        )
+
+        results = validator.check_hard_gates(data)
+
+        freshness_results = [r for r in results if r.gate_name == "data_freshness"]
+        assert len(freshness_results) == 1
+        assert freshness_results[0].passed is True
+        assert "5min_age" in freshness_results[0].detail.lower()
 
 
 # ── Soft Gate Tests ────────────────────────────────────────────────────────
