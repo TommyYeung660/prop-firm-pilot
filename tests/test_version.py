@@ -13,7 +13,7 @@ def test_get_app_version_matches_pyproject() -> None:
     version_line = next(
         line
         for line in pyproject.read_text(encoding="utf-8").splitlines()
-        if line.startswith("version")
+        if line.startswith("display_version")
     )
     expected = version_line.split("=", 1)[1].strip().strip('"')
 

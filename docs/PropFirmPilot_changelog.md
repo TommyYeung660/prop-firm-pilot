@@ -71,6 +71,30 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.6d] — 2026-03-13
+**MarketDataHub REST Fallback Loop Fix**
+
+> **Status**: Released market-data hotfix
+> **Reason**: `5m/1h` stale same-tail bar fetches were still re-hitting REST on every tactical read, and websocket rollup bars were not being elapsed-closed before hub lookup
+
+### Fixed
+- `MarketDataHub.get_bars()` 現在在讀取 websocket cache 前會先執行 `FXTickAggregator.close_elapsed_bars()`，讓已到期的 `1m/5m/1h` buckets 可以在 hub lookup 時即時 finalize，而不是只能等下一個跨 bucket tick
+- `MarketDataHub` 的 REST refresh suppression 不再只限於 `1m` quote path；`5m` / `1h` stale same-tail bar path 現在也會套用同一套 cooldown + no-progress guard
+- `get_bars()` 在 cooldown 內遇到同一個 stale REST tail 時，不再重複 refresh 或重複刷 fallback warning，而是重用既有 warm cache 內容走 `rest_fallback` 讀路徑
+- shared version helper 現在會優先讀取 `pyproject.toml` 內的 `display_version`，讓 runtime / packer / release tag 可維持 `v1.4.6d`，同時保留 `[project].version` 的 PEP 440 相容性供 `uv` 使用
+
+### Added
+- regression tests 覆蓋 stale `5m` / `1h` REST same-tail suppression
+- regression test 覆蓋 `MarketDataHub.get_bars()` 會在 lookup 前 finalize elapsed `5m` rollup bars
+- version helper regression test 改為鎖定 `display_version` 對外顯示行為
+
+### Validated
+- `uv run python -c "from src.version import get_app_version, get_release_tag; print(get_app_version()); print(get_release_tag())"` → `1.4.6d` / `v1.4.6d`
+- `uv run pytest tests/data/test_market_data_hub.py tests/data/test_fx_tick_aggregator.py tests/test_version.py -q` → `20 passed`
+- `uv run ruff check src/data/market_data_hub.py src/version.py tests/data/test_market_data_hub.py tests/test_version.py` → `All checks passed!`
+
+---
+
 ## [1.4.6c] — 2026-03-13
 **Scanner CLI Backward-Compatibility Hotfix**
 

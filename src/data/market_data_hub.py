@@ -146,9 +146,10 @@ class MarketDataHub:
         symbol: str,
         timeframe: Literal["1m", "5m", "1h"],
         limit: int,
-        ) -> BarResult:
+    ) -> BarResult:
         """Resolve closed bars from websocket cache, warm cache, or REST fallback."""
         if symbol not in self._forced_stale_symbols:
+            self._aggregator.close_elapsed_bars(now=self._now_provider())
             websocket_bars = self._bars_from_aggregator(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -171,14 +172,20 @@ class MarketDataHub:
                 source="warmup_cache",
                 bars=warm.tail(limit).reset_index(drop=True),
             )
-        bars, rows_fetched = await self._refresh_rest_cache(symbol=symbol, timeframe=timeframe)
+        rows_fetched = 0
+        if self._should_refresh_rest_cache(symbol=symbol, timeframe=timeframe):
+            bars, rows_fetched = await self._refresh_rest_cache(symbol=symbol, timeframe=timeframe)
+            self._log_rest_fallback(
+                symbol=symbol,
+                timeframe=timeframe,
+                rows_fetched=rows_fetched,
+                bars=bars,
+            )
+        else:
+            bars = self._warm_cache.get((symbol, timeframe))
+            if bars is None:
+                bars = self._normalize_bars(pd.DataFrame())
         self._record_market_data_read("rest_fallback", rows_fetched)
-        self._log_rest_fallback(
-            symbol=symbol,
-            timeframe=timeframe,
-            rows_fetched=rows_fetched,
-            bars=bars,
-        )
         return BarResult(
             symbol=symbol,
             timeframe=timeframe,
@@ -263,9 +270,7 @@ class MarketDataHub:
         symbol: str,
         timeframe: Literal["1m", "5m", "1h"],
     ) -> bool:
-        """Avoid repeated stale 1m refreshes when the REST tail has not advanced."""
-        if timeframe != "1m":
-            return True
+        """Avoid repeated stale refreshes when the REST tail has not advanced."""
         key = (symbol, timeframe)
         state = self._rest_refresh_state.get(key)
         if state is None:
@@ -274,9 +279,9 @@ class MarketDataHub:
         if now - state.attempted_at >= timedelta(seconds=self._rest_refresh_cooldown_seconds):
             return True
         cached_latest = self._latest_bar_time(self._warm_cache.get(key))
-        if cached_latest is None:
-            return True
         if state.latest_bar_at is None:
+            return cached_latest is not None
+        if cached_latest is None:
             return False
         return cached_latest > state.latest_bar_at
 
