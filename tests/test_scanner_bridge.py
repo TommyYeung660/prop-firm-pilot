@@ -233,33 +233,39 @@ class TestScannerBridgeInit:
         assert "--benchmark" in cmd
         assert cmd[cmd.index("--benchmark") + 1] == "FX"
 
-    def test_run_pipeline_recovers_benchmark_failure_without_error_log(
+    def test_run_pipeline_retries_without_benchmark_when_cli_rejects_argument(
         self, tmp_path: Path
     ) -> None:
-        """Benchmark/report failure after signal generation should be treated as recoverable."""
+        """Older qlib scanner CLIs should be retried without --benchmark."""
         signals_dir = tmp_path / "outputs" / "signals"
         signals_dir.mkdir(parents=True)
         src_csv = FIXTURES_DIR / "signals_single.csv"
         shutil.copy(src_csv, signals_dir / "signals.csv")
 
-        bridge = ScannerBridge(scanner_path=tmp_path)
+        bridge = ScannerBridge(scanner_path=tmp_path, benchmark="FX")
 
-        mock_result = MagicMock()
-        mock_result.returncode = 1
-        mock_result.stdout = "scanner output"
-        mock_result.stderr = (
-            "ValueError: The benchmark ['EURUSD'] does not exist. "
-            "Please provide the right benchmark"
-        )
+        first_result = MagicMock()
+        first_result.returncode = 2
+        first_result.stdout = ""
+        first_result.stderr = "main.py: error: unrecognized arguments: --benchmark FX"
 
-        with (
-            patch("subprocess.run", return_value=mock_result),
-            patch("src.signal.scanner_bridge.logger.error") as mock_error,
-        ):
+        second_result = MagicMock()
+        second_result.returncode = 0
+        second_result.stdout = "ok"
+        second_result.stderr = ""
+
+        with patch("subprocess.run", side_effect=[first_result, second_result]) as mock_run:
             signals = bridge.run_pipeline(date="2026-02-16")
 
         assert len(signals) == 1
-        mock_error.assert_not_called()
+        assert signals[0].instrument == "EURUSD"
+        assert mock_run.call_count == 2
+
+        first_cmd = mock_run.call_args_list[0].args[0]
+        second_cmd = mock_run.call_args_list[1].args[0]
+        assert "--benchmark" in first_cmd
+        assert "--benchmark" not in second_cmd
+
 
     def test_run_pipeline_timeout(self, tmp_path: Path) -> None:
         """subprocess.TimeoutExpired → empty list."""

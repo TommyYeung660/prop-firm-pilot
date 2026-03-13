@@ -162,6 +162,21 @@ class ScannerBridge:
         failure_text = f"{stdout}\n{stderr}".lower()
         return "the benchmark [" in failure_text and "does not exist" in failure_text
 
+    def _should_retry_without_benchmark(self, stdout: str, stderr: str) -> bool:
+        """Return True when an older scanner CLI rejects the --benchmark argument."""
+        failure_text = f"{stdout}\n{stderr}".lower()
+        return "unrecognized arguments:" in failure_text and "--benchmark" in failure_text
+
+    def _run_scanner_subprocess(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        """Run scanner CLI with consistent subprocess settings."""
+        return subprocess.run(
+            cmd,
+            cwd=str(self._scanner_path),
+            capture_output=True,
+            text=True,
+            timeout=600,  # 10 min timeout for data download + training
+        )
+
     # ── Main pipeline ───────────────────────────────────────────────────
 
     def run_pipeline(
@@ -229,14 +244,20 @@ class ScannerBridge:
             cmd.extend(["--tickers", ",".join(tickers)])
 
         cmd.extend(["--interval", interval])
+        cmd_without_benchmark = list(cmd)
+        if "--benchmark" in cmd_without_benchmark:
+            benchmark_index = cmd_without_benchmark.index("--benchmark")
+            del cmd_without_benchmark[benchmark_index : benchmark_index + 2]
         try:
-            result = subprocess.run(
-                cmd,
-                cwd=str(self._scanner_path),
-                capture_output=True,
-                text=True,
-                timeout=600,  # 10 min timeout for data download + training
-            )
+            result = self._run_scanner_subprocess(cmd)
+            if result.returncode != 0 and self._should_retry_without_benchmark(
+                result.stdout, result.stderr
+            ):
+                logger.warning(
+                    "ScannerBridge: scanner CLI rejected --benchmark; retrying without it "
+                    "for backward compatibility"
+                )
+                result = self._run_scanner_subprocess(cmd_without_benchmark)
 
             if result.returncode != 0:
                 signals_path = self._scanner_path / "outputs" / "signals" / "signals.csv"
