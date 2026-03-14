@@ -11,63 +11,75 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ---
 
 ## [Unreleased]
-**Roadmap Resequencing for Upcoming v1.4.x Work**
+**Post-v1.4.8 Mainline Validation Window**
 
-> **Status**: Planned roadmap alignment
-> **Reason**: Tactical entry / exit stabilization now takes priority over the broader unfinished `v1.4.5` scope
+> **Status**: `v1.4.8` 已於 2026-03-14 合入 `main`，等待 market-open validation
+> **Reason**: close-control 主線已經落地，下一步不再是擴 scope，而是把 `v1.4.7` / `v1.4.8` 的實盤行為驗證完，並將 `v1.4.9` 限定為 bugfix 與微調版本
 
-### Current Worktree Fixes
+### Planned: v1.4.7 — Tactical Entry Fixes & Optimization
+- tactical entry gate correctness、mixed-source freshness、degraded path 行為與 stale attribution 收尾
+- `WAIT` / retry / degrade / timed_out 生命周期重新校準，避免 intent churn、假性卡死與過早取消
+- per-symbol / session / regime tactical entry threshold calibration，補上可持續調參依據
+- tactical entry diagnostics、reason code、score breakdown、candidate provenance 與 rescan provenance 補齊
+- 與 `qlib_market_scanner` 的輸出契約對齊，為後續 intraday scanner 研究保留 metadata 擴充位
 
-#### Fixed
-- `scripts/unpack_prod_logs.py` 現在會先把 project root 加入 `sys.path`，修復 Windows 直接以 `uv run python .\scripts\unpack_prod_logs.py` 執行時的 `ModuleNotFoundError: scripts.pack_prod_logs`
-- `scripts/pack_prod_logs.py` 對 memory / decisions / Telegram 摘要輸入先做 normalization 與長度截斷，避免超大 payload 或空內容把 LLM 摘要流程打成 `400` / `502`
-- `scripts/pack_prod_logs.py` 對空 Telegram / 空 memory 內容改走 deterministic fallback，不再對無內容 payload 發送摘要請求
-- `MarketDataHub.get_quote()` 在 REST fallback refresh cooldown 期間，不再對同一個 stale `1m` tail 重複刷出 warning；只有實際 refresh 時才記錄 fallback warning
-- `ScannerBridge.run_pipeline()` 若 scanner 已成功產生 `signals.csv`，但後續 benchmark / backtest 報表階段失敗，現在會把該錯誤視為 recoverable，直接回退讀取 signals，避免 prop-firm-pilot 掃描流程被非關鍵後處理中斷
-- tactical `data_freshness` hard gate 現在會優先檢查 `5min` / `1h` bars 的最新時間，不再被 fresh quote timestamp 掩蓋 stale bars，修復 `MarketDataHub` mixed-source 情境下的誤判放行
-- LLM worker timeout 現在會將 `TimeoutError` / `asyncio.TimeoutError` intent 明確標記為 `timed_out`，不再與一般執行錯誤一樣走 `cancelled`
-- tactical `WAIT` retry 到期且 `expire_action=cancel` 時，intent 現在改為 `timed_out`，避免把 timeout 類故障誤記為一般取消
-- scanner benchmark 設定正式收斂為 `FX`，並從 `config/default.yaml` / `config/e8_one_5k_challenge.yaml` 一路傳入 scanner CLI，避免 benchmark / backtest 參數漂移
-- 清理多個 operational scripts 的 Ruff 問題（import order、E402、typing-only imports、長行與無效 f-string），讓 repo lint 可再次通過
+### Planned: v1.4.9 — Bugfix And Micro-Tuning Pass
+- 以 market-open run 結果驗證 `v1.4.7` entry hardening 與 `v1.4.8` close-control 實際表現
+- 只處理實盤暴露出的 correctness bug、journal 欄位細節、close reason 誤分類與 write-budget 邊界
+- 保留 tactical threshold、read-back tolerance、alert wording、postmortem payload 的小幅微調空間
+- 不新增更大範圍的新控制面，避免把 validation 版重新變成 feature 版
 
-#### Added
-- 回歸測試覆蓋 Windows 直接執行 `unpack_prod_logs.py`
-- 回歸測試覆蓋超大 memory / decisions 摘要輸入截斷與空 Telegram 摘要略過
-- 回歸測試覆蓋 stale quote warning suppression 與 recoverable scanner pipeline failure fallback
-- RED-first 測試覆蓋 stale feed hard gate、LLM timeout recovery、tactical timeout lifecycle、scanner benchmark config 與 tactical validator stale-bar freshness 判斷
-- store 層新增 timeout / expired tactical pending recycle 測試，鎖定 `claimed` / `tactical_pending -> timed_out` 狀態轉移
+### Planned: v1.5.0 (stable) — Broader Decision / Risk Upgrade
+- 定義第一個「穩定版」基準：系統必須能穩定可靠地進出場，而不是只靠 hotfix 維持可用
+- tactical entry 與 tactical exit 需達到 production-grade reliability，包含 data provenance、execution integrity、close verification 與 postmortem replayability
+- 把 `v1.4.9` 驗證完成的 entry / exit control plane 升級為 stable release gate，而不是再做一次大重寫
+- 重新評估 `qlib_market_scanner` 是否能有效支援 FX 的小時級或分鐘級量化分析，而不再受限於原本偏日線 / 美股導向的 scoring cadence
+- 重新設計 `TradingAgents` 與 intraday FX 場景的耦合方式，使其能消化更高頻率的 scanner / market context 與交易記憶
+- 建立穩定可靠的交易記憶體系，將 trade journal、reflection、lesson memory、execution outcome 串成可持續改善的 learning loop
+- 將多元化倉位與資金效率正式納入風控與配置層，而不是只做單筆交易最小風險化
 
-#### Validated
-- `uv run pytest tests/test_scheduler.py tests/test_decision_store.py tests/test_tactical_validator.py tests/test_config.py tests/test_scanner_bridge.py` → `265 passed`
-- `uv run ruff check . --exclude .claude` → `All checks passed!`
-
-#### Cross-Repo Note
-- `../qlib_market_scanner` 已同步修正 benchmark / backtest 配置根因，但該 repo 的版本控制與發版獨立於本 changelog
-
-### Planned: Near-Term Release Packaging
-- 將上述 bundle hardening、scanner recoverability、stale-warning suppression、tactical timeout/freshness 修正與 benchmark config 對齊納入下一個 hotfix 發版
-
-### Planned: v1.4.6 — Tactical Entry Fixes & Optimization
-- tactical entry gate correctness、資料 freshness 邊界、degraded path 行為修正
-- `WAIT` / retry / degrade / cancel 分流規則整理，避免 intent churn 與過早取消
-- per-symbol / session / regime tactical entry threshold calibration
-- tactical entry diagnostics、reason code、score breakdown 與資料來源輸出補強
-
-### Planned: v1.4.7 — Tactical Exit Fixes & Optimization
-- tactical exit trigger 與 scheduler / execution / journal 的一致性修正
-- tactical exit action persistence、reason tagging、duplicate close 防護
-- exit-side diagnostics、failure logging 與 action replay 能力補強
-- tactical exit trailing / reprice / 保護性收緊邏輯微調
-
-### Planned: v1.4.8 — Deferred Broader Decision / Risk Upgrade
-- 原先較廣泛的 `v1.4.5` 未完成範圍順延到此版本
-- lessons expansion 到更多 agent nodes
-- memory unification
-- dynamic exit baseline
-- correlation / portfolio guard
+### Cross-Repo Note
+- `v1.5.0 (stable)` 的核心工作明確跨越 `prop-firm-pilot`、`../qlib_market_scanner`、`../TradingAgents` 三個 repo；本 changelog 只追蹤 core pilot repo 的發版節點，完整設計見 roadmap
 
 ### Tracking
 - Roadmap: `docs/PropFirmPilot_v1.4.0_road_map.md`
+
+---
+
+## [1.4.8] — 2026-03-14
+**Close Control Plane And Canonical Close Reconciliation**
+
+> **Status**: 已合入 `main`，等待 market-open production validation
+> **Reason**: tactical exit、reduce exposure、emergency close、best-day close、LLM re-eval close 與 external-detected close 之間仍缺少單一 close-domain contract，導致 journal、metadata、close reason 與 broker action 邊界漂移
+
+### Added
+- `src/decision/close_models.py`：新增 `CloseIntent`、`CloseOutcome`、`CloseReconciliation` typed close-domain schema
+- `src/decision/close_control_plane.py`：新增單一 close execution service，統一路由 `modify_only`、`partial_close`、`full_close`
+- `src/decision/close_reconciler.py`：新增 canonical close reconciler，統一 `trigger_source`、`action_kind`、`final_close_reason`、`resolution_path`
+- 新增 close-domain 測試：`tests/test_close_models.py`、`tests/test_close_control_plane.py`、`tests/test_close_reconciler.py`
+
+### Changed
+- `Scheduler` 現在把 tactical exit、drawdown reduce exposure、emergency close、best-day close、LLM re-eval close 全部改走 `CloseControlPlane`
+- `_handle_position_closed()` 現在以 `CloseReconciler` 產生 canonical close facts，並維持 `DecisionStore.exit_reason = final_close_reason` 的向後相容
+- `TRADE_CLOSED` 與 `CLOSE_CONTROL_EVENT` 現在攜帶統一的 close-control 欄位，降低 journal / alert / postmortem 漂移
+- tactical modify / trailing / breakeven / partial close 的 broker read-back 與 pending close tracking 現在共用同一條控制面
+
+### Validated
+- `uv run pytest tests/test_close_models.py tests/test_close_control_plane.py tests/test_close_reconciler.py tests/test_tactical_exit_execution.py tests/test_tactical_exit_scheduler.py tests/test_reevaluation.py tests/test_exit_reason_classification.py tests/test_scheduler.py tests/monitor/test_equity_monitor.py -q` → `168 passed`
+- `uv run ruff check src/decision/close_models.py src/decision/close_control_plane.py src/decision/close_reconciler.py src/scheduler/scheduler.py tests/test_close_models.py tests/test_close_control_plane.py tests/test_close_reconciler.py tests/test_tactical_exit_execution.py tests/test_tactical_exit_scheduler.py tests/test_reevaluation.py tests/test_exit_reason_classification.py tests/test_scheduler.py tests/monitor/test_equity_monitor.py` → `All checks passed!`
+- `uv run pytest tests/test_circuit_breaker.py tests/test_operational_metrics.py tests/test_memory_journal.py -q` → `37 passed`
+
+### Files
+- `src/decision/close_models.py`
+- `src/decision/close_control_plane.py`
+- `src/decision/close_reconciler.py`
+- `src/scheduler/scheduler.py`
+- `tests/test_close_models.py`
+- `tests/test_close_control_plane.py`
+- `tests/test_close_reconciler.py`
+- `tests/test_tactical_exit_execution.py`
+- `tests/test_reevaluation.py`
+- `tests/test_scheduler.py`
 
 ---
 
