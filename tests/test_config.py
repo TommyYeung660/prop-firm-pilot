@@ -134,6 +134,8 @@ class TestTacticalConfig:
         assert tc.exit.evaluation_interval_seconds == 60
         assert tc.exit.breakeven_activation_r == 0.3
         assert tc.exit.partial_close_ratio == 0.5
+        assert tc.exit.defensive_exit_loss_r == -0.35
+        assert tc.exit.defensive_exit_require_strong_candle is True
         assert tc.exit.use_llm_exception_path is True
 
 

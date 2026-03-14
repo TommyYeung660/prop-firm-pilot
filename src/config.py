@@ -438,6 +438,14 @@ class TacticalExitConfig(BaseModel):
     partial_close_min_r: float = Field(
         default=0.8, description="Minimum open profit in R before partial close is allowed"
     )
+    defensive_exit_loss_r: float = Field(
+        default=-0.35,
+        description="Exit initial-risk positions when structure clearly fails before hard stop",
+    )
+    defensive_exit_require_strong_candle: bool = Field(
+        default=True,
+        description="Require a strong opposing 5m candle before defensive initial-risk exit",
+    )
     modify_cooldown_seconds: int = Field(
         default=300, description="Cooldown between SL/TP modifying actions"
     )

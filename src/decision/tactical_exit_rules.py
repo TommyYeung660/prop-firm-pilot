@@ -178,6 +178,23 @@ def _is_severe_reversal(snapshot: TacticalExitSnapshot, context: ExitSignalConte
     )
 
 
+def _should_defensive_exit_initial_risk(
+    snapshot: TacticalExitSnapshot,
+    context: ExitSignalContext,
+    config: TacticalExitConfig,
+) -> bool:
+    """Return True when an initial-risk position shows clear structure failure."""
+    if snapshot.unrealized_r > config.defensive_exit_loss_r:
+        return False
+    if context.ema_aligned is not False:
+        return False
+    if not context.adverse_rsi:
+        return False
+    if config.defensive_exit_require_strong_candle:
+        return context.opposing_candle_strong
+    return context.opposing_candle
+
+
 def _is_trend_extension(context: ExitSignalContext) -> bool:
     """Return True when trend continuation still looks healthy."""
     has_positive_signal = (
@@ -372,6 +389,13 @@ def choose_tactical_exit(
             state="PROFIT_PROTECTION",
             reason="severe_tactical_reversal",
             requires_llm_exception=True,
+        )
+
+    if state == "INITIAL_RISK" and _should_defensive_exit_initial_risk(snapshot, context, config):
+        return TacticalExitDecision(
+            action="EXIT_NOW",
+            state=state,
+            reason="initial_risk_structure_failure",
         )
 
     if state == "PROFIT_PROTECTION" and not snapshot.partial_close_done:

@@ -48,6 +48,36 @@ def _make_weakening_buy_5min_bars() -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
+def _make_failed_buy_5min_bars(n: int = 50) -> pd.DataFrame:
+    """Create a bearish 5m structure with a strong opposing close."""
+    data: list[dict[str, float]] = []
+    base = 1.1080
+    for i in range(n - 1):
+        open_price = base - i * 0.00018
+        close_price = open_price - 0.00012
+        high_price = open_price + 0.00006
+        low_price = close_price - 0.00006
+        data.append(
+            {
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "close": close_price,
+            }
+        )
+
+    last_open = float(data[-1]["close"]) + 0.00008
+    data.append(
+        {
+            "open": last_open,
+            "high": last_open + 0.00005,
+            "low": last_open - 0.00075,
+            "close": last_open - 0.00060,
+        }
+    )
+    return pd.DataFrame(data)
+
+
 def _make_trending_1h_bars(n: int = 40) -> pd.DataFrame:
     """Create 1h bars with stable ATR and clear upward drift."""
     data: list[dict[str, float]] = []
@@ -157,3 +187,33 @@ def test_calculate_dynamic_take_profit_extends_target_in_trend_extension() -> No
 
     assert candidate is not None
     assert candidate > 1.1080
+
+
+def test_choose_defensive_exit_when_initial_risk_structure_fails() -> None:
+    """Initial-risk positions should exit when short-term structure clearly breaks."""
+    snapshot = _make_snapshot(
+        current_price=1.0970,
+        unrealized_r=-0.5,
+        bars_5min=_make_failed_buy_5min_bars(),
+        bars_1h=_make_trending_1h_bars(),
+    )
+
+    decision = choose_tactical_exit(snapshot, TacticalExitConfig(defensive_exit_loss_r=-0.35))
+
+    assert decision.action == "EXIT_NOW"
+    assert decision.state == "INITIAL_RISK"
+    assert decision.reason == "initial_risk_structure_failure"
+
+
+def test_no_defensive_exit_without_full_failure_confirmation() -> None:
+    """Defensive exit should stay off when loss or structure confirmation is insufficient."""
+    snapshot = _make_snapshot(
+        current_price=1.0994,
+        unrealized_r=-0.2,
+        bars_5min=_make_weakening_buy_5min_bars(),
+        bars_1h=_make_trending_1h_bars(),
+    )
+
+    decision = choose_tactical_exit(snapshot, TacticalExitConfig(defensive_exit_loss_r=-0.35))
+
+    assert decision.action != "EXIT_NOW"
