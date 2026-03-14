@@ -1763,34 +1763,35 @@ class Scheduler:
                     and not self._weekend_force_close_done
                 ):
                     await self._force_close_for_weekend()
-                self._maybe_rollover_best_day_tracker()
-                # Get intents that are in "opened" state
-                opened_intents = await asyncio.to_thread(self._store.get_active_positions)
-                if opened_intents:
-                    # Get currently open positions from broker
-                    open_positions = await self._matchtrader.get_open_positions()
-                    open_position_ids = {str(p.position_id) for p in open_positions}
+                if self._market_hours.is_market_open(self._now_utc()):
+                    self._maybe_rollover_best_day_tracker()
+                    # Get intents that are in "opened" state
+                    opened_intents = await asyncio.to_thread(self._store.get_active_positions)
+                    if opened_intents:
+                        # Get currently open positions from broker
+                        open_positions = await self._matchtrader.get_open_positions()
+                        open_position_ids = {str(p.position_id) for p in open_positions}
 
-                    # Update BestDayTracker with current unrealized PnL
-                    total_unrealized = sum(p.profit for p in open_positions)
-                    self._best_day_tracker.update_unrealized(total_unrealized)
+                        # Update BestDayTracker with current unrealized PnL
+                        total_unrealized = sum(p.profit for p in open_positions)
+                        self._best_day_tracker.update_unrealized(total_unrealized)
 
-                    # Record last-known profit for each open position (manual_close fallback)
-                    for p in open_positions:
-                        self._last_known_profit[str(p.position_id)] = p.profit
+                        # Record last-known profit for each open position (manual_close fallback)
+                        for p in open_positions:
+                            self._last_known_profit[str(p.position_id)] = p.profit
 
-                    # Check for closed positions (SL/TP/manual)
-                    for intent in opened_intents:
-                        if intent.position_id and intent.position_id not in open_position_ids:
-                            # Position was closed (SL/TP/manual)
-                            await self._handle_position_closed(intent)
+                        # Check for closed positions (SL/TP/manual)
+                        for intent in opened_intents:
+                            if intent.position_id and intent.position_id not in open_position_ids:
+                                # Position was closed (SL/TP/manual)
+                                await self._handle_position_closed(intent)
 
-                    # Best Day Rule: proactively close winners if approaching limit
-                    if self._best_day_tracker.should_close_winners() and open_positions:
-                        await self._close_winning_positions(open_positions)
+                        # Best Day Rule: proactively close winners if approaching limit
+                        if self._best_day_tracker.should_close_winners() and open_positions:
+                            await self._close_winning_positions(open_positions)
 
-                    if open_positions:
-                        await self._run_tactical_exit_cycle(open_positions, opened_intents)
+                        if open_positions:
+                            await self._run_tactical_exit_cycle(open_positions, opened_intents)
 
             except asyncio.CancelledError:
                 logger.info("Position monitor loop: cancelled")

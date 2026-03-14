@@ -1730,6 +1730,37 @@ class TestPositionMonitorLoop:
         # No opened intents → no broker API call
         mock_matchtrader.get_open_positions.assert_not_called()
 
+    async def test_skips_position_management_when_market_closed(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Market-closed loop should not poll broker or run tactical management."""
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        _advance_intent_to_opened(store, "EURUSD")
+        sched._market_hours = MagicMock()
+        sched._market_hours.should_force_close.return_value = False
+        sched._market_hours.is_market_open.return_value = False
+        sched._run_tactical_exit_cycle = AsyncMock()
+        sched._reevaluate_open_positions = AsyncMock()
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        mock_matchtrader.get_open_positions.assert_not_called()
+        sched._run_tactical_exit_cycle.assert_not_called()
+        sched._reevaluate_open_positions.assert_not_called()
+
     async def test_sends_sl_tp_alert_on_loss(
         self,
         config: AppConfig,
