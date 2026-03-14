@@ -28,6 +28,8 @@ def test_empty_tactical_data_rejects(validator: TacticalValidator) -> None:
     data = TacticalData()  # all defaults: empty bars, 0 spread, None bar time
     result = validator.evaluate(side="BUY", data=data)
     assert result.action == "REJECT"
+    assert result.resolution == "SKIP_CANCEL"
+    assert result.summary_reason_code == "data.reject.no_tactical_inputs"
     assert "no" in result.detail.lower() or "missing" in result.detail.lower()
 
 
@@ -42,6 +44,8 @@ def test_no_bars_no_spread_no_freshness_rejects(validator: TacticalValidator) ->
     )
     result = validator.evaluate(side="SELL", data=data)
     assert result.action == "REJECT"
+    assert result.resolution == "SKIP_CANCEL"
+    assert result.summary_reason_code == "data.reject.no_tactical_inputs"
 
 
 def test_partial_data_with_spread_does_not_reject(validator: TacticalValidator) -> None:

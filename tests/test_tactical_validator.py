@@ -452,3 +452,83 @@ class TestPassThroughWhenNoData:
             "pass-through" in spread_result.detail.lower()
             or "skipped" in spread_result.detail.lower()
         )
+
+
+# ── v1.4.7: Verdict Schema Tests ─────────────────────────────────────────
+
+
+class TestTacticalVerdictSchema:
+    """v1.4.7: tactical verdicts should expose deterministic schema fields."""
+
+    def test_wait_result_contains_resolution_reason_codes_and_policy_hints(self) -> None:
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        data = TacticalData(
+            current_spread=0.00050,
+            typical_spread=0.00015,
+            latest_bar_time=datetime.now(timezone.utc),
+        )
+
+        result = validator.evaluate(side="BUY", data=data)
+
+        assert result.action == "WAIT"
+        assert result.resolution == "RETRY_PENDING"
+        assert result.summary_reason_code == "spread.fail.ratio_too_wide"
+        assert result.policy_hints["retryable"] is True
+        assert result.hard_gates[0].reason_code == "spread.fail.ratio_too_wide"
+
+    def test_pass_result_contains_execute_now_resolution(self) -> None:
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        bars_5min = pd.DataFrame(
+            {
+                "open": [1.1000 + i * 0.00005 for i in range(50)],
+                "high": [1.1002 + i * 0.00005 for i in range(50)],
+                "low": [1.0999 + i * 0.00005 for i in range(50)],
+                "close": [1.1001 + i * 0.00005 for i in range(50)],
+            }
+        )
+        bars_1h = pd.DataFrame(
+            {
+                "high": [1.1015 + (i % 3) * 0.0001 for i in range(40)],
+                "low": [1.0995 - (i % 3) * 0.0001 for i in range(40)],
+                "close": [1.1005 + (i % 2) * 0.00005 for i in range(40)],
+            }
+        )
+        data = TacticalData(
+            bars_5min=bars_5min,
+            bars_1h=bars_1h,
+            current_spread=0.00020,
+            typical_spread=0.00015,
+            latest_bar_time=datetime.now(timezone.utc),
+            quote_source="websocket_cache",
+            bars_5min_source="websocket_cache",
+            bars_1h_source="websocket_cache",
+            data_source="websocket_cache",
+        )
+
+        result = validator.evaluate(side="BUY", data=data)
+
+        assert result.action == "PASS"
+        assert result.resolution == "EXECUTE_NOW"
+        assert result.summary_reason_code == "tactical.pass.all_gates_aligned"
+        assert result.provenance["data_source"] == "websocket_cache"
+
+    def test_to_log_dict_includes_resolution_reason_and_provenance(self) -> None:
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        data = TacticalData(
+            current_spread=0.00050,
+            typical_spread=0.00015,
+            latest_bar_time=datetime.now(timezone.utc),
+            quote_source="rest_fallback",
+            data_source="rest_fallback",
+        )
+
+        result = validator.evaluate(side="BUY", data=data)
+        payload = result.to_log_dict()
+
+        assert payload["resolution"] == "RETRY_PENDING"
+        assert payload["summary_reason_code"] == "spread.fail.ratio_too_wide"
+        assert payload["policy_hints"]["retryable"] is True
+        assert payload["provenance"]["data_source"] == "rest_fallback"

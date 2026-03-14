@@ -37,6 +37,19 @@ class GateResult:
     value: float | None = None
     threshold: str = ""
     detail: str = ""
+    status: Literal["PASS", "FAIL", "SOFT_FAIL", "DEGRADED", "SKIPPED"] = ""
+    reason_code: str = ""
+    observed_value: float | None = None
+    threshold_value: str = ""
+
+    def __post_init__(self) -> None:
+        """Backfill v1.4.7 schema fields from legacy gate payloads."""
+        if not self.status:
+            self.status = "PASS" if self.passed else "FAIL"
+        if self.observed_value is None:
+            self.observed_value = self.value
+        if not self.threshold_value:
+            self.threshold_value = self.threshold
 
 
 @dataclass
@@ -62,27 +75,65 @@ class TacticalResult:
     """Aggregate result of tactical validation."""
 
     action: Literal["PASS", "WAIT", "REJECT"]
+    resolution: Literal[
+        "EXECUTE_NOW",
+        "RETRY_PENDING",
+        "EXECUTE_DEGRADED",
+        "SKIP_CANCEL",
+        "EXPIRE_TIMEOUT",
+    ] = "EXECUTE_NOW"
     hard_gates: list[GateResult] = field(default_factory=list)
     soft_gates: list[GateResult] = field(default_factory=list)
     soft_score: int = 0
     soft_required: int = 2
     detail: str = ""
+    summary_reason_code: str = ""
+    policy_hints: dict[str, Any] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
+    retry_count: int = 0
 
     def to_log_dict(self) -> dict[str, Any]:
         """Serialize to dict for JSONL/DuckDB logging."""
         return {
             "action": self.action,
+            "resolution": self.resolution,
+            "summary_reason_code": self.summary_reason_code,
             "hard_gates": [
-                {"gate": r.gate_name, "passed": r.passed, "value": r.value, "detail": r.detail}
+                {
+                    "gate": r.gate_name,
+                    "passed": r.passed,
+                    "status": r.status,
+                    "reason_code": r.reason_code,
+                    "value": r.value,
+                    "observed_value": r.observed_value,
+                    "threshold": r.threshold,
+                    "threshold_value": r.threshold_value,
+                    "detail": r.detail,
+                }
                 for r in self.hard_gates
             ],
             "soft_gates": [
-                {"gate": r.gate_name, "passed": r.passed, "value": r.value, "detail": r.detail}
+                {
+                    "gate": r.gate_name,
+                    "passed": r.passed,
+                    "status": r.status,
+                    "reason_code": r.reason_code,
+                    "value": r.value,
+                    "observed_value": r.observed_value,
+                    "threshold": r.threshold,
+                    "threshold_value": r.threshold_value,
+                    "detail": r.detail,
+                }
                 for r in self.soft_gates
             ],
             "soft_score": self.soft_score,
             "soft_required": self.soft_required,
             "detail": self.detail,
+            "policy_hints": self.policy_hints,
+            "provenance": self.provenance,
+            "context": self.context,
+            "retry_count": self.retry_count,
         }
 
 
@@ -175,6 +226,47 @@ class TacticalValidator:
     def __init__(self, config: TacticalConfig) -> None:
         self._config = config
 
+    def _build_provenance(self, data: TacticalData) -> dict[str, Any]:
+        """Build the journal-first provenance bundle for one tactical evaluation."""
+        return {
+            "quote_source": data.quote_source,
+            "bars_5min_source": data.bars_5min_source,
+            "bars_1h_source": data.bars_1h_source,
+            "data_source": data.data_source,
+            "quote_timestamp": (
+                data.latest_bar_time.isoformat() if data.latest_bar_time is not None else ""
+            ),
+            "freshness_basis": "quote" if data.latest_bar_time is not None else "",
+        }
+
+    def _default_policy_hints(
+        self,
+        *,
+        retryable: bool,
+        degrade_allowed: bool = False,
+    ) -> dict[str, Any]:
+        """Build default scheduler-facing policy hints."""
+        return {
+            "retryable": retryable,
+            "degrade_allowed": degrade_allowed,
+            "retry_interval_seconds": 0,
+            "retry_budget_remaining": 0,
+            "terminal_if_repeated": not retryable,
+            "skip_new_rescan": False,
+        }
+
+    def _first_failed_reason_code(
+        self,
+        gate_results: list[GateResult],
+        *,
+        fallback: str,
+    ) -> str:
+        """Return the first failing reason code from a gate list."""
+        for gate in gate_results:
+            if not gate.passed and gate.reason_code:
+                return gate.reason_code
+        return fallback
+
     # ── Hard Gates ─────────────────────────────────────────────────────
 
     def _check_spread_gate(self, current_spread: float, typical_spread: float) -> GateResult:
@@ -187,6 +279,10 @@ class TacticalValidator:
             passed=passed,
             value=ratio,
             threshold=f"< {self._config.hard_gates.spread_max_multiplier}×",
+            status="PASS" if passed else "FAIL",
+            reason_code=(
+                "spread.pass.within_limit" if passed else "spread.fail.ratio_too_wide"
+            ),
             detail=(
                 f"spread_ratio={ratio:.2f}, limit={self._config.hard_gates.spread_max_multiplier}×"
             ),
@@ -203,6 +299,8 @@ class TacticalValidator:
             passed=passed,
             value=ratio,
             threshold=f"{min_r}× < ATR ratio < {max_r}×",
+            status="PASS" if passed else "FAIL",
+            reason_code="atr.pass.in_regime" if passed else "atr.fail.out_of_regime",
             detail=f"atr_ratio={ratio:.2f}, range=[{min_r}, {max_r}]",
         )
 
@@ -221,6 +319,12 @@ class TacticalValidator:
             passed=passed,
             value=age_seconds,
             threshold=f"< {max_age}s",
+            status="PASS" if passed else "FAIL",
+            reason_code=(
+                f"freshness.pass.{label}_fresh"
+                if passed
+                else f"freshness.wait.{label}_stale_retryable"
+            ),
             detail=f"{label}_age={age_seconds:.0f}s, max={max_age}s",
         )
 
@@ -254,6 +358,8 @@ class TacticalValidator:
             return GateResult(
                 gate_name="data_freshness",
                 passed=False,
+                status="FAIL",
+                reason_code="freshness.fail.timestamp_missing",
                 detail="No bar timestamp available",
             )
 
@@ -290,6 +396,8 @@ class TacticalValidator:
                 GateResult(
                     gate_name="spread",
                     passed=True,
+                    status="SKIPPED",
+                    reason_code="spread.skipped.no_data",
                     detail="Spread gate skipped — no spread data available (pass-through)",
                 )
             )
@@ -313,6 +421,8 @@ class TacticalValidator:
                     GateResult(
                         gate_name="atr_regime",
                         passed=False,
+                        status="FAIL",
+                        reason_code="atr.fail.insufficient_1h_data",
                         detail="Insufficient 1H data for ATR calculation",
                     )
                 )
@@ -322,6 +432,8 @@ class TacticalValidator:
                 GateResult(
                     gate_name="atr_regime",
                     passed=True,
+                    status="SKIPPED",
+                    reason_code="atr.skipped.no_1h_data",
                     detail="ATR gate skipped — no 1H bar data available (pass-through)",
                 )
             )
@@ -342,6 +454,8 @@ class TacticalValidator:
             return GateResult(
                 gate_name="ema_momentum",
                 passed=True,
+                status="SKIPPED",
+                reason_code="ema.skipped.insufficient_5min_data",
                 detail="EMA gate skipped — insufficient 5min data (pass-through)",
             )
 
@@ -366,6 +480,8 @@ class TacticalValidator:
                 f"{'>' if side == 'BUY' else '<'} "
                 f"EMA({self._config.soft_gates.ema_slow})"
             ),
+            status="PASS" if passed else "SOFT_FAIL",
+            reason_code="ema.pass.aligned" if passed else "ema.soft_fail.misaligned",
             detail=(f"fast={fast_val:.5f}, slow={slow_val:.5f}, diff={fast_val - slow_val:.5f}"),
         )
 
@@ -378,6 +494,8 @@ class TacticalValidator:
             return GateResult(
                 gate_name="rsi_state",
                 passed=True,
+                status="SKIPPED",
+                reason_code="rsi.skipped.insufficient_5min_data",
                 detail="RSI gate skipped — insufficient 5min data (pass-through)",
             )
 
@@ -400,6 +518,8 @@ class TacticalValidator:
             passed=passed,
             value=rsi,
             threshold=f"RSI {'<' if side == 'BUY' else '>'} {rsi_limit}",
+            status="PASS" if passed else "SOFT_FAIL",
+            reason_code="rsi.pass.in_range" if passed else "rsi.soft_fail.extreme_against_side",
             detail=f"rsi={rsi:.1f}",
         )
 
@@ -409,6 +529,8 @@ class TacticalValidator:
             return GateResult(
                 gate_name="candle_quality",
                 passed=False,
+                status="SOFT_FAIL",
+                reason_code="candle.soft_fail.no_5min_data",
                 detail="No 5min bar data",
             )
 
@@ -425,6 +547,10 @@ class TacticalValidator:
             passed=passed,
             value=body_ratio,
             threshold=f"> {self._config.soft_gates.candle_min_body_ratio}",
+            status="PASS" if passed else "SOFT_FAIL",
+            reason_code=(
+                "candle.pass.directional_body" if passed else "candle.soft_fail.body_too_small"
+            ),
             detail=f"body_ratio={body_ratio:.3f}",
         )
 
@@ -465,7 +591,11 @@ class TacticalValidator:
             logger.warning("Tactical REJECT: no data — spread, bars, freshness all missing")
             return TacticalResult(
                 action="REJECT",
+                resolution="SKIP_CANCEL",
                 detail="No tactical data available — spread, bars, and freshness all missing",
+                summary_reason_code="data.reject.no_tactical_inputs",
+                policy_hints=self._default_policy_hints(retryable=False),
+                provenance=self._build_provenance(data),
             )
 
         hard_results = self.check_hard_gates(data)
@@ -476,8 +606,15 @@ class TacticalValidator:
             logger.debug("Tactical WAIT: hard gates failed: {}", ", ".join(failed_gates))
             return TacticalResult(
                 action="WAIT",
+                resolution="RETRY_PENDING",
                 hard_gates=hard_results,
                 detail=f"Hard gates failed: {', '.join(failed_gates)}",
+                summary_reason_code=self._first_failed_reason_code(
+                    hard_results,
+                    fallback="hard.wait.gate_failed",
+                ),
+                policy_hints=self._default_policy_hints(retryable=True, degrade_allowed=True),
+                provenance=self._build_provenance(data),
             )
 
         soft_results = self.check_soft_gates(side, data)
@@ -487,6 +624,7 @@ class TacticalValidator:
         if soft_score >= soft_required:
             return TacticalResult(
                 action="PASS",
+                resolution="EXECUTE_NOW",
                 hard_gates=hard_results,
                 soft_gates=soft_results,
                 soft_score=soft_score,
@@ -495,13 +633,20 @@ class TacticalValidator:
                     f"All hard gates passed, soft score "
                     f"{soft_score}/{len(soft_results)} ≥ {soft_required}"
                 ),
+                summary_reason_code="tactical.pass.all_gates_aligned",
+                policy_hints=self._default_policy_hints(retryable=False),
+                provenance=self._build_provenance(data),
             )
         else:
             return TacticalResult(
                 action="WAIT",
+                resolution="RETRY_PENDING",
                 hard_gates=hard_results,
                 soft_gates=soft_results,
                 soft_score=soft_score,
                 soft_required=soft_required,
                 detail=(f"Soft score {soft_score}/{len(soft_results)} < {soft_required}"),
+                summary_reason_code="soft.wait.score_below_threshold",
+                policy_hints=self._default_policy_hints(retryable=True, degrade_allowed=True),
+                provenance=self._build_provenance(data),
             )
