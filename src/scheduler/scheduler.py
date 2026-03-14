@@ -906,7 +906,7 @@ class Scheduler:
                     await self._log_tactical_result(intent, decision.decision, tactical_result)
 
                     if not self._config.tactical.shadow_mode:
-                        if tactical_result.action == "WAIT":
+                        if tactical_result.resolution == "RETRY_PENDING":
                             progressed = await self._retry_tactical_pending(
                                 worker_id=worker_id,
                                 intent=intent,
@@ -915,7 +915,7 @@ class Scheduler:
                             )
                             self._metrics.record_tactical_result(passed=progressed)
                             return
-                        if tactical_result.action == "REJECT":
+                        if tactical_result.resolution == "SKIP_CANCEL":
                             await self._cancel_intent_safe(
                                 worker_id=worker_id,
                                 intent_id=intent.id,
@@ -932,17 +932,63 @@ class Scheduler:
                                     "symbol": intent.symbol,
                                     "side": decision.decision,
                                     "action": tactical_result.action,
+                                    "resolution": tactical_result.resolution,
                                     "detail": tactical_result.detail,
                                 },
                             )
                             logger.warning(
-                                "LLM worker {}: intent {} tactical {} — blocked from execution",
+                                "LLM worker {}: intent {} tactical {} / {} "
+                                "— blocked from execution",
                                 worker_id,
                                 intent.id,
                                 tactical_result.action,
+                                tactical_result.resolution,
                             )
                             self._metrics.record_tactical_result(passed=False)
                             return
+                        if tactical_result.resolution == "EXPIRE_TIMEOUT":
+                            await self._timeout_intent_safe(
+                                worker_id=worker_id,
+                                intent_id=intent.id,
+                                reason=(
+                                    f"Tactical gate {tactical_result.action}: "
+                                    f"{tactical_result.detail}"
+                                ),
+                                context="tactical_gate_timeout",
+                            )
+                            self._log_trade_event(
+                                "TACTICAL_BLOCKED",
+                                {
+                                    "intent_id": intent.id,
+                                    "symbol": intent.symbol,
+                                    "side": decision.decision,
+                                    "action": tactical_result.action,
+                                    "resolution": tactical_result.resolution,
+                                    "detail": tactical_result.detail,
+                                },
+                            )
+                            logger.warning(
+                                "LLM worker {}: intent {} tactical {} / {} "
+                                "— timed out before execution",
+                                worker_id,
+                                intent.id,
+                                tactical_result.action,
+                                tactical_result.resolution,
+                            )
+                            self._metrics.record_tactical_result(passed=False)
+                            return
+                        if tactical_result.resolution == "EXECUTE_DEGRADED":
+                            self._log_trade_event(
+                                "TACTICAL_DEGRADED",
+                                {
+                                    "intent_id": intent.id,
+                                    "symbol": intent.symbol,
+                                    "side": decision.decision,
+                                    "action": tactical_result.action,
+                                    "resolution": tactical_result.resolution,
+                                    "detail": tactical_result.detail,
+                                },
+                            )
 
                 self._metrics.record_tactical_result(passed=True)
                 await asyncio.to_thread(self._store.mark_ready_for_exec, intent.id)
@@ -1206,7 +1252,7 @@ class Scheduler:
                 retry_count=retry_count,
             )
 
-            if tactical_result.action == "PASS":
+            if tactical_result.resolution == "EXECUTE_NOW":
                 await asyncio.to_thread(self._store.mark_ready_for_exec_from_tactical, intent.id)
                 logger.info(
                     "LLM worker {}: intent {} tactical retry passed on attempt {}",
@@ -1216,12 +1262,41 @@ class Scheduler:
                 )
                 return True
 
-            if tactical_result.action == "REJECT":
+            if tactical_result.resolution == "EXECUTE_DEGRADED":
+                await asyncio.to_thread(self._store.mark_ready_for_exec_from_tactical, intent.id)
+                self._log_trade_event(
+                    "TACTICAL_DEGRADED",
+                    {
+                        "intent_id": intent.id,
+                        "symbol": intent.symbol,
+                        "side": side,
+                        "retries": retry_count,
+                        "detail": tactical_result.detail,
+                    },
+                )
+                logger.warning(
+                    "LLM worker {}: intent {} tactical retry degraded on attempt {}",
+                    worker_id,
+                    intent.id,
+                    retry_count,
+                )
+                return True
+
+            if tactical_result.resolution == "SKIP_CANCEL":
                 await self._cancel_intent_safe(
                     worker_id=worker_id,
                     intent_id=intent.id,
                     reason=f"Tactical gate REJECT: {tactical_result.detail}",
                     context="tactical_retry_reject",
+                )
+                return False
+
+            if tactical_result.resolution == "EXPIRE_TIMEOUT":
+                await self._timeout_intent_safe(
+                    worker_id=worker_id,
+                    intent_id=intent.id,
+                    reason=f"Tactical gate {tactical_result.action}: {tactical_result.detail}",
+                    context="tactical_retry_timeout",
                 )
                 return False
 

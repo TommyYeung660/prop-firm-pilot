@@ -93,6 +93,13 @@ class TacticalResult:
     context: dict[str, Any] = field(default_factory=dict)
     retry_count: int = 0
 
+    def __post_init__(self) -> None:
+        """Backfill resolution defaults from legacy action-only results."""
+        if self.action == "WAIT" and self.resolution == "EXECUTE_NOW":
+            self.resolution = "RETRY_PENDING"
+        elif self.action == "REJECT" and self.resolution == "EXECUTE_NOW":
+            self.resolution = "SKIP_CANCEL"
+
     def to_log_dict(self) -> dict[str, Any]:
         """Serialize to dict for JSONL/DuckDB logging."""
         return {
