@@ -446,6 +446,8 @@ class TestReevaluateOpenPositions:
             volume=0.01,
         )
         assert "POS-1" in scheduler._reevaluation_close_positions
+        assert scheduler._pending_close_outcomes["POS-1"].trigger_source == "reeval_close"
+        assert scheduler._pending_close_outcomes["POS-1"].action_kind == "full_close"
 
     async def test_buy_signal_on_sell_position_closes(
         self,
@@ -475,6 +477,8 @@ class TestReevaluateOpenPositions:
             volume=0.01,
         )
         assert "POS-1" in scheduler._reevaluation_close_positions
+        assert scheduler._pending_close_outcomes["POS-1"].trigger_source == "reeval_close"
+        assert scheduler._pending_close_outcomes["POS-1"].action_kind == "full_close"
 
     async def test_buy_signal_on_buy_position_keeps_open(
         self,

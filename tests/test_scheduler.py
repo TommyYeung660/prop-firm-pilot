@@ -2441,6 +2441,9 @@ class TestBestDayIntegration:
         # Verify best_day_close_positions set tracks closed position IDs
         assert "pos_1" in sched._best_day_close_positions
         assert "pos_2" in sched._best_day_close_positions
+        assert sched._pending_close_outcomes["pos_1"].trigger_source == "best_day_close"
+        assert sched._pending_close_outcomes["pos_2"].trigger_source == "best_day_close"
+        assert sched._pending_close_outcomes["pos_1"].action_kind == "full_close"
 
     async def test_does_not_close_when_threshold_not_reached(
         self,
@@ -2532,6 +2535,81 @@ class TestBestDayIntegration:
         # Verify only the profitable position was tracked for best day close
         assert "pos_win" in sched._best_day_close_positions
         assert "pos_loss" not in sched._best_day_close_positions
+        assert sched._pending_close_outcomes["pos_win"].trigger_source == "best_day_close"
+
+    async def test_reduce_exposure_registers_partial_close_outcomes(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Drawdown de-risk should flow through close control as partial_close."""
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+
+        pos = MagicMock()
+        pos.position_id = "pos_reduce"
+        pos.symbol = "EURUSD"
+        pos.side = "BUY"
+        pos.volume = 0.10
+        mock_matchtrader.get_open_positions.return_value = [pos]
+        mock_matchtrader.close_position.return_value = MagicMock(success=True)
+
+        await sched._reduce_exposure_on_drawdown("DANGER", 0.041, 0.031, 4875.0)
+
+        assert "pos_reduce" in sched._pending_close_outcomes
+        outcome = sched._pending_close_outcomes["pos_reduce"]
+        assert outcome.trigger_source == "reduce_exposure"
+        assert outcome.action_kind == "partial_close"
+
+    async def test_emergency_close_registers_full_close_outcomes(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Emergency close should register one full-close outcome per position."""
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+
+        pos1 = MagicMock()
+        pos1.position_id = "pos_em_1"
+        pos1.symbol = "EURUSD"
+        pos1.side = "BUY"
+        pos1.volume = 0.10
+
+        pos2 = MagicMock()
+        pos2.position_id = "pos_em_2"
+        pos2.symbol = "GBPUSD"
+        pos2.side = "SELL"
+        pos2.volume = 0.20
+
+        mock_matchtrader.get_open_positions.return_value = [pos1, pos2]
+        mock_matchtrader.close_position.return_value = MagicMock(success=True)
+
+        await sched._handle_emergency_close()
+
+        assert sched._pending_close_outcomes["pos_em_1"].trigger_source == "emergency_close"
+        assert sched._pending_close_outcomes["pos_em_2"].trigger_source == "emergency_close"
+        assert sched._pending_close_outcomes["pos_em_1"].action_kind == "full_close"
 
     async def test_sends_best_day_protection_alert(
         self,
@@ -3302,6 +3380,87 @@ async def test_handle_position_closed_exit_reason_from_close_price(
     call_kwargs = sched._alert_service.sl_tp_hit.call_args[1]
     assert call_kwargs["hit_type"] == "TP"
     assert call_kwargs["trigger_price"] == 1.0951
+
+
+async def test_handle_position_closed_logs_unified_trade_closed_payload(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+    tmp_path,
+):
+    """TRADE_CLOSED journal event should include canonical close-control fields."""
+    import json
+
+    from src.monitor.trade_journal import TradeJournal
+
+    journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+        trade_journal=journal,
+    )
+    sched._alert_service = AsyncMock()
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+    store.update_intent_decision(
+        claimed.id, "BUY", sl_pips=50.0, tp_pips=100.0, risk_report="test", state_json="{}"
+    )
+    store.mark_ready_for_exec(claimed.id)
+    store.mark_executing(claimed.id)
+    store.mark_opened(claimed.id, position_id="pos-trade-closed")
+    store.update_execution_meta(
+        claimed.id,
+        json.dumps(
+            {
+                "fill_price": 1.085,
+                "volume": 0.05,
+                "side": "BUY",
+                "sl_price": 1.080,
+                "tp_price": 1.095,
+            }
+        ),
+    )
+
+    closed_pos = MagicMock(
+        position_id="pos-trade-closed",
+        profit=35.0,
+        close_price=1.0950,
+        open_price=1.085,
+        volume=0.05,
+        close_reason="",
+    )
+    mock_matchtrader.get_closed_positions = AsyncMock(return_value=[closed_pos])
+    mock_matchtrader.get_balance.return_value = MagicMock(
+        balance=50035.0,
+        equity=50035.0,
+        margin=0.0,
+        free_margin=50035.0,
+    )
+
+    opened_intent = store.get_intent(claimed.id)
+    await sched._handle_position_closed(opened_intent)
+
+    entries = [json.loads(line) for line in journal._path.read_text(encoding="utf-8").splitlines()]
+    trade_closed = next(entry for entry in entries if entry["type"] == "TRADE_CLOSED")
+    assert trade_closed["trigger_source"] == "manual_or_broker"
+    assert trade_closed["action_kind"] == "external_detected_close"
+    assert trade_closed["final_close_reason"] == "tp_hit"
+    assert trade_closed["resolution_path"] == "broker_api"
 
 
 def test_build_reflection_payload_includes_trade_outcome_context(

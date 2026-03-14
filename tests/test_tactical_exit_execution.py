@@ -189,12 +189,20 @@ async def test_partial_close_executes_half_volume_and_marks_meta(
     assert meta["partial_close_done"] is True
     assert meta["partial_close_volume"] == pytest.approx(0.05)
     assert meta["last_tactical_exit_action"] == "PARTIAL_CLOSE"
+    assert meta["close_control"]["trigger_source"] == "tactical_exit"
+    assert meta["close_control"]["action_kind"] == "partial_close"
+    assert meta["close_control"]["execution_status"] == "submitted"
 
     entries = [
         json.loads(line)
         for line in trade_journal._path.read_text(encoding="utf-8").splitlines()
     ]
     assert any(entry.get("type") == "TACTICAL_EXIT_ACTION" for entry in entries)
+    assert any(
+        entry.get("type") == "CLOSE_CONTROL_EVENT"
+        and entry.get("execution_status") == "submitted"
+        for entry in entries
+    )
 
 
 @pytest.mark.asyncio
@@ -222,12 +230,18 @@ async def test_modify_verification_failure_does_not_mark_action_complete(
     meta = json.loads(store.get_decision(intent.id).execution_meta)
     assert meta.get("last_tactical_exit_action") != "MOVE_TO_BREAKEVEN"
     assert meta.get("breakeven_sl") is None
+    assert meta["close_control"]["execution_status"] == "verify_failed"
+    assert meta["close_control"]["readback_status"] == "mismatch"
 
     entries = [
         json.loads(line)
         for line in trade_journal._path.read_text(encoding="utf-8").splitlines()
     ]
-    assert any(entry.get("type") == "TACTICAL_EXIT_SKIPPED" for entry in entries)
+    assert any(
+        entry.get("type") == "CLOSE_CONTROL_EVENT"
+        and entry.get("execution_status") == "verify_failed"
+        for entry in entries
+    )
 
 
 @pytest.mark.asyncio
@@ -262,3 +276,5 @@ async def test_modify_action_normalizes_prices_before_verify_and_meta_update(
 
     meta = json.loads(store.get_decision(intent.id).execution_meta)
     assert meta["trailing_sl"] == pytest.approx(1.10321)
+    assert meta["close_control"]["execution_status"] == "accepted"
+    assert meta["close_control"]["readback_status"] == "verified"

@@ -39,6 +39,9 @@ from src.data.fx_tick_aggregator import FXTickAggregator
 from src.data.fx_websocket_client import EODHDFXWebSocketClient
 from src.data.market_data_hub import MarketDataHub
 from src.decision.agent_bridge import AgentBridge, AgentDecision, RiskMeta
+from src.decision.close_control_plane import CloseControlPlane
+from src.decision.close_models import CloseIntent, CloseOutcome
+from src.decision.close_reconciler import CloseReconciler
 from src.decision.decision_formatter import format_decision
 from src.decision.schemas import TradeIntent
 from src.decision.tactical_exit_manager import (
@@ -61,7 +64,6 @@ from src.monitor.trade_journal import TradeJournal
 from src.optimize.optimization_engine import OptimizationEngine
 from src.optimize.optimization_state import OptimizationState, Thresholds
 from src.optimize.tactical_entry_stats import build_daily_entry_calibration_snapshot
-from src.scheduler.close_resolution import determine_resolution_path
 from src.scheduler.decision_cache import StrategicDecisionCache
 from src.scheduler.low_confidence_cooldown import LowConfidenceCooldown
 from src.scheduler.market_hours import MarketHoursChecker
@@ -149,6 +151,13 @@ class Scheduler:
         # v1.3.7: Tactical execution module (shadow mode)
         self._tactical_validator = tactical_validator or TacticalValidator(config.tactical)
         self._tactical_exit_manager = TacticalExitManager(config.tactical.exit)
+        self._close_control_plane = CloseControlPlane(
+            matchtrader=self._matchtrader,
+            normalize_price=self._normalize_tactical_price,
+            price_precision_resolver=self._price_precision_for_symbol,
+        )
+        self._close_reconciler = CloseReconciler(pip_size_resolver=self._get_pip_size)
+        self._pending_close_outcomes: dict[str, CloseOutcome] = {}
         self._decision_cache = decision_cache or StrategicDecisionCache(
             ttl_seconds=config.tactical.decision_cache.ttl_seconds
         )
@@ -1699,13 +1708,24 @@ class Scheduler:
             reduce_volume = self._compute_reduction_volume(pos.symbol, pos.volume)
             if reduce_volume <= 0:
                 continue
-            result = await self._matchtrader.close_position(
-                position_id=pos.position_id,
+            close_intent = CloseIntent(
+                trigger_source="reduce_exposure",
+                action_kind="partial_close",
+                position_id=str(pos.position_id),
+                intent_id="drawdown-reduce-exposure",
                 symbol=pos.symbol,
                 side=pos.side,
-                volume=reduce_volume,
+                reason_code="drawdown_reduce_exposure",
+                requested_volume=reduce_volume,
             )
-            results.append((pos.position_id, reduce_volume, result.success))
+            outcome = await self._execute_close_control_intent(close_intent)
+            results.append(
+                (
+                    str(pos.position_id),
+                    reduce_volume,
+                    outcome.execution_status == "submitted",
+                )
+            )
 
         if results:
             self._log_trade_event(
@@ -1743,13 +1763,35 @@ class Scheduler:
 
     async def _handle_emergency_close(self) -> None:
         """Close all positions and emit emergency audit events."""
-        results = await self._matchtrader.close_all_positions()
-        closed_count = sum(1 for r in results if r.success)
+        positions = await self._matchtrader.get_open_positions()
+        results: list[dict[str, Any]] = []
+        for pos in positions:
+            close_intent = CloseIntent(
+                trigger_source="emergency_close",
+                action_kind="full_close",
+                position_id=str(pos.position_id),
+                intent_id="equity-emergency-close",
+                symbol=pos.symbol,
+                side=pos.side,
+                reason_code="equity_emergency_close",
+                requested_volume=pos.volume,
+            )
+            outcome = await self._execute_close_control_intent(close_intent)
+            results.append(
+                {
+                    "position_id": str(pos.position_id),
+                    "symbol": pos.symbol,
+                    "execution_status": outcome.execution_status,
+                    "success": outcome.execution_status == "submitted",
+                }
+            )
+
+        closed_count = sum(1 for result in results if result["success"])
         self._log_trade_event(
             "EQUITY_EMERGENCY_CLOSE",
             {
                 "closed_count": closed_count,
-                "results": [result.model_dump() for result in results],
+                "results": results,
             },
         )
         await self._send_alert(
@@ -1942,11 +1984,12 @@ class Scheduler:
         open_price = 0.0
         volume = 0.0
         exit_reason = "manual_close"  # Default — could be tp_hit, sl_hit, etc.
+        matched = False
+        broker_closed: Any | None = None
         try:
             # Retry with increasing delays to let broker update closed positions list
             now_ms = int(self._now_utc().timestamp() * 1000)
             day_ago_ms = now_ms - 86_400_000
-            matched = False
             for attempt, delay in enumerate((2.0, 4.0, 8.0, 12.0, 16.0), start=1):
                 await asyncio.sleep(delay)
                 closed_positions = await self._matchtrader.get_closed_positions(
@@ -1954,10 +1997,11 @@ class Scheduler:
                 )
                 for closed in closed_positions:
                     if str(closed.position_id) == position_id:
-                        pnl = closed.profit
-                        close_price = closed.close_price
-                        open_price = closed.open_price
-                        volume = closed.volume
+                        broker_closed = closed
+                        pnl = float(closed.profit)
+                        close_price = float(closed.close_price)
+                        open_price = float(closed.open_price)
+                        volume = float(closed.volume)
                         # Infer exit reason from PnL direction
                         if pnl > 0:
                             exit_reason = "tp_hit"
@@ -1980,44 +2024,36 @@ class Scheduler:
                 position_id,
                 e,
             )
-        decision = None  # May be loaded by execution_meta fallback below
+        decision = None  # May be loaded later for reflection/AB stats
+        execution_meta = self._load_execution_meta_dict(intent)
         # ── v1.3.9: execution_meta fallback for volume/prices ──────────
         # When broker API didn't return data, read from execution_meta
         # (persisted at trade open time by engine.py)
         used_execution_meta = False
-        if volume == 0.0 or close_price == 0.0:
-            try:
-                decision = await asyncio.to_thread(self._store.get_decision, intent.id)
-                if decision and decision.execution_meta:
-                    meta = json.loads(decision.execution_meta)
-                    if volume == 0.0 and meta.get("volume"):
-                        volume = meta["volume"]
-                        used_execution_meta = True
-                        logger.info(
-                            "Position monitor: using execution_meta volume={} for {}",
-                            volume,
-                            position_id,
-                        )
-                    if open_price == 0.0 and meta.get("fill_price"):
-                        open_price = meta["fill_price"]
-                    # For close_price fallback: use SL/TP price based on exit_reason
-                    if close_price == 0.0:
-                        if exit_reason == "sl_hit" and meta.get("sl_price"):
-                            close_price = meta["sl_price"]
-                        elif exit_reason == "tp_hit" and meta.get("tp_price"):
-                            close_price = meta["tp_price"]
-                        if close_price != 0.0:
-                            logger.info(
-                                "Position monitor: using execution_meta {} price={} for {}",
-                                exit_reason,
-                                close_price,
-                                position_id,
-                            )
-            except Exception as e:
-                logger.debug(
-                    "Position monitor: could not read execution_meta for {}: {}",
-                    intent.id,
-                    e,
+        if volume == 0.0 and execution_meta.get("volume"):
+            volume = float(execution_meta["volume"])
+            used_execution_meta = True
+            logger.info(
+                "Position monitor: using execution_meta volume={} for {}",
+                volume,
+                position_id,
+            )
+        if open_price == 0.0 and execution_meta.get("fill_price"):
+            open_price = float(execution_meta["fill_price"])
+        # For close_price fallback: use SL/TP price based on exit_reason
+        if close_price == 0.0:
+            if exit_reason == "sl_hit" and execution_meta.get("sl_price"):
+                close_price = float(execution_meta["sl_price"])
+                used_execution_meta = True
+            elif exit_reason == "tp_hit" and execution_meta.get("tp_price"):
+                close_price = float(execution_meta["tp_price"])
+                used_execution_meta = True
+            if close_price != 0.0:
+                logger.info(
+                    "Position monitor: using execution_meta {} price={} for {}",
+                    exit_reason,
+                    close_price,
+                    position_id,
                 )
         used_best_day = False
         # Override exit_reason if Best Day Rule triggered this close
@@ -2070,31 +2106,50 @@ class Scheduler:
         # v1.3.9: Improved exit_reason — compare close_price vs SL/TP prices
         # More accurate than PnL sign alone (handles manual close in profit)
         if close_price != 0.0 and exit_reason in ("tp_hit", "sl_hit", "manual_close"):
-            try:
-                if decision is None:
-                    decision = await asyncio.to_thread(self._store.get_decision, intent.id)
-                if decision and decision.execution_meta:
-                    meta = json.loads(decision.execution_meta)
-                    sl_price = meta.get("breakeven_sl") or meta.get("sl_price", 0.0)
-                    tp_price = meta.get("tp_price", 0.0)
-                    pip_size = self._get_pip_size(symbol)
-                    tolerance = pip_size * 3  # 3-pip tolerance for slippage
+            sl_price = execution_meta.get("breakeven_sl") or execution_meta.get("sl_price", 0.0)
+            tp_price = execution_meta.get("tp_price", 0.0)
+            pip_size = self._get_pip_size(symbol)
+            tolerance = pip_size * 3  # 3-pip tolerance for slippage
 
-                    if tp_price and abs(close_price - tp_price) <= tolerance:
-                        exit_reason = "tp_hit"
-                    elif sl_price and abs(close_price - sl_price) <= tolerance:
-                        exit_reason = "sl_hit"
-            except Exception:
-                pass  # Keep existing exit_reason; decision stays as loaded
+            if tp_price and abs(close_price - tp_price) <= tolerance:
+                exit_reason = "tp_hit"
+            elif sl_price and abs(close_price - sl_price) <= tolerance:
+                exit_reason = "sl_hit"
 
-        # v1.3.9: Resolution path tracking for trade retrospection quality
-        resolution_path = determine_resolution_path(
+        pending_outcome = self._pending_close_outcomes.pop(position_id, None)
+        if pending_outcome is None:
+            if exit_reason == "best_day_close":
+                pending_outcome = CloseOutcome(
+                    trigger_source="best_day_close",
+                    action_kind="full_close",
+                    execution_status="submitted",
+                    readback_status="pending_reconcile",
+                )
+            elif exit_reason == "reeval_close":
+                pending_outcome = CloseOutcome(
+                    trigger_source="reeval_close",
+                    action_kind="full_close",
+                    execution_status="submitted",
+                    readback_status="pending_reconcile",
+                )
+
+        reconciliation = self._close_reconciler.reconcile(
+            symbol=symbol,
+            pending_outcome=pending_outcome,
+            broker_closed=broker_closed,
+            fallback_pnl=pnl,
+            execution_meta=execution_meta,
             matched=matched,
             used_execution_meta=used_execution_meta,
             used_best_day=used_best_day,
             used_reeval=used_reeval,
             used_last_known=used_last_known,
         )
+        pnl = reconciliation.pnl
+        volume = volume or reconciliation.volume
+        close_price = close_price or reconciliation.close_price
+        exit_reason = reconciliation.final_close_reason
+        resolution_path = reconciliation.resolution_path
         # Clean up reevaluation tracking
         self._last_reevaluation.pop(position_id, None)
         self._last_known_profit.pop(position_id, None)
@@ -2144,6 +2199,9 @@ class Scheduler:
                 "position_id": position_id,
                 "pnl": pnl,
                 "reason": exit_reason,
+                "trigger_source": reconciliation.trigger_source,
+                "action_kind": reconciliation.action_kind,
+                "final_close_reason": reconciliation.final_close_reason,
                 "resolution_path": resolution_path,
             },
         )
@@ -2289,13 +2347,18 @@ class Scheduler:
         total_pnl = 0.0
         for pos in winners:
             try:
-                result = await self._matchtrader.close_position(
+                close_intent = CloseIntent(
+                    trigger_source="best_day_close",
+                    action_kind="full_close",
                     position_id=str(pos.position_id),
+                    intent_id="best-day-close",
                     symbol=pos.symbol,
                     side=pos.side,
-                    volume=pos.volume,
+                    reason_code="best_day_limit_protection",
+                    requested_volume=pos.volume,
                 )
-                if result.success:
+                outcome = await self._execute_close_control_intent(close_intent)
+                if outcome.execution_status == "submitted":
                     closed_count += 1
                     total_pnl += pos.profit
                     self._best_day_close_positions[str(pos.position_id)] = pos.profit
@@ -2309,7 +2372,7 @@ class Scheduler:
                     logger.error(
                         "Position monitor: failed to close position {}: {}",
                         pos.position_id,
-                        result.message,
+                        outcome.broker_result.get("message", outcome.execution_status),
                     )
             except Exception as e:
                 logger.error(
@@ -2471,18 +2534,20 @@ class Scheduler:
 
     def _load_execution_meta_dict(self, intent: TradeIntent) -> dict[str, Any]:
         """Best-effort read of execution metadata from the intent or decision store."""
-        meta_json = getattr(intent, "execution_meta", "") or ""
+        meta_json = ""
+        try:
+            decision = self._store.get_decision(intent.id)
+            if decision and decision.execution_meta:
+                meta_json = decision.execution_meta
+        except Exception as e:
+            logger.debug(
+                "Tactical exit: could not load execution_meta for {}: {}",
+                intent.id,
+                e,
+            )
+
         if not meta_json:
-            try:
-                decision = self._store.get_decision(intent.id)
-                if decision and decision.execution_meta:
-                    meta_json = decision.execution_meta
-            except Exception as e:
-                logger.debug(
-                    "Tactical exit: could not load execution_meta for {}: {}",
-                    intent.id,
-                    e,
-                )
+            meta_json = getattr(intent, "execution_meta", "") or ""
 
         if not meta_json:
             return {}
@@ -2702,6 +2767,81 @@ class Scheduler:
         meta_json = json.dumps(meta, default=str)
         self._store.update_execution_meta(intent.id, meta_json)
 
+    def _update_close_control_meta(
+        self,
+        intent: TradeIntent,
+        *,
+        close_control: dict[str, Any],
+    ) -> None:
+        """Persist canonical close-control metadata into execution_meta."""
+        meta = self._load_execution_meta_dict(intent)
+        meta["close_control"] = close_control
+        meta_json = json.dumps(meta, default=str)
+        self._store.update_execution_meta(intent.id, meta_json)
+
+    def _build_close_control_meta(
+        self,
+        intent: TradeIntent,
+        decision: Any,
+        outcome: CloseOutcome,
+    ) -> dict[str, Any]:
+        """Build the compact close-control payload stored in meta and journal events."""
+        return self._build_close_control_payload(
+            position_id=str(intent.position_id or ""),
+            intent_id=intent.id,
+            symbol=intent.symbol,
+            reason_code=decision.reason,
+            outcome=outcome,
+        )
+
+    def _build_close_control_payload(
+        self,
+        *,
+        position_id: str,
+        intent_id: str,
+        symbol: str,
+        reason_code: str,
+        outcome: CloseOutcome,
+    ) -> dict[str, Any]:
+        """Build a stable close-control payload for journal/meta persistence."""
+        return {
+            "position_id": position_id,
+            "intent_id": intent_id,
+            "symbol": symbol,
+            "trigger_source": outcome.trigger_source,
+            "action_kind": outcome.action_kind,
+            "execution_status": outcome.execution_status,
+            "readback_status": outcome.readback_status,
+            "final_close_reason": outcome.final_close_reason,
+            "reason_code": reason_code,
+            "broker_success": bool(outcome.broker_result.get("success")),
+            "broker_message": str(outcome.broker_result.get("message", "")),
+        }
+
+    async def _execute_close_control_intent(
+        self,
+        close_intent: CloseIntent,
+        *,
+        intent: TradeIntent | None = None,
+    ) -> CloseOutcome:
+        """Execute one close intent and persist the canonical event payload."""
+        outcome = await self._close_control_plane.execute(close_intent)
+        close_control_meta = self._build_close_control_payload(
+            position_id=close_intent.position_id,
+            intent_id=intent.id if intent is not None else close_intent.intent_id,
+            symbol=close_intent.symbol,
+            reason_code=close_intent.reason_code,
+            outcome=outcome,
+        )
+        if intent is not None:
+            self._update_close_control_meta(intent, close_control=close_control_meta)
+
+        self._log_trade_event("CLOSE_CONTROL_EVENT", close_control_meta)
+
+        if outcome.execution_status == "submitted":
+            self._pending_close_outcomes[close_intent.position_id] = outcome
+        return outcome
+
     async def _execute_tactical_exit_action(
         self,
         pos: Any,
@@ -2711,6 +2851,7 @@ class Scheduler:
         """Execute a tactical exit action and persist the result on success."""
         decision = evaluation.decision
         position_id = str(pos.position_id)
+        close_volume: float | None = None
 
         if decision.action == "PARTIAL_CLOSE":
             close_volume = self._calculate_partial_close_volume(
@@ -2729,138 +2870,93 @@ class Scheduler:
                     },
                 )
                 return
-
-            result = await self._matchtrader.close_position(
+            close_intent = CloseIntent(
+                trigger_source="tactical_exit",
+                action_kind="partial_close",
                 position_id=position_id,
+                intent_id=intent.id,
                 symbol=pos.symbol,
                 side=pos.side,
-                volume=close_volume,
+                reason_code=decision.reason,
+                requested_volume=close_volume,
+                source_context={"tactical_action": decision.action},
             )
-            if not result.success:
-                self._log_trade_event(
-                    "TACTICAL_EXIT_SKIPPED",
-                    {
-                        "position_id": position_id,
-                        "intent_id": intent.id,
-                        "symbol": intent.symbol,
-                        "reason": result.message,
-                    },
-                )
-                return
-
-            self._update_tactical_exit_meta(
-                intent,
-                decision,
-                partial_close_volume=close_volume,
-            )
-            self._log_trade_event(
-                "TACTICAL_EXIT_ACTION",
-                {
-                    "position_id": position_id,
-                    "intent_id": intent.id,
-                    "symbol": intent.symbol,
-                    "action": decision.action,
-                    "volume": close_volume,
-                },
-            )
-            return
-
-        if decision.action == "EXIT_NOW":
-            result = await self._matchtrader.close_position(
+        elif decision.action == "EXIT_NOW":
+            close_intent = CloseIntent(
+                trigger_source="tactical_exit",
+                action_kind="full_close",
                 position_id=position_id,
+                intent_id=intent.id,
                 symbol=pos.symbol,
                 side=pos.side,
-                volume=pos.volume,
+                reason_code=decision.reason,
+                requested_volume=pos.volume,
+                source_context={"tactical_action": decision.action},
             )
-            if not result.success:
-                self._log_trade_event(
-                    "TACTICAL_EXIT_SKIPPED",
-                    {
-                        "position_id": position_id,
-                        "intent_id": intent.id,
-                        "symbol": intent.symbol,
-                        "reason": result.message,
-                    },
-                )
-                return
-
-            self._update_tactical_exit_meta(intent, decision)
-            self._log_trade_event(
-                "TACTICAL_EXIT_ACTION",
-                {
-                    "position_id": position_id,
-                    "intent_id": intent.id,
-                    "symbol": intent.symbol,
-                    "action": decision.action,
-                    "volume": pos.volume,
-                },
+        else:
+            close_intent = CloseIntent(
+                trigger_source="tactical_exit",
+                action_kind="modify_only",
+                position_id=position_id,
+                intent_id=intent.id,
+                symbol=pos.symbol,
+                side=pos.side,
+                reason_code=decision.reason,
+                requested_volume=pos.volume,
+                requested_sl=decision.new_sl if decision.new_sl is not None else pos.sl_price,
+                requested_tp=decision.new_tp if decision.new_tp is not None else pos.tp_price,
+                source_context={"tactical_action": decision.action},
             )
-            return
 
-        expected_sl = self._normalize_tactical_price(
-            intent.symbol,
-            decision.new_sl if decision.new_sl is not None else pos.sl_price,
-        )
-        expected_tp = self._normalize_tactical_price(
-            intent.symbol,
-            decision.new_tp if decision.new_tp is not None else pos.tp_price,
-        )
-        if decision.new_sl is not None:
-            decision.new_sl = expected_sl
-        if decision.new_tp is not None:
-            decision.new_tp = expected_tp
+        outcome = await self._execute_close_control_intent(close_intent, intent=intent)
 
-        result = await self._matchtrader.modify_position(
-            position_id=position_id,
-            symbol=pos.symbol,
-            side=pos.side,
-            volume=pos.volume,
-            sl=expected_sl,
-            tp=expected_tp,
-        )
-        if not result.success:
+        if outcome.execution_status not in {"accepted", "submitted"}:
             self._log_trade_event(
                 "TACTICAL_EXIT_SKIPPED",
                 {
                     "position_id": position_id,
                     "intent_id": intent.id,
                     "symbol": intent.symbol,
-                    "reason": result.message,
-                },
-            )
-            return
-
-        verified = await self._matchtrader.verify_sl_tp(
-            position_id=position_id,
-            expected_sl=expected_sl,
-            expected_tp=expected_tp,
-            price_precision=self._price_precision_for_symbol(intent.symbol),
-        )
-        if not verified:
-            self._log_trade_event(
-                "TACTICAL_EXIT_SKIPPED",
-                {
-                    "position_id": position_id,
-                    "intent_id": intent.id,
-                    "symbol": intent.symbol,
-                    "reason": "verify_failed",
+                    "reason": decision.reason,
+                    "execution_status": outcome.execution_status,
                 },
             )
             return
 
         if decision.action == "MOVE_TO_BREAKEVEN":
+            expected_sl = self._normalize_tactical_price(intent.symbol, decision.new_sl)
+            if expected_sl is not None:
+                decision.new_sl = expected_sl
             self._breakeven_applied.add(position_id)
+        if decision.action == "TRAIL_SL":
+            expected_sl = self._normalize_tactical_price(intent.symbol, decision.new_sl)
+            if expected_sl is not None:
+                decision.new_sl = expected_sl
+        if decision.action == "REPRICE_TP":
+            expected_tp = self._normalize_tactical_price(intent.symbol, decision.new_tp)
+            if expected_tp is not None:
+                decision.new_tp = expected_tp
+        if decision.action == "TRAIL_SL" and decision.new_tp is not None:
+            expected_tp = self._normalize_tactical_price(intent.symbol, decision.new_tp)
+            if expected_tp is not None:
+                decision.new_tp = expected_tp
 
-        self._update_tactical_exit_meta(intent, decision)
-        self._log_trade_event(
-            "TACTICAL_EXIT_ACTION",
-            {
-                "position_id": position_id,
-                "intent_id": intent.id,
-                "symbol": intent.symbol,
-                "action": decision.action,
-            },
+        self._update_tactical_exit_meta(
+            intent,
+            decision,
+            partial_close_volume=close_volume,
         )
+        action_payload = {
+            "position_id": position_id,
+            "intent_id": intent.id,
+            "symbol": intent.symbol,
+            "action": decision.action,
+        }
+        if close_volume is not None:
+            action_payload["volume"] = close_volume
+        elif decision.action == "EXIT_NOW":
+            action_payload["volume"] = pos.volume
+        self._log_trade_event("TACTICAL_EXIT_ACTION", action_payload)
 
     async def _run_tactical_exit_cycle(
         self,
@@ -2977,14 +3073,20 @@ class Scheduler:
 
                 if is_reversal:
                     # Reverse signal — close the position
-                    result = await self._matchtrader.close_position(
-                        position_id=intent.position_id,
+                    close_intent = CloseIntent(
+                        trigger_source="reeval_close",
+                        action_kind="full_close",
+                        position_id=str(intent.position_id),
+                        intent_id=intent.id,
                         symbol=pos.symbol,
                         side=pos.side,
-                        volume=pos.volume,
+                        reason_code="reverse_signal_detected",
+                        requested_volume=pos.volume,
+                        source_context={"llm_signal": decision.decision},
                     )
-                    if result.success:
-                        self._reevaluation_close_positions[intent.position_id] = pos.profit
+                    outcome = await self._execute_close_control_intent(close_intent, intent=intent)
+                    if outcome.execution_status == "submitted":
+                        self._reevaluation_close_positions[str(intent.position_id)] = pos.profit
                         logger.info(
                             "Re-evaluation closed position {} ({}) - reverse signal {} vs {}",
                             intent.position_id,
