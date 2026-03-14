@@ -123,6 +123,31 @@ class TradeJournal:
 
         return results
 
+    def get_events(self, event_type: str, date_str: str | None = None) -> list[dict[str, Any]]:
+        """Read journal events by type, optionally scoped to one UTC date prefix."""
+        results = []
+        if not self._path.exists():
+            return results
+
+        with open(self._path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("type") != event_type:
+                    continue
+                if date_str is not None:
+                    timestamp = str(entry.get("timestamp", ""))
+                    if not timestamp.startswith(date_str):
+                        continue
+                results.append(entry)
+
+        return results
+
     def get_closed_trades(self, days: int = 7) -> list[dict[str, Any]]:
         """Read closed trade records from the last N days."""
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)

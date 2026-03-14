@@ -36,6 +36,28 @@ def test_log_event_appends(tmp_path) -> None:
     assert entry["decision"] == "BUY"
 
 
+def test_get_events_filters_by_type_and_date(tmp_path) -> None:
+    path = tmp_path / "trade_journal.jsonl"
+    journal = TradeJournal(path)
+
+    journal.log_event(
+        "TACTICAL_RESULT",
+        {"timestamp": "2026-03-14T08:00:00+00:00", "symbol": "EURUSD"},
+    )
+    journal.log_event(
+        "TACTICAL_RESULT",
+        {"timestamp": "2026-03-15T08:00:00+00:00", "symbol": "GBPUSD"},
+    )
+    journal.log_event(
+        "LLM_DECISION",
+        {"timestamp": "2026-03-14T08:05:00+00:00", "symbol": "EURUSD"},
+    )
+
+    events = journal.get_events("TACTICAL_RESULT", date_str="2026-03-14")
+    assert len(events) == 1
+    assert events[0]["symbol"] == "EURUSD"
+
+
 @pytest.fixture
 def store(tmp_path: object) -> DecisionStore:
     db_path = f"{tmp_path}/test_trade_journal.db"

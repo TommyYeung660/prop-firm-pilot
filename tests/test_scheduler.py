@@ -2110,6 +2110,62 @@ class TestDailySummaryLoop:
         assert kwargs["open_positions"] == 0
         assert kwargs["day_start_balance"] == pytest.approx(50000.0)
 
+    async def test_daily_summary_logs_tactical_entry_calibration_snapshot(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        from src.monitor.trade_journal import TradeJournal
+
+        mock_alert = AsyncMock()
+        mock_alert.daily_summary = AsyncMock()
+        mock_alert.send = AsyncMock()
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        journal.log_event(
+            "TACTICAL_RESULT",
+            {
+                "timestamp": "2026-02-16T08:00:00+00:00",
+                "symbol": "EURUSD",
+                "resolution": "RETRY_PENDING",
+                "summary_reason_code": "spread.fail.ratio_too_wide",
+                "context": {"session_label": "london", "regime_label": "normal"},
+                "provenance": {"data_source": "rest_fallback"},
+            },
+        )
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            alert_service=mock_alert,
+            trade_journal=journal,
+        )
+
+        mock_matchtrader.get_balance.return_value = MagicMock(
+            balance=50000.0,
+            equity=50000.0,
+            margin=0.0,
+            free_margin=50000.0,
+        )
+        mock_matchtrader.get_open_positions.return_value = []
+
+        await sched._send_daily_summary("2026-02-16")
+
+        lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+        events = [json.loads(line) for line in lines]
+        snapshot = next(e for e in events if e["type"] == "TACTICAL_ENTRY_CALIBRATION_SNAPSHOT")
+        assert snapshot["date"] == "2026-02-16"
+        assert snapshot["groups"][0]["symbol"] == "EURUSD"
+
 
 # ── Mock LLM Blocking Tests ──────────────────────────────────────────────────────
 

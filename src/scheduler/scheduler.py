@@ -60,6 +60,7 @@ from src.monitor.operational_metrics import OperationalMetrics
 from src.monitor.trade_journal import TradeJournal
 from src.optimize.optimization_engine import OptimizationEngine
 from src.optimize.optimization_state import OptimizationState, Thresholds
+from src.optimize.tactical_entry_stats import build_daily_entry_calibration_snapshot
 from src.scheduler.close_resolution import determine_resolution_path
 from src.scheduler.decision_cache import StrategicDecisionCache
 from src.scheduler.low_confidence_cooldown import LowConfidenceCooldown
@@ -3251,6 +3252,15 @@ class Scheduler:
 
             # v1.3.9: Emit operational metrics snapshot (P3.11 + P3.12)
             self._log_trade_event("METRICS_SNAPSHOT", self._build_metrics_snapshot())
+            if self._trade_journal is not None:
+                calibration_snapshot = build_daily_entry_calibration_snapshot(
+                    self._trade_journal,
+                    date_str,
+                )
+                self._log_trade_event(
+                    "TACTICAL_ENTRY_CALIBRATION_SNAPSHOT",
+                    calibration_snapshot,
+                )
 
         except Exception as e:
             logger.error("Failed to send daily summary: {}", e)
