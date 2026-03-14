@@ -2539,6 +2539,36 @@ class Scheduler:
         if evaluation.requires_llm_exception_review:
             await self._reevaluate_open_positions([pos], [intent])
 
+    def _price_precision_for_symbol(self, symbol: str) -> int | None:
+        """Resolve broker price precision for a symbol using registry or config fallback."""
+        config_symbol = symbol
+        if self._registry is not None:
+            config_symbol = self._registry.to_config_safe(symbol)
+            info = self._registry.get_info(config_symbol)
+            if info is not None:
+                return info.price_precision
+        else:
+            config_symbol = symbol.rstrip(".")
+
+        instrument = self._config.instruments.get(config_symbol)
+        if instrument is None:
+            return None
+
+        pip_size_text = f"{instrument.pip_size:.10f}".rstrip("0")
+        decimals = len(pip_size_text.split(".")[-1]) if "." in pip_size_text else 0
+        if instrument.pip_size < 1:
+            return decimals + 1
+        return decimals
+
+    def _normalize_tactical_price(self, symbol: str, price: float | None) -> float | None:
+        """Round tactical price levels to broker precision before writes or verification."""
+        if price is None:
+            return None
+        precision = self._price_precision_for_symbol(symbol)
+        if precision is None:
+            return float(price)
+        return round(float(price), precision)
+
     def _calculate_partial_close_volume(
         self,
         symbol: str,
@@ -2692,8 +2722,19 @@ class Scheduler:
             )
             return
 
-        expected_sl = decision.new_sl if decision.new_sl is not None else pos.sl_price
-        expected_tp = decision.new_tp if decision.new_tp is not None else pos.tp_price
+        expected_sl = self._normalize_tactical_price(
+            intent.symbol,
+            decision.new_sl if decision.new_sl is not None else pos.sl_price,
+        )
+        expected_tp = self._normalize_tactical_price(
+            intent.symbol,
+            decision.new_tp if decision.new_tp is not None else pos.tp_price,
+        )
+        if decision.new_sl is not None:
+            decision.new_sl = expected_sl
+        if decision.new_tp is not None:
+            decision.new_tp = expected_tp
+
         result = await self._matchtrader.modify_position(
             position_id=position_id,
             symbol=pos.symbol,
@@ -2718,6 +2759,7 @@ class Scheduler:
             position_id=position_id,
             expected_sl=expected_sl,
             expected_tp=expected_tp,
+            price_precision=self._price_precision_for_symbol(intent.symbol),
         )
         if not verified:
             self._log_trade_event(

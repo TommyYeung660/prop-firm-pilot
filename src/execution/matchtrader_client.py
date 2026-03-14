@@ -827,6 +827,7 @@ class MatchTraderClient:
         expected_sl: float | None = None,
         expected_tp: float | None = None,
         tolerance: float = 1e-6,
+        price_precision: int | None = None,
     ) -> bool:
         """Read back open position and verify SL/TP match expected values.
 
@@ -841,6 +842,7 @@ class MatchTraderClient:
             expected_sl: Expected stop loss price (None = don't check).
             expected_tp: Expected take profit price (None = don't check).
             tolerance: Price comparison tolerance (broker may round).
+            price_precision: Broker price precision used for normalization.
         """
         try:
             positions = await self.get_open_positions()
@@ -848,6 +850,9 @@ class MatchTraderClient:
                 if str(pos.position_id) == position_id:
                     if expected_sl is not None:
                         actual_sl = pos.sl_price or 0.0
+                        if price_precision is not None:
+                            expected_sl = round(float(expected_sl), price_precision)
+                            actual_sl = round(float(actual_sl), price_precision)
                         if abs(actual_sl - expected_sl) > tolerance:
                             logger.warning(
                                 "MatchTrader: verify_sl_tp MISMATCH for {} — "
@@ -859,6 +864,9 @@ class MatchTraderClient:
                             return False
                     if expected_tp is not None:
                         actual_tp = pos.tp_price or 0.0
+                        if price_precision is not None:
+                            expected_tp = round(float(expected_tp), price_precision)
+                            actual_tp = round(float(actual_tp), price_precision)
                         if abs(actual_tp - expected_tp) > tolerance:
                             logger.warning(
                                 "MatchTrader: verify_sl_tp MISMATCH for {} — "

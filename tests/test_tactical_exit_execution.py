@@ -228,3 +228,37 @@ async def test_modify_verification_failure_does_not_mark_action_complete(
         for line in trade_journal._path.read_text(encoding="utf-8").splitlines()
     ]
     assert any(entry.get("type") == "TACTICAL_EXIT_SKIPPED" for entry in entries)
+
+
+@pytest.mark.asyncio
+async def test_modify_action_normalizes_prices_before_verify_and_meta_update(
+    scheduler: Scheduler,
+    store: DecisionStore,
+    mock_matchtrader: AsyncMock,
+) -> None:
+    """Tactical modify actions should round prices to broker precision before verify."""
+    position = _make_position()
+    intent = _insert_opened_intent(store)
+    evaluation = TacticalExitEvaluation(
+        decision=TacticalExitDecision(
+            action="TRAIL_SL",
+            state="TREND_EXTENSION",
+            reason="atr_trailing_stop_improved",
+            new_sl=1.1032149,
+            new_tp=1.1098761,
+        )
+    )
+
+    await scheduler._execute_tactical_exit_action(position, intent, evaluation)
+
+    modify_kwargs = mock_matchtrader.modify_position.await_args.kwargs
+    assert modify_kwargs["sl"] == pytest.approx(1.10321)
+    assert modify_kwargs["tp"] == pytest.approx(1.10988)
+
+    verify_kwargs = mock_matchtrader.verify_sl_tp.await_args.kwargs
+    assert verify_kwargs["expected_sl"] == pytest.approx(1.10321)
+    assert verify_kwargs["expected_tp"] == pytest.approx(1.10988)
+    assert verify_kwargs["price_precision"] == 5
+
+    meta = json.loads(store.get_decision(intent.id).execution_meta)
+    assert meta["trailing_sl"] == pytest.approx(1.10321)

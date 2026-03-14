@@ -1021,6 +1021,30 @@ class TestTradingOperations:
                 assert body["slPrice"] == 1.080
                 assert "tpPrice" not in body
 
+    async def test_verify_sl_tp_accepts_broker_precision_normalization(
+        self, client_config: dict
+    ) -> None:
+        """Rounded broker prices should verify successfully at declared precision."""
+        client = MatchTraderClient(**client_config)
+        client.get_open_positions = AsyncMock(
+            return_value=[
+                MagicMock(
+                    position_id="pos-001",
+                    sl_price=0.57961,
+                    tp_price=0.56644,
+                )
+            ]
+        )
+
+        verified = await client.verify_sl_tp(
+            position_id="pos-001",
+            expected_sl=0.5796104426501542,
+            expected_tp=0.5664437344099075,
+            price_precision=5,
+        )
+
+        assert verified is True
+
 
 # ── Instrument Info Tests ──────────────────────────────────────────────────
 
