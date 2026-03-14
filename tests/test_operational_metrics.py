@@ -71,6 +71,30 @@ class TestOperationalMetrics:
         m.record_tactical_result(passed=False)
         assert m.get_summary()["tactical_block"] == 1
 
+    def test_record_tactical_outcome_breakdown(self):
+        m = OperationalMetrics()
+        m.record_tactical_result(
+            action="WAIT",
+            resolution="RETRY_PENDING",
+            data_source="rest_fallback",
+        )
+        m.record_tactical_result(
+            action="WAIT",
+            resolution="EXECUTE_DEGRADED",
+            data_source="mixed",
+        )
+        m.record_tactical_result(
+            action="REJECT",
+            resolution="EXPIRE_TIMEOUT",
+            data_source="mixed",
+        )
+
+        summary = m.get_summary()
+        assert summary["tactical_wait_count"] == 1
+        assert summary["tactical_degrade_count"] == 1
+        assert summary["tactical_timeout_count"] == 1
+        assert summary["tactical_rest_fallback_wait_count"] == 1
+
     def test_tactical_block_rate(self):
         m = OperationalMetrics()
         m.record_tactical_result(passed=True)

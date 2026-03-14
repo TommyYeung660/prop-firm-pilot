@@ -33,6 +33,11 @@ class OperationalMetrics:
         self._llm_error: int = 0
         self._tactical_pass: int = 0
         self._tactical_block: int = 0
+        self._tactical_wait_count: int = 0
+        self._tactical_degrade_count: int = 0
+        self._tactical_timeout_count: int = 0
+        self._tactical_retry_success_count: int = 0
+        self._tactical_rest_fallback_wait_count: int = 0
         self._sl_hits: int = 0
         self._tp_hits: int = 0
         self._manual_closes: int = 0
@@ -64,8 +69,39 @@ class OperationalMetrics:
         else:
             logger.warning("OperationalMetrics: unknown LLM result '{}'", result)
 
-    def record_tactical_result(self, *, passed: bool) -> None:
-        """Record a tactical gate evaluation result."""
+    def record_tactical_result(
+        self,
+        *,
+        passed: bool | None = None,
+        action: str = "",
+        resolution: str = "",
+        data_source: str = "",
+        retry_count: int = 0,
+    ) -> None:
+        """Record a tactical gate evaluation result.
+
+        Supports both the legacy boolean API and the v1.4.7 verdict-based API.
+        """
+        if action or resolution:
+            resolved_pass = resolution in {"EXECUTE_NOW", "EXECUTE_DEGRADED"}
+            if resolved_pass:
+                self._tactical_pass += 1
+            else:
+                self._tactical_block += 1
+
+            if resolution == "RETRY_PENDING":
+                self._tactical_wait_count += 1
+                if data_source == "rest_fallback":
+                    self._tactical_rest_fallback_wait_count += 1
+            elif resolution == "EXECUTE_DEGRADED":
+                self._tactical_degrade_count += 1
+            elif resolution == "EXPIRE_TIMEOUT":
+                self._tactical_timeout_count += 1
+
+            if retry_count > 0 and resolved_pass:
+                self._tactical_retry_success_count += 1
+            return
+
         if passed:
             self._tactical_pass += 1
         else:
@@ -133,6 +169,11 @@ class OperationalMetrics:
             "llm_success_rate": (self._llm_success / llm_total if llm_total > 0 else 0.0),
             "tactical_pass": self._tactical_pass,
             "tactical_block": self._tactical_block,
+            "tactical_wait_count": self._tactical_wait_count,
+            "tactical_degrade_count": self._tactical_degrade_count,
+            "tactical_timeout_count": self._tactical_timeout_count,
+            "tactical_retry_success_count": self._tactical_retry_success_count,
+            "tactical_rest_fallback_wait_count": self._tactical_rest_fallback_wait_count,
             "tactical_block_rate": (
                 self._tactical_block / tactical_total if tactical_total > 0 else 0.0
             ),
@@ -160,6 +201,11 @@ class OperationalMetrics:
         self._llm_error = 0
         self._tactical_pass = 0
         self._tactical_block = 0
+        self._tactical_wait_count = 0
+        self._tactical_degrade_count = 0
+        self._tactical_timeout_count = 0
+        self._tactical_retry_success_count = 0
+        self._tactical_rest_fallback_wait_count = 0
         self._sl_hits = 0
         self._tp_hits = 0
         self._manual_closes = 0

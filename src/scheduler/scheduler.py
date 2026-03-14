@@ -907,13 +907,12 @@ class Scheduler:
 
                     if not self._config.tactical.shadow_mode:
                         if tactical_result.resolution == "RETRY_PENDING":
-                            progressed = await self._retry_tactical_pending(
+                            await self._retry_tactical_pending(
                                 worker_id=worker_id,
                                 intent=intent,
                                 side=decision.decision,
                                 initial_result=tactical_result,
                             )
-                            self._metrics.record_tactical_result(passed=progressed)
                             return
                         if tactical_result.resolution == "SKIP_CANCEL":
                             await self._cancel_intent_safe(
@@ -944,7 +943,6 @@ class Scheduler:
                                 tactical_result.action,
                                 tactical_result.resolution,
                             )
-                            self._metrics.record_tactical_result(passed=False)
                             return
                         if tactical_result.resolution == "EXPIRE_TIMEOUT":
                             await self._timeout_intent_safe(
@@ -975,7 +973,6 @@ class Scheduler:
                                 tactical_result.action,
                                 tactical_result.resolution,
                             )
-                            self._metrics.record_tactical_result(passed=False)
                             return
                         if tactical_result.resolution == "EXECUTE_DEGRADED":
                             self._log_trade_event(
@@ -989,8 +986,6 @@ class Scheduler:
                                     "detail": tactical_result.detail,
                                 },
                             )
-
-                self._metrics.record_tactical_result(passed=True)
                 await asyncio.to_thread(self._store.mark_ready_for_exec, intent.id)
                 logger.info(
                     "LLM worker {}: intent {} → {} (ready for execution)",
@@ -1169,21 +1164,25 @@ class Scheduler:
         retry_count: int = 0,
     ) -> None:
         """Log and alert tactical validation results."""
-        self._log_trade_event(
-            "TACTICAL_RESULT",
+        payload = tactical_result.to_log_dict()
+        payload.update(
             {
                 "intent_id": intent.id,
                 "symbol": intent.symbol,
                 "side": side,
-                "action": tactical_result.action,
                 "retry_count": retry_count,
-                "hard_gates": [
-                    {"gate": r.gate_name, "passed": r.passed, "detail": r.detail}
-                    for r in tactical_result.hard_gates
-                ],
-                "soft_score": tactical_result.soft_score,
                 "shadow_mode": self._config.tactical.shadow_mode,
-            },
+            }
+        )
+        self._log_trade_event(
+            "TACTICAL_RESULT",
+            payload,
+        )
+        self._metrics.record_tactical_result(
+            action=tactical_result.action,
+            resolution=tactical_result.resolution,
+            data_source=tactical_result.provenance.get("data_source", ""),
+            retry_count=retry_count,
         )
 
         if self._alert_service:
