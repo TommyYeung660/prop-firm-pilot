@@ -137,6 +137,7 @@ def _make_mock_signal(
     instrument: str = "EURUSD",
     score: float = 0.85,
     confidence: str = "high",
+    market_date: str = "2026-02-16",
 ) -> MagicMock:
     """Create a mock ScannerSignal."""
     signal = MagicMock()
@@ -146,6 +147,10 @@ def _make_mock_signal(
     signal.score_gap = 0.1
     signal.drop_distance = 0.05
     signal.topk_spread = 0.02
+    signal.scanner_version = "v1.5.0"
+    signal.schema_version = "fx_signal_v1"
+    signal.market_date = market_date
+    signal.label_version = "cost_aware_directional_return_v1"
     return signal
 
 
@@ -226,6 +231,27 @@ class TestScannerLoop:
         symbols = {i.symbol for i in intents}
         assert symbols == {"EURUSD", "GBPUSD"}
 
+    async def test_persists_scanner_contract_metadata_in_intent(
+        self,
+        scheduler: Scheduler,
+        mock_scanner: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """Scanner loop should persist versioned scanner metadata onto TradeIntent."""
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("EURUSD", market_date=Scheduler._today_str())
+        ]
+
+        await _run_loop_once(scheduler, scheduler._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        assert len(intents) == 1
+        intent = intents[0]
+        assert intent.scanner_version == "v1.5.0"
+        assert intent.scanner_schema_version == "fx_signal_v1"
+        assert intent.scanner_market_date == Scheduler._today_str()
+        assert intent.scanner_label_version == "cost_aware_directional_return_v1"
+
     async def test_logs_structured_cooldown_skip_event(
         self,
         config: AppConfig,
@@ -261,6 +287,39 @@ class TestScannerLoop:
         assert skip_event["symbol"] == "EURUSD"
         assert skip_event["reason"] == "low_confidence_cooldown"
         assert skip_event["consecutive_cancels"] == 2
+
+    async def test_logs_scanner_bundle_rejection_reason_code(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        """Rejected scanner bundles should surface explicit reason codes downstream."""
+        from src.monitor.trade_journal import TradeJournal
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            trade_journal=journal,
+        )
+        mock_scanner.run_pipeline.return_value = []
+        mock_scanner.get_last_rejection_reason_code.return_value = "scanner.contract.invalid"
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+        events = [json.loads(line) for line in lines]
+        reject_event = next(e for e in events if e["type"] == "SCANNER_BUNDLE_REJECTED")
+        assert reject_event["reason_code"] == "scanner.contract.invalid"
 
     async def test_skips_duplicate_intents(
         self,

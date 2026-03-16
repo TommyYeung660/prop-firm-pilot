@@ -356,15 +356,30 @@ class Scheduler:
 
                 # v1.3.0: Early exit when no fresh signals available
                 if not signals:
+                    reason_code = self._get_scanner_rejection_reason_code()
                     logger.warning(
                         "Scanner loop: no signals returned for {} (may be stale or unavailable)",
                         today,
                     )
-                    await self._send_alert(
-                        f"\u26a0\ufe0f <b>Scanner: No Signals</b>\n"
-                        f"No fresh signals for {today}. "
-                        f"Skipping intent creation this cycle."
-                    )
+                    if reason_code:
+                        self._log_trade_event(
+                            "SCANNER_BUNDLE_REJECTED",
+                            {
+                                "trade_date": today,
+                                "reason_code": reason_code,
+                            },
+                        )
+                        await self._send_alert(
+                            f"\u26a0\ufe0f <b>Scanner Bundle Rejected</b>\n"
+                            f"\u2022 Date: {today}\n"
+                            f"\u2022 Reason: {reason_code}"
+                        )
+                    else:
+                        await self._send_alert(
+                            f"\u26a0\ufe0f <b>Scanner: No Signals</b>\n"
+                            f"No fresh signals for {today}. "
+                            f"Skipping intent creation this cycle."
+                        )
                     await asyncio.sleep(self._session_cadence.get_scanner_interval(self._now_utc()))
                     continue
                 # Per-symbol topk: pick the best signal per symbol, then take topk
@@ -531,6 +546,10 @@ class Scheduler:
                             scanner_score_gap=signal.score_gap,
                             scanner_drop_distance=signal.drop_distance,
                             scanner_topk_spread=signal.topk_spread,
+                            scanner_version=getattr(signal, "scanner_version", ""),
+                            scanner_schema_version=getattr(signal, "schema_version", ""),
+                            scanner_market_date=getattr(signal, "market_date", today),
+                            scanner_label_version=getattr(signal, "label_version", ""),
                             source="scanner",
                             expires_at=self._now_utc() + timedelta(hours=4),
                         )
@@ -3483,6 +3502,20 @@ class Scheduler:
             self._trade_journal.log_event(event_type, details)
         except Exception as e:
             logger.warning("TradeJournal: failed to log {}: {}", event_type, e)
+
+    def _get_scanner_rejection_reason_code(self) -> str:
+        """Return scanner contract rejection reason when the bridge exposes one."""
+        getter = getattr(self._scanner, "get_last_rejection_reason_code", None)
+        if not callable(getter):
+            return ""
+        try:
+            reason_code = getter()
+        except Exception as e:
+            logger.debug("Scheduler: failed to read scanner rejection reason: {}", e)
+            return ""
+        if isinstance(reason_code, str) and reason_code.startswith("scanner."):
+            return reason_code
+        return ""
 
     def _get_thresholds_for_symbol(self, symbol: str) -> Thresholds:
         """Return thresholds for a symbol, falling back to global defaults."""

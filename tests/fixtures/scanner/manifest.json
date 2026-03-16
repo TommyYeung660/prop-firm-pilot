@@ -1,0 +1,30 @@
+{
+  "source": "qlib_market_scanner",
+  "bundle_version": "fx_bundle_v1",
+  "scanner_version": "v1.5.0",
+  "schema_versions": {
+    "signals_csv": "fx_signal_v1",
+    "signals_json": "fx_signal_v1",
+    "metrics_json": "fx_metrics_v1",
+    "manifest_json": "fx_bundle_v1"
+  },
+  "research_run_id": "fixture_run_20260316",
+  "config_fingerprint": "fixturefingerprint",
+  "generated_at": "2026-03-16T00:00:00Z",
+  "data_date_range": {
+    "start": "2026-02-15",
+    "end": "2026-02-20"
+  },
+  "universe": [
+    "EURUSD",
+    "GBPUSD",
+    "USDJPY",
+    "AUDUSD",
+    "XAUUSD"
+  ],
+  "cadence": "1d",
+  "label_version": "cost_aware_directional_return_v1",
+  "validation": {
+    "status": "passed"
+  }
+}
