@@ -11,10 +11,10 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ---
 
 ## [Unreleased]
-**Post-v1.4.8 Mainline Validation Window**
+**Post-v1.4.8a Mainline Validation Window**
 
-> **Status**: `v1.4.8` 已於 2026-03-14 合入 `main`，等待 market-open validation
-> **Reason**: close-control 主線已經落地，下一步不再是擴 scope，而是把 `v1.4.7` / `v1.4.8` 的實盤行為驗證完，並將 `v1.4.9` 限定為 bugfix 與微調版本
+> **Status**: `v1.4.8a` 已於 2026-03-16 合入 `main`，等待 market-open validation
+> **Reason**: close-control 主線已經落地，且最新一輪 production follow-up 已補齊 tactical exit observability、scanner topk 契約與 stale tactical-bar 防護；下一步仍應先把 `v1.4.7` / `v1.4.8` / `v1.4.8a` 的實盤行為驗證完，再將 `v1.4.9` 限定為 bugfix 與微調版本
 
 ### Planned: v1.4.7 — Tactical Entry Fixes & Optimization
 - tactical entry gate correctness、mixed-source freshness、degraded path 行為與 stale attribution 收尾
@@ -24,7 +24,7 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - 與 `qlib_market_scanner` 的輸出契約對齊，為後續 intraday scanner 研究保留 metadata 擴充位
 
 ### Planned: v1.4.9 — Bugfix And Micro-Tuning Pass
-- 以 market-open run 結果驗證 `v1.4.7` entry hardening 與 `v1.4.8` close-control 實際表現
+- 以 market-open run 結果驗證 `v1.4.7` entry hardening、`v1.4.8` close-control 與 `v1.4.8a` tactical-exit follow-up 實際表現
 - 只處理實盤暴露出的 correctness bug、journal 欄位細節、close reason 誤分類與 write-budget 邊界
 - 保留 tactical threshold、read-back tolerance、alert wording、postmortem payload 的小幅微調空間
 - 不新增更大範圍的新控制面，避免把 validation 版重新變成 feature 版
@@ -43,6 +43,34 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ### Tracking
 - Roadmap: `docs/PropFirmPilot_v1.4.0_road_map.md`
+
+---
+
+## [1.4.8a] — 2026-03-16
+**Tactical Exit Observability And Runtime Contract Follow-Up**
+
+> **Status**: 已合入 `main`，等待下一輪 market-open production validation
+> **Reason**: production run 暴露出 runtime version 仍顯示為 `v1.4.6d`、scanner 未將 configured `topk` 傳遞到 CLI、tactical exit 在純 `HOLD` 情境下缺少可觀測性，且 stale `5m/1h` tactical bars 仍可能進入 live exit 判斷
+
+### Fixed
+- `pyproject.toml` 的 `display_version` 已更新到 `1.4.8a`，runtime / packer / release tag 現在會一致顯示 `v1.4.8a`
+- `ScannerBridge.run_pipeline()` 現在會把 configured `--topk` 傳給 `qlib_market_scanner`，使 pilot runtime 與 scanner subprocess 的 universe / ranking 契約一致
+- `Scheduler` 的 position monitor 現在會採用較快的 tactical exit cadence，不再讓 `tactical.exit.evaluation_interval_seconds` 實際上被較慢的 monitor interval 蓋掉
+- tactical exit cycle 現在即使只有 `HOLD` 結果，也會輸出 operator-visible summary log，方便確認 open position 仍被持續監測
+- stale `5m/1h` tactical bars 現在會在 scheduler 入口先被過濾，避免像 prod log 中那種過舊的 REST fallback bars 直接進入 live exit decision path
+
+### Changed
+- `docs/PropFirmPilot_v1.5.0_Profitability_Outlook_Report.md` 的 scanner universe 描述已改成更精確口徑，明確區分 `qlib_market_scanner` 研究 baseline 與 `prop-firm-pilot` runtime 可覆寫 universe
+
+### Added
+- 回歸測試覆蓋 scanner CLI `--topk` 傳遞
+- 回歸測試覆蓋 stale `5m/1h` tactical bars 會被 scheduler 丟棄
+- 回歸測試覆蓋 tactical exit hold-only cycle 仍會產生摘要 log，且 position monitor cadence 會 honour tactical exit interval
+
+### Validated
+- `uv run pytest tests/test_scanner_bridge.py tests/test_scheduler.py tests/test_tactical_exit_scheduler.py tests/test_version.py -q` → `163 passed`
+- `uv run ruff check src/scheduler/scheduler.py src/signal/scanner_bridge.py tests/test_scanner_bridge.py tests/test_scheduler.py tests/test_tactical_exit_scheduler.py tests/test_version.py` → `All checks passed!`
+- `uv run python -c "from src.version import get_app_version, get_release_tag; print(get_app_version()); print(get_release_tag())"` → `1.4.8a` / `v1.4.8a`
 
 ---
 
