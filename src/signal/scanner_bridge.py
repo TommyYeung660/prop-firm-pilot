@@ -16,7 +16,7 @@ from typing import Any
 from loguru import logger
 
 SUPPORTED_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v1"}
-SUPPORTED_SCANNER_VERSIONS = {"v1.5.0"}
+SUPPORTED_SCANNER_VERSIONS = {"v1.5.0", "v1.5.0_beta"}
 PASSING_VALIDATION_STATUSES = {"", "ok", "pass", "passed", "ready", "success", "valid", "validated"}
 REQUIRED_SIGNAL_COLUMNS = {
     "datetime",
@@ -242,11 +242,21 @@ class ScannerBridge:
         if len(signals_path.parents) > 1:
             candidates.append(signals_path.parents[1] / "metrics" / "metrics.json")
         if len(signals_path.parents) > 2:
-            candidates.append(signals_path.parents[2] / "scanner_outputs" / "metrics" / "metrics.json")
+            candidates.append(
+                signals_path.parents[2]
+                / "scanner_outputs"
+                / "metrics"
+                / "metrics.json"
+            )
         candidates.extend(
             [
                 self._scanner_path / "outputs" / "metrics" / "metrics.json",
-                self._scanner_path / "data" / "shared_export" / "scanner_outputs" / "metrics" / "metrics.json",
+                self._scanner_path
+                / "data"
+                / "shared_export"
+                / "scanner_outputs"
+                / "metrics"
+                / "metrics.json",
             ]
         )
         return self._first_existing_path(candidates)
@@ -551,21 +561,25 @@ class ScannerBridge:
 
                         if row.get("profile", "").strip() != self._profile:
                             raise ValueError(
-                                f"profile mismatch for {inst}: {row.get('profile', '')} != {self._profile}"
+                                "profile mismatch for "
+                                f"{inst}: {row.get('profile', '')} != {self._profile}"
                             )
                         if row.get("schema_version", "").strip() != manifest_schema:
                             raise ValueError(
-                                f"schema mismatch for {inst}: {row.get('schema_version', '')} != {manifest_schema}"
+                                "schema mismatch for "
+                                f"{inst}: {row.get('schema_version', '')} != {manifest_schema}"
                             )
                         if row.get("scanner_version", "").strip() != manifest_scanner_version:
                             raise ValueError(
                                 "scanner_version mismatch for "
-                                f"{inst}: {row.get('scanner_version', '')} != {manifest_scanner_version}"
+                                f"{inst}: {row.get('scanner_version', '')} "
+                                f"!= {manifest_scanner_version}"
                             )
                         row_label_version = row.get("label_version", "").strip()
                         if manifest_label_version and row_label_version != manifest_label_version:
                             raise ValueError(
-                                f"label_version mismatch for {inst}: {row_label_version} != {manifest_label_version}"
+                                "label_version mismatch for "
+                                f"{inst}: {row_label_version} != {manifest_label_version}"
                             )
                         row_cadence = row.get("cadence", "").strip()
                         if manifest_cadence and row_cadence and row_cadence != manifest_cadence:
@@ -573,7 +587,9 @@ class ScannerBridge:
                                 f"cadence mismatch for {inst}: {row_cadence} != {manifest_cadence}"
                             )
 
-                        row_date = row.get("market_date", "").strip() or row.get("datetime", "").split(" ")[0]
+                        row_date = row.get("market_date", "").strip() or row.get(
+                            "datetime", ""
+                        ).split(" ")[0]
                         if not row_date:
                             raise ValueError(f"missing market_date for {inst}")
 

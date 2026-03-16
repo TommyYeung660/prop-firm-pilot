@@ -1,6 +1,6 @@
 [project]
 name = "prop-firm-pilot"
-version = "1.4.6+v1.4.6d"
+version = "1.5.0b0"
 description = "Fully automated FX trading system for E8 Markets prop firm accounts"
 requires-python = ">=3.10,<3.11"
 dependencies = [
@@ -78,4 +78,4 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.prop_firm_pilot]
-display_version = "1.4.9"
+display_version = "1.5.0_beta"

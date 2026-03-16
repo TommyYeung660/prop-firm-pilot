@@ -147,7 +147,7 @@ def _make_mock_signal(
     signal.score_gap = 0.1
     signal.drop_distance = 0.05
     signal.topk_spread = 0.02
-    signal.scanner_version = "v1.5.0"
+    signal.scanner_version = "v1.5.0_beta"
     signal.schema_version = "fx_signal_v1"
     signal.market_date = market_date
     signal.label_version = "cost_aware_directional_return_v1"
@@ -247,7 +247,7 @@ class TestScannerLoop:
         intents = store.get_intents_by_date(Scheduler._today_str())
         assert len(intents) == 1
         intent = intents[0]
-        assert intent.scanner_version == "v1.5.0"
+        assert intent.scanner_version == "v1.5.0_beta"
         assert intent.scanner_schema_version == "fx_signal_v1"
         assert intent.scanner_market_date == Scheduler._today_str()
         assert intent.scanner_label_version == "cost_aware_directional_return_v1"

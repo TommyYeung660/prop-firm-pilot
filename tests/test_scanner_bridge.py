@@ -28,7 +28,7 @@ from src.signal.scanner_bridge import ScannerBridge, ScannerSignal
 # ── Constants ───────────────────────────────────────────────────────────────
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "scanner"
-DEFAULT_SCANNER_VERSION = "v1.5.0"
+DEFAULT_SCANNER_VERSION = "v1.5.0_beta"
 DEFAULT_SIGNAL_SCHEMA_VERSION = "fx_signal_v1"
 DEFAULT_LABEL_VERSION = "cost_aware_directional_return_v1"
 
@@ -388,10 +388,7 @@ class TestScannerBridgeInit:
 
     def test_run_pipeline_includes_configured_topk(self, tmp_path: Path) -> None:
         """Configured topk should be passed to qlib scanner CLI."""
-        signals_dir = tmp_path / "outputs" / "signals"
-        signals_dir.mkdir(parents=True)
-        src_csv = FIXTURES_DIR / "signals_single.csv"
-        shutil.copy(src_csv, signals_dir / "signals.csv")
+        _seed_scanner_output_bundle(tmp_path)
 
         bridge = ScannerBridge(scanner_path=tmp_path, topk=5)
 
