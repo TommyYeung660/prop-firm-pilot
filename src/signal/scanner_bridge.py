@@ -7,12 +7,35 @@ the daily candle hasn't closed yet (signals won't change intraday).
 """
 
 import csv
+import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
+
+SUPPORTED_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v1"}
+SUPPORTED_SCANNER_VERSIONS = {"v1.5.0", "v1.5.0_beta"}
+PASSING_VALIDATION_STATUSES = {"", "ok", "pass", "passed", "ready", "success", "valid", "validated"}
+REQUIRED_SIGNAL_COLUMNS = {
+    "datetime",
+    "instrument",
+    "score",
+    "rank",
+    "score_gap",
+    "drop_distance",
+    "topk_spread",
+    "confidence",
+    "weight",
+    "profile",
+    "scanner_version",
+    "schema_version",
+    "cadence",
+    "label_version",
+    "regime_label",
+    "market_date",
+}
 
 
 @dataclass
@@ -45,6 +68,13 @@ class ScannerSignal:
         topk_spread: float = 0.0,
         weight: float = 0.0,
         entry_timeframe: str = "4h",
+        profile: str = "fx",
+        scanner_version: str = "",
+        schema_version: str = "",
+        cadence: str = "",
+        label_version: str = "",
+        regime_label: str = "",
+        market_date: str = "",
     ) -> None:
         self.instrument = instrument
         self.score = score
@@ -55,6 +85,13 @@ class ScannerSignal:
         self.topk_spread = topk_spread
         self.weight = weight
         self.entry_timeframe = entry_timeframe
+        self.profile = profile
+        self.scanner_version = scanner_version
+        self.schema_version = schema_version
+        self.cadence = cadence
+        self.label_version = label_version
+        self.regime_label = regime_label
+        self.market_date = market_date
 
     def to_qlib_data(self) -> dict[str, Any]:
         """Convert to qlib_data dict for TradingAgents.propagate().
@@ -107,6 +144,8 @@ class ScannerBridge:
         self._entry_timeframe = entry_timeframe
         self._benchmark = benchmark
         self._cache: _PipelineCache | None = None
+        self._last_rejection_reason_code: str = ""
+        self._last_rejection_message: str = ""
 
         if not self._scanner_path.exists():
             logger.warning("ScannerBridge: scanner path does not exist: {}", self._scanner_path)
@@ -157,6 +196,145 @@ class ScannerBridge:
         """Clear the pipeline cache.  Called externally when a cache bust is needed."""
         self._cache = None
 
+    def get_last_rejection_reason_code(self) -> str:
+        """Return the most recent contract/freshness rejection reason, if any."""
+        return self._last_rejection_reason_code
+
+    def get_last_rejection_message(self) -> str:
+        """Return the most recent contract/freshness rejection message, if any."""
+        return self._last_rejection_message
+
+    def _clear_rejection_reason(self) -> None:
+        self._last_rejection_reason_code = ""
+        self._last_rejection_message = ""
+
+    def _set_rejection_reason(self, reason_code: str, message: str) -> None:
+        self._last_rejection_reason_code = reason_code
+        self._last_rejection_message = message
+
+    def _first_existing_path(self, candidates: list[Path]) -> Path | None:
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _resolve_manifest_path(self, signals_path: Path) -> Path | None:
+        candidates = [signals_path.parent / "manifest.json"]
+        if len(signals_path.parents) > 1:
+            candidates.append(signals_path.parents[1] / "manifest.json")
+        if len(signals_path.parents) > 2:
+            candidates.append(signals_path.parents[2] / "manifest.json")
+        candidates.extend(
+            [
+                self._scanner_path / "data" / "shared_export" / "manifest.json",
+                self._scanner_path / "manifest.json",
+            ]
+        )
+        return self._first_existing_path(candidates)
+
+    def _resolve_metrics_path(self, signals_path: Path) -> Path | None:
+        candidates = [signals_path.parent / "metrics.json"]
+        if len(signals_path.parents) > 1:
+            candidates.append(signals_path.parents[1] / "metrics" / "metrics.json")
+        if len(signals_path.parents) > 2:
+            candidates.append(
+                signals_path.parents[2]
+                / "scanner_outputs"
+                / "metrics"
+                / "metrics.json"
+            )
+        candidates.extend(
+            [
+                self._scanner_path / "outputs" / "metrics" / "metrics.json",
+                self._scanner_path
+                / "data"
+                / "shared_export"
+                / "scanner_outputs"
+                / "metrics"
+                / "metrics.json",
+            ]
+        )
+        return self._first_existing_path(candidates)
+
+    def _read_json_file(self, path: Path) -> dict[str, Any]:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"{path.name} must contain a JSON object")
+        return payload
+
+    def _load_contract_context(self, signals_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+        manifest_path = self._resolve_manifest_path(signals_path)
+        if manifest_path is None:
+            raise ValueError("manifest.json not found")
+        manifest = self._read_json_file(manifest_path)
+        metrics: dict[str, Any] = {}
+        metrics_path = self._resolve_metrics_path(signals_path)
+        if metrics_path is not None:
+            metrics = self._read_json_file(metrics_path)
+        return manifest, metrics
+
+    def _validation_status(
+        self, manifest: dict[str, Any], metrics: dict[str, Any]
+    ) -> str:
+        for payload in (manifest, metrics):
+            validation = payload.get("validation", {})
+            if isinstance(validation, dict):
+                status = validation.get("status", "")
+                if isinstance(status, str) and status.strip():
+                    return status.strip().lower()
+        return ""
+
+    def _validate_contract(
+        self,
+        *,
+        signals_path: Path,
+        fieldnames: set[str],
+    ) -> tuple[str, str, str, str]:
+        try:
+            manifest, metrics = self._load_contract_context(signals_path)
+        except Exception as e:
+            raise ValueError(f"missing or invalid manifest bundle: {e}") from e
+
+        schema_versions = manifest.get("schema_versions")
+        if not isinstance(schema_versions, dict):
+            raise ValueError("manifest missing schema_versions")
+        if not manifest.get("research_run_id"):
+            raise ValueError("manifest missing research_run_id")
+
+        manifest_schema = str(schema_versions.get("signals_csv", "")).strip()
+        manifest_scanner_version = str(manifest.get("scanner_version", "")).strip()
+        manifest_cadence = str(manifest.get("cadence", "")).strip()
+        manifest_label_version = str(manifest.get("label_version", "")).strip()
+
+        if manifest_schema not in SUPPORTED_SIGNAL_SCHEMA_VERSIONS:
+            raise ValueError(f"unsupported schema version: {manifest_schema}")
+        if manifest_scanner_version not in SUPPORTED_SCANNER_VERSIONS:
+            raise ValueError(f"unsupported scanner version: {manifest_scanner_version}")
+
+        missing_columns = REQUIRED_SIGNAL_COLUMNS - fieldnames
+        if missing_columns:
+            raise ValueError(f"signals csv missing required columns: {sorted(missing_columns)}")
+
+        validation_status = self._validation_status(manifest, metrics)
+        if validation_status == "degraded":
+            raise RuntimeError("scanner.bundle.degraded")
+        if validation_status == "stale":
+            raise RuntimeError("scanner.bundle.stale")
+        if validation_status and validation_status not in PASSING_VALIDATION_STATUSES:
+            raise ValueError(f"unsupported validation status: {validation_status}")
+
+        return (
+            manifest_schema,
+            manifest_scanner_version,
+            manifest_cadence,
+            manifest_label_version,
+        )
+
     def _is_recoverable_pipeline_failure(self, stdout: str, stderr: str) -> bool:
         """Return True when the subprocess failed after already generating usable signals."""
         failure_text = f"{stdout}\n{stderr}".lower()
@@ -199,6 +377,7 @@ class ScannerBridge:
         Returns:
             List of ScannerSignal sorted by rank (best first).
         """
+        self._clear_rejection_reason()
         # ── Cache check: skip expensive pipeline if signals won't change ──
         # Daily models only produce new scores after the day's candle closes.
         # Re-running the pipeline intraday yields identical results, wasting
@@ -342,6 +521,7 @@ class ScannerBridge:
             Returns ([], "") if no signals are available.
         """
         path = Path(path)
+        self._clear_rejection_reason()
         if not path.exists():
             logger.error("ScannerBridge: signals file not found: {}", path)
             return [], ""
@@ -350,13 +530,68 @@ class ScannerBridge:
         try:
             with open(path, encoding="utf-8") as f:
                 reader = csv.DictReader(f)
+                fieldnames = set(reader.fieldnames or [])
+                try:
+                    (
+                        manifest_schema,
+                        manifest_scanner_version,
+                        manifest_cadence,
+                        manifest_label_version,
+                    ) = self._validate_contract(
+                        signals_path=path,
+                        fieldnames=fieldnames,
+                    )
+                except RuntimeError as e:
+                    reason_code = str(e)
+                    message = f"bundle rejected: {reason_code}"
+                    self._set_rejection_reason(reason_code, message)
+                    logger.warning("ScannerBridge: {}", message)
+                    return [], ""
+                except ValueError as e:
+                    message = f"contract validation failed: {e}"
+                    self._set_rejection_reason("scanner.contract.invalid", message)
+                    logger.warning("ScannerBridge: {}", message)
+                    return [], ""
+
                 for i, row in enumerate(reader):
                     try:
                         inst = row.get("instrument", row.get("ticker", ""))
                         if not inst:
                             continue
 
-                        row_date = row.get("datetime", "").split(" ")[0]  # YYYY-MM-DD
+                        if row.get("profile", "").strip() != self._profile:
+                            raise ValueError(
+                                "profile mismatch for "
+                                f"{inst}: {row.get('profile', '')} != {self._profile}"
+                            )
+                        if row.get("schema_version", "").strip() != manifest_schema:
+                            raise ValueError(
+                                "schema mismatch for "
+                                f"{inst}: {row.get('schema_version', '')} != {manifest_schema}"
+                            )
+                        if row.get("scanner_version", "").strip() != manifest_scanner_version:
+                            raise ValueError(
+                                "scanner_version mismatch for "
+                                f"{inst}: {row.get('scanner_version', '')} "
+                                f"!= {manifest_scanner_version}"
+                            )
+                        row_label_version = row.get("label_version", "").strip()
+                        if manifest_label_version and row_label_version != manifest_label_version:
+                            raise ValueError(
+                                "label_version mismatch for "
+                                f"{inst}: {row_label_version} != {manifest_label_version}"
+                            )
+                        row_cadence = row.get("cadence", "").strip()
+                        if manifest_cadence and row_cadence and row_cadence != manifest_cadence:
+                            raise ValueError(
+                                f"cadence mismatch for {inst}: {row_cadence} != {manifest_cadence}"
+                            )
+
+                        row_date = row.get("market_date", "").strip() or row.get(
+                            "datetime", ""
+                        ).split(" ")[0]
+                        if not row_date:
+                            raise ValueError(f"missing market_date for {inst}")
 
                         signal = ScannerSignal(
                             instrument=inst,
@@ -368,6 +603,13 @@ class ScannerBridge:
                             topk_spread=float(row.get("topk_spread", 0)),
                             weight=float(row.get("weight", 0)),
                             entry_timeframe=self._entry_timeframe,
+                            profile=row.get("profile", self._profile),
+                            scanner_version=row.get("scanner_version", manifest_scanner_version),
+                            schema_version=row.get("schema_version", manifest_schema),
+                            cadence=row.get("cadence", manifest_cadence),
+                            label_version=row.get("label_version", manifest_label_version),
+                            regime_label=row.get("regime_label", ""),
+                            market_date=row_date,
                         )
 
                         if row_date not in all_signals:
@@ -375,6 +617,11 @@ class ScannerBridge:
                         all_signals[row_date].append(signal)
 
                     except (ValueError, TypeError) as e:
+                        if "mismatch" in str(e) or "missing market_date" in str(e):
+                            message = f"contract validation failed: {e}"
+                            self._set_rejection_reason("scanner.contract.invalid", message)
+                            logger.warning("ScannerBridge: {}", message)
+                            return [], ""
                         logger.warning("ScannerBridge: skipping malformed row {}: {}", i, e)
 
         except Exception as e:
@@ -410,6 +657,13 @@ class ScannerBridge:
                 chosen_dt = date_type.fromisoformat(chosen_date)
                 age_days = (target_dt - chosen_dt).days
                 if age_days > max_signal_age_days:
+                    self._set_rejection_reason(
+                        "scanner.bundle.stale",
+                        (
+                            f"signal date {chosen_date} is {age_days} days old for target_date "
+                            f"{target_date} (max={max_signal_age_days})"
+                        ),
+                    )
                     logger.warning(
                         "ScannerBridge: signal date {} is {} days old (max={}), "
                         "rejecting stale signals for target_date {}",
@@ -429,6 +683,7 @@ class ScannerBridge:
 
         signals = all_signals[chosen_date]
         signals.sort(key=lambda s: s.rank)
+        self._clear_rejection_reason()
         is_stale = target_date is not None and chosen_date != target_date
         logger.info(
             "ScannerBridge: loaded {} signals for date {} (target={}, stale={}, "

@@ -28,6 +28,9 @@ from src.signal.scanner_bridge import ScannerBridge, ScannerSignal
 # ── Constants ───────────────────────────────────────────────────────────────
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "scanner"
+DEFAULT_SCANNER_VERSION = "v1.5.0_beta"
+DEFAULT_SIGNAL_SCHEMA_VERSION = "fx_signal_v1"
+DEFAULT_LABEL_VERSION = "cost_aware_directional_return_v1"
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -46,6 +49,103 @@ def store(tmp_path: Path) -> DecisionStore:
     s = DecisionStore(db_path=db_path)
     yield s  # type: ignore[misc]
     s.close()
+
+
+def _build_contract_manifest(
+    *,
+    scanner_version: str = DEFAULT_SCANNER_VERSION,
+    schema_version: str = DEFAULT_SIGNAL_SCHEMA_VERSION,
+    label_version: str = DEFAULT_LABEL_VERSION,
+    cadence: str = "1d",
+    validation_status: str = "passed",
+) -> dict[str, object]:
+    return {
+        "source": "qlib_market_scanner",
+        "bundle_version": "fx_bundle_v1",
+        "scanner_version": scanner_version,
+        "schema_versions": {
+            "signals_csv": schema_version,
+            "signals_json": schema_version,
+            "metrics_json": "fx_metrics_v1",
+            "manifest_json": "fx_bundle_v1",
+        },
+        "research_run_id": "test_run_20260316",
+        "config_fingerprint": "testfingerprint",
+        "generated_at": "2026-03-16T00:00:00Z",
+        "data_date_range": {"start": "2026-02-15", "end": "2026-02-16"},
+        "universe": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"],
+        "cadence": cadence,
+        "label_version": label_version,
+        "validation": {"status": validation_status},
+    }
+
+
+def _build_metrics_payload(validation_status: str = "passed") -> dict[str, object]:
+    return {
+        "signal": {},
+        "confidence": {},
+        "backtest": {},
+        "research": {},
+        "regime": {},
+        "validation": {"status": validation_status},
+    }
+
+
+def _write_contract_sidecars(
+    manifest_dir: Path,
+    metrics_dir: Path,
+    *,
+    scanner_version: str = DEFAULT_SCANNER_VERSION,
+    schema_version: str = DEFAULT_SIGNAL_SCHEMA_VERSION,
+    label_version: str = DEFAULT_LABEL_VERSION,
+    cadence: str = "1d",
+    validation_status: str = "passed",
+) -> None:
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    (manifest_dir / "manifest.json").write_text(
+        json.dumps(
+            _build_contract_manifest(
+                scanner_version=scanner_version,
+                schema_version=schema_version,
+                label_version=label_version,
+                cadence=cadence,
+                validation_status=validation_status,
+            ),
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (metrics_dir / "metrics.json").write_text(
+        json.dumps(_build_metrics_payload(validation_status), indent=2),
+        encoding="utf-8",
+    )
+
+
+def _seed_scanner_output_bundle(
+    scanner_root: Path,
+    fixture_name: str = "signals_single.csv",
+    *,
+    scanner_version: str = DEFAULT_SCANNER_VERSION,
+    schema_version: str = DEFAULT_SIGNAL_SCHEMA_VERSION,
+    label_version: str = DEFAULT_LABEL_VERSION,
+    cadence: str = "1d",
+    validation_status: str = "passed",
+) -> Path:
+    signals_dir = scanner_root / "outputs" / "signals"
+    signals_dir.mkdir(parents=True, exist_ok=True)
+    dest = signals_dir / "signals.csv"
+    shutil.copy(FIXTURES_DIR / fixture_name, dest)
+    _write_contract_sidecars(
+        scanner_root / "data" / "shared_export",
+        scanner_root / "outputs" / "metrics",
+        scanner_version=scanner_version,
+        schema_version=schema_version,
+        label_version=label_version,
+        cadence=cadence,
+        validation_status=validation_status,
+    )
+    return dest
 
 
 # ── Section 1: CSV Parsing Tests ────────────────────────────────────────────
@@ -77,6 +177,16 @@ class TestCSVParsing:
         assert first.drop_distance > 0
         assert first.topk_spread > 0
         assert first.weight > 0
+
+    def test_load_sample_signal_contract_metadata(self, bridge: ScannerBridge) -> None:
+        """v1.5.0 fixtures should expose scanner contract metadata on each signal."""
+        signals, _ = bridge.load_signals_from_file(FIXTURES_DIR / "signals_sample.csv")
+        first = signals[0]
+
+        assert first.scanner_version == DEFAULT_SCANNER_VERSION
+        assert first.schema_version == DEFAULT_SIGNAL_SCHEMA_VERSION
+        assert first.market_date == "2026-02-16"
+        assert first.label_version == DEFAULT_LABEL_VERSION
 
     def test_load_sample_signal_qlib_data(self, bridge: ScannerBridge) -> None:
         """.to_qlib_data() should return correct dict structure."""
@@ -155,6 +265,56 @@ class TestCSVParsing:
         signals, _ = bridge.load_signals_from_file(empty_csv)
         assert signals == []
 
+    def test_load_signals_rejects_unknown_schema_version(
+        self, bridge: ScannerBridge, tmp_path: Path
+    ) -> None:
+        """Unknown signal schema should trip the pilot ingestion gate."""
+        csv_path = tmp_path / "signals.csv"
+        csv_path.write_text(
+            (FIXTURES_DIR / "signals_single.csv")
+            .read_text(encoding="utf-8")
+            .replace(DEFAULT_SIGNAL_SCHEMA_VERSION, "fx_signal_v999"),
+            encoding="utf-8",
+        )
+        _write_contract_sidecars(
+            tmp_path,
+            tmp_path,
+            schema_version="fx_signal_v999",
+        )
+
+        signals, chosen_date = bridge.load_signals_from_file(csv_path, target_date="2026-02-16")
+
+        assert signals == []
+        assert chosen_date == ""
+        assert bridge.get_last_rejection_reason_code() == "scanner.contract.invalid"
+
+    def test_load_signals_rejects_missing_manifest(
+        self, bridge: ScannerBridge, tmp_path: Path
+    ) -> None:
+        """Missing manifest must reject the bundle before any parsing proceeds."""
+        csv_path = tmp_path / "signals.csv"
+        shutil.copy(FIXTURES_DIR / "signals_single.csv", csv_path)
+
+        signals, chosen_date = bridge.load_signals_from_file(csv_path, target_date="2026-02-16")
+
+        assert signals == []
+        assert chosen_date == ""
+        assert bridge.get_last_rejection_reason_code() == "scanner.contract.invalid"
+
+    def test_load_signals_rejects_degraded_bundle(
+        self, bridge: ScannerBridge, tmp_path: Path
+    ) -> None:
+        """Degraded validation status should be rejected for live ingestion."""
+        csv_path = tmp_path / "signals.csv"
+        shutil.copy(FIXTURES_DIR / "signals_single.csv", csv_path)
+        _write_contract_sidecars(tmp_path, tmp_path, validation_status="degraded")
+
+        signals, chosen_date = bridge.load_signals_from_file(csv_path, target_date="2026-02-16")
+
+        assert signals == []
+        assert chosen_date == ""
+        assert bridge.get_last_rejection_reason_code() == "scanner.bundle.degraded"
+
     def test_scanner_signal_repr(self) -> None:
         """ScannerSignal repr should include key fields."""
         signal = ScannerSignal(
@@ -190,11 +350,7 @@ class TestScannerBridgeInit:
 
     def test_run_pipeline_fallback_to_file(self, tmp_path: Path) -> None:
         """When subprocess fails but signals.csv exists, should fall back to file."""
-        # Set up scanner path with output file
-        signals_dir = tmp_path / "outputs" / "signals"
-        signals_dir.mkdir(parents=True)
-        src_csv = FIXTURES_DIR / "signals_single.csv"
-        shutil.copy(src_csv, signals_dir / "signals.csv")
+        _seed_scanner_output_bundle(tmp_path)
 
         bridge = ScannerBridge(scanner_path=tmp_path)
 
@@ -213,10 +369,7 @@ class TestScannerBridgeInit:
 
     def test_run_pipeline_includes_configured_benchmark(self, tmp_path: Path) -> None:
         """Configured benchmark should be passed to qlib scanner CLI."""
-        signals_dir = tmp_path / "outputs" / "signals"
-        signals_dir.mkdir(parents=True)
-        src_csv = FIXTURES_DIR / "signals_single.csv"
-        shutil.copy(src_csv, signals_dir / "signals.csv")
+        _seed_scanner_output_bundle(tmp_path)
 
         bridge = ScannerBridge(scanner_path=tmp_path, benchmark="FX")
 
@@ -235,10 +388,7 @@ class TestScannerBridgeInit:
 
     def test_run_pipeline_includes_configured_topk(self, tmp_path: Path) -> None:
         """Configured topk should be passed to qlib scanner CLI."""
-        signals_dir = tmp_path / "outputs" / "signals"
-        signals_dir.mkdir(parents=True)
-        src_csv = FIXTURES_DIR / "signals_single.csv"
-        shutil.copy(src_csv, signals_dir / "signals.csv")
+        _seed_scanner_output_bundle(tmp_path)
 
         bridge = ScannerBridge(scanner_path=tmp_path, topk=5)
 
@@ -259,10 +409,7 @@ class TestScannerBridgeInit:
         self, tmp_path: Path
     ) -> None:
         """Older qlib scanner CLIs should be retried without --benchmark."""
-        signals_dir = tmp_path / "outputs" / "signals"
-        signals_dir.mkdir(parents=True)
-        src_csv = FIXTURES_DIR / "signals_single.csv"
-        shutil.copy(src_csv, signals_dir / "signals.csv")
+        _seed_scanner_output_bundle(tmp_path)
 
         bridge = ScannerBridge(scanner_path=tmp_path, benchmark="FX")
 
@@ -327,6 +474,10 @@ def _signal_to_intent(signal: ScannerSignal, trade_date: str) -> TradeIntent:
         scanner_score_gap=signal.score_gap,
         scanner_drop_distance=signal.drop_distance,
         scanner_topk_spread=signal.topk_spread,
+        scanner_version=signal.scanner_version,
+        scanner_schema_version=signal.schema_version,
+        scanner_market_date=signal.market_date,
+        scanner_label_version=signal.label_version,
         source="scanner",
         expires_at=datetime.now(timezone.utc) + timedelta(hours=4),
     )
@@ -357,6 +508,10 @@ class TestE2EPipeline:
             assert intent.source == "scanner"
             assert intent.scanner_score > 0
             assert intent.scanner_confidence in ("high", "medium", "low")
+            assert intent.scanner_version == DEFAULT_SCANNER_VERSION
+            assert intent.scanner_schema_version == DEFAULT_SIGNAL_SCHEMA_VERSION
+            assert intent.scanner_market_date == trade_date
+            assert intent.scanner_label_version == DEFAULT_LABEL_VERSION
 
     def test_scanner_dedup_prevents_duplicate_intents(
         self, bridge: ScannerBridge, store: DecisionStore
@@ -524,27 +679,22 @@ class TestSignalFreshness:
 
     def test_fresh_signals_returned_normally(self, bridge: ScannerBridge, tmp_path: Path) -> None:
         """Signals within max_signal_age_days should be returned as-is."""
-        import csv
         from datetime import date
 
         today = date.today().isoformat()
         fresh_csv = tmp_path / "signals_fresh.csv"
-        with open(fresh_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "datetime",
-                    "instrument",
-                    "score",
-                    "rank",
-                    "score_gap",
-                    "drop_distance",
-                    "topk_spread",
-                    "confidence",
-                    "weight",
-                ]
-            )
-            writer.writerow([today, "EURUSD", "0.61", "1", "0.05", "0.18", "0.12", "high", "0.333"])
+        fresh_csv.write_text(
+            (
+                "datetime,instrument,score,rank,score_gap,drop_distance,topk_spread,"
+                "confidence,weight,profile,scanner_version,schema_version,cadence,"
+                "label_version,regime_label,market_date\n"
+                f"{today},EURUSD,0.61,1,0.05,0.18,0.12,high,0.333,fx,"
+                f"{DEFAULT_SCANNER_VERSION},{DEFAULT_SIGNAL_SCHEMA_VERSION},1d,"
+                f"{DEFAULT_LABEL_VERSION},trend,{today}\n"
+            ),
+            encoding="utf-8",
+        )
+        _write_contract_sidecars(tmp_path, tmp_path)
 
         signals, _ = bridge.load_signals_from_file(
             fresh_csv, target_date=today, max_signal_age_days=2
@@ -562,6 +712,7 @@ class TestSignalFreshness:
         # 2026-02-20 is 11 days before 2026-03-03 → stale → rejected
         assert signals == []
         assert chosen_date == ""
+        assert bridge.get_last_rejection_reason_code() == "scanner.bundle.stale"
 
     def test_stale_signals_weekend_tolerance(self, bridge: ScannerBridge) -> None:
         """Friday signals should be valid on Sunday (2-day tolerance)."""
@@ -591,9 +742,7 @@ class TestPipelineCache:
 
     def test_cache_miss_runs_subprocess(self, tmp_path: Path) -> None:
         """First run_pipeline call should invoke subprocess."""
-        signals_dir = tmp_path / "outputs" / "signals"
-        signals_dir.mkdir(parents=True)
-        shutil.copy(FIXTURES_DIR / "signals_single.csv", signals_dir / "signals.csv")
+        _seed_scanner_output_bundle(tmp_path)
 
         bridge = ScannerBridge(scanner_path=tmp_path)
 
@@ -607,9 +756,7 @@ class TestPipelineCache:
 
     def test_cache_hit_skips_subprocess(self, tmp_path: Path) -> None:
         """Second run_pipeline with same (date, interval) should skip subprocess."""
-        signals_dir = tmp_path / "outputs" / "signals"
-        signals_dir.mkdir(parents=True)
-        shutil.copy(FIXTURES_DIR / "signals_single.csv", signals_dir / "signals.csv")
+        _seed_scanner_output_bundle(tmp_path)
 
         bridge = ScannerBridge(scanner_path=tmp_path)
 
@@ -629,9 +776,7 @@ class TestPipelineCache:
 
     def test_cache_miss_on_different_date(self, tmp_path: Path) -> None:
         """Different date should miss cache and run subprocess again."""
-        signals_dir = tmp_path / "outputs" / "signals"
-        signals_dir.mkdir(parents=True)
-        shutil.copy(FIXTURES_DIR / "signals_single.csv", signals_dir / "signals.csv")
+        _seed_scanner_output_bundle(tmp_path)
 
         bridge = ScannerBridge(scanner_path=tmp_path)
 
@@ -645,9 +790,7 @@ class TestPipelineCache:
 
     def test_cache_miss_on_different_interval(self, tmp_path: Path) -> None:
         """Different interval should miss cache and run subprocess again."""
-        signals_dir = tmp_path / "outputs" / "signals"
-        signals_dir.mkdir(parents=True)
-        shutil.copy(FIXTURES_DIR / "signals_single.csv", signals_dir / "signals.csv")
+        _seed_scanner_output_bundle(tmp_path)
 
         bridge = ScannerBridge(scanner_path=tmp_path)
 
@@ -661,9 +804,7 @@ class TestPipelineCache:
 
     def test_invalidate_cache_forces_rerun(self, tmp_path: Path) -> None:
         """invalidate_cache() should clear cache, next call runs subprocess."""
-        signals_dir = tmp_path / "outputs" / "signals"
-        signals_dir.mkdir(parents=True)
-        shutil.copy(FIXTURES_DIR / "signals_single.csv", signals_dir / "signals.csv")
+        _seed_scanner_output_bundle(tmp_path)
 
         bridge = ScannerBridge(scanner_path=tmp_path)
 
@@ -679,9 +820,7 @@ class TestPipelineCache:
 
     def test_cache_returns_defensive_copy(self, tmp_path: Path) -> None:
         """Cached signals should be a copy, not the same list object."""
-        signals_dir = tmp_path / "outputs" / "signals"
-        signals_dir.mkdir(parents=True)
-        shutil.copy(FIXTURES_DIR / "signals_single.csv", signals_dir / "signals.csv")
+        _seed_scanner_output_bundle(tmp_path)
 
         bridge = ScannerBridge(scanner_path=tmp_path)
 
@@ -698,9 +837,7 @@ class TestPipelineCache:
         """When signal_date < request_date (stale), cache still returns signals."""
         # signals_multiday.csv has dates 2026-02-15 and 2026-02-16
         # Requesting 2026-02-17 will fall back to latest (2026-02-16) — stale
-        signals_dir = tmp_path / "outputs" / "signals"
-        signals_dir.mkdir(parents=True)
-        shutil.copy(FIXTURES_DIR / "signals_multiday.csv", signals_dir / "signals.csv")
+        _seed_scanner_output_bundle(tmp_path, fixture_name="signals_multiday.csv")
 
         bridge = ScannerBridge(scanner_path=tmp_path)
 

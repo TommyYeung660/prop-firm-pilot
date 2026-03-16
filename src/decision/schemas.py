@@ -81,6 +81,10 @@ class TradeIntent(BaseModel):
     scanner_score_gap: float = 0.0
     scanner_drop_distance: float = 0.0
     scanner_topk_spread: float = 0.0
+    scanner_version: str = ""
+    scanner_schema_version: str = ""
+    scanner_market_date: str = ""
+    scanner_label_version: str = ""
 
     # LLM decision (filled after claim)
     suggested_side: Literal["BUY", "SELL", "HOLD"] | None = None
