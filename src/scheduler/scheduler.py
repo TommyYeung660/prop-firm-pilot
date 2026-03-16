@@ -76,6 +76,7 @@ from src.signal.scanner_bridge import ScannerBridge
 # ── Constants ──────────────────────────────────────────────────────────────
 
 CONFIDENCE_MAP: dict[str, float] = {"high": 0.9, "medium": 0.6, "low": 0.3}
+TACTICAL_EXIT_LOG_HEARTBEAT = timedelta(minutes=15)
 
 
 class Scheduler:
@@ -189,6 +190,8 @@ class Scheduler:
         self._last_reevaluation: dict[str, datetime] = {}  # position_id -> last eval time
         self._reevaluation_close_positions: dict[str, float] = {}  # pos_id -> unrealized PnL
         self._last_known_profit: dict[str, float] = {}  # pos_id -> last polled profit
+        self._last_tactical_exit_cycle_summary: str = ""
+        self._last_tactical_exit_cycle_log_at: datetime | None = None
 
         # v1.2.0: Event-driven re-scan when a position closes (frees a slot)
         self._rescan_event = asyncio.Event()
@@ -2986,6 +2989,7 @@ class Scheduler:
         }
         budget = self._get_tactical_exit_budget_snapshot()
         evaluation_summaries: list[str] = []
+        now = self._now_utc()
 
         for pos in open_positions:
             intent = intent_lookup.get(str(pos.position_id))
@@ -2997,14 +3001,16 @@ class Scheduler:
             evaluation = self._tactical_exit_manager.evaluate_position(
                 snapshot=snapshot,
                 budget=budget,
-                now=self._now_utc(),
+                now=now,
             )
             await self._handle_tactical_exit_evaluation(pos, intent, evaluation)
             evaluation_summaries.append(
                 self._format_tactical_exit_cycle_entry(intent.symbol, evaluation)
             )
 
-        if evaluation_summaries:
+        if evaluation_summaries and self._should_log_tactical_exit_cycle_summary(
+            evaluation_summaries, now
+        ):
             logger.info(
                 "Tactical exit cycle: evaluated {} position(s) [{}]",
                 len(evaluation_summaries),
@@ -3580,6 +3586,26 @@ class Scheduler:
         if extras:
             return f"{summary} ({', '.join(extras)})"
         return summary
+
+    def _should_log_tactical_exit_cycle_summary(
+        self, evaluation_summaries: list[str], now: datetime
+    ) -> bool:
+        """Log tactical-exit summaries on change, otherwise as low-frequency heartbeat."""
+        summary = "; ".join(evaluation_summaries)
+        if summary != self._last_tactical_exit_cycle_summary:
+            self._last_tactical_exit_cycle_summary = summary
+            self._last_tactical_exit_cycle_log_at = now
+            return True
+
+        if self._last_tactical_exit_cycle_log_at is None:
+            self._last_tactical_exit_cycle_log_at = now
+            return True
+
+        if now - self._last_tactical_exit_cycle_log_at >= TACTICAL_EXIT_LOG_HEARTBEAT:
+            self._last_tactical_exit_cycle_log_at = now
+            return True
+
+        return False
 
     @staticmethod
     def _coerce_numeric(value: Any, fallback: float) -> float:
