@@ -442,6 +442,12 @@ TradingAgents 對本系統的價值不在於「神奇預測」，而在於:
 - 重寫更貼近 FX 的 label，而不是沿用 stock-ish 假設
 - 補 regime segmentation
 
+`2026-03-16` 狀態更新:
+
+- `qlib_market_scanner v1.5.0` 已完成 FX cadence selection 量化研究，正式發布 cadence 維持 `1d`
+- 對 `prop-firm-pilot` 而言，這代表 FX scanner runtime 預設不變，但現在已有正式 scorecard、輸出契約與 validation gate 支撐
+- 參見 `docs/PropFirmPilot_v1.5.0_Cross_Repo_Change_Note.md` 與 `../qlib_market_scanner/docs/reports/2026-03-16-v1.5.0-fx-cadence-selection-results.md`
+
 ### 16.2 LLM Layer Ablation
 
 - 比較:

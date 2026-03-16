@@ -1,10 +1,12 @@
 # PropFirmPilot v1.4.0 之後 — 發展路線圖
 
-> **更新日期**: 2026-03-14
+> **更新日期**: 2026-03-16
 >
-> **主線狀態**: `main` 已合入 `v1.4.8` Close Control Plane 實作（2026-03-14）
+> **主線狀態**: `main` 已合入 `v1.5.0_beta` cross-repo scanner contract 與 beta version baseline（2026-03-16）
 >
-> **最新 prod hotfix 基線**: `v1.4.6d`（MarketDataHub REST Fallback Loop Fix）
+> **最新 tactical bugfix 基線**: `v1.4.9`（Market Data Freshness Semantics And Tactical Warning Throttling）
+>
+> **最新 cross-repo beta 基線**: `v1.5.0_beta`（Scanner Contract Gate And Cross-Repo Beta Baseline）
 >
 > **涵蓋範圍**: `prop-firm-pilot` · `qlib_market_scanner` · `TradingAgents` 三倉庫協作
 >
@@ -15,7 +17,7 @@
 ## 目錄
 
 1. [這份文件現在要回答什麼](#1-這份文件現在要回答什麼)
-2. [截至 v1.4.8 mainline 已落地的基線](#2-截至-v148-mainline-已落地的基線)
+2. [截至 v1.5.0_beta mainline 已落地的基線](#2-截至-v150_beta-mainline-已落地的基線)
 3. [當前真正的瓶頸是什麼](#3-當前真正的瓶頸是什麼)
 4. [修訂後版本路線：v1.4.7 → v1.5.0](#4-修訂後版本路線v147--v150)
 5. [v1.5.0（stable）詳細設計](#5-v150stable詳細設計)
@@ -29,39 +31,40 @@
 
 今天真正需要回答的，不再是「要不要做 WebSocket-first」、「要不要加 learning loop」，而是以下四個問題：
 
-1. 截至 `v1.4.8` mainline，哪些能力已經成為既成基線，不能再寫成未來式？
-2. 為什麼在 `v1.4.8` 已進入 `main` 之後，仍然要保留 `v1.4.9` 作為 market-open bugfix / 微調版本，而不是直接跳到更大的 feature scope？
-3. `v1.5.0` 為什麼要被定義成第一個 `stable` 版本，而且 stable 到底代表什麼？
-4. `prop-firm-pilot`、`qlib_market_scanner`、`TradingAgents` 三個 repo 在 `v1.5.0` 前各自要負責什麼？
+1. 截至 `v1.5.0_beta` mainline，哪些能力已經成為既成基線，不能再寫成未來式？
+2. `v1.4.9` 與 `v1.5.0_beta` 各自解決了什麼，為什麼現在仍不能直接把主線稱為 `stable`？
+3. `v1.5.0` 為什麼仍要被定義成第一個 `stable` 版本，而且 stable 到底代表什麼？
+4. `prop-firm-pilot`、`qlib_market_scanner`、`TradingAgents` 三個 repo 在 `v1.5.0 stable` 前各自還剩下什麼責任？
 
 ### 1.1 重寫原則
 
 - **先承認既成事實，再排未來版本。** 已經進入主線的能力，不再重複規劃。
 - **先把 tactical entry / exit 做穩，再追求更高頻的 alpha 與更多交易宗數。**
 - **`v1.5.0` 不是功能堆疊版，而是穩定版。** 其目標是把進出場、記憶、風控、資金效率與跨 repo 契約一起穩住。
-- **分鐘級交易不等於分鐘級亂掃描。** 是否採用小時級或分鐘級量化分析，必須由 `qlib_market_scanner` 的研究結果決定，而不是憑直覺升頻。
+- **分鐘級交易不等於分鐘級亂掃描。** `qlib_market_scanner` 已在 `v1.5.0_beta` 完成第一輪 FX cadence 研究，release cadence 先凍結為 `1d`；後續升頻必須拿新證據，而不是憑直覺翻轉。
 - **TradingAgents 不能再假設 daily-stock cadence。** 若 scanner 與 runtime 走向 intraday，agent 也必須同步調整節奏、記憶與 prompt 邊界。
 
 ---
 
-## 2. 截至 v1.4.8 mainline 已落地的基線
+## 2. 截至 v1.5.0_beta mainline 已落地的基線
 
 ### 2.1 已成為主線能力的內容
 
-| 能力 | 截至 `v1.4.8` mainline 的狀態 | 意義 |
+| 能力 | 截至 `v1.5.0_beta` mainline 的狀態 | 意義 |
 |---|---|---|
-| **Observe** | `fx_websocket_client.py` + `fx_tick_aggregator.py` + `market_data_hub.py` 已形成 WebSocket-first、REST fallback、warm-cache、degraded handling 的市場資料基線 | 不再是 PoC，而是 production 依賴 |
+| **Observe** | `fx_websocket_client.py` + `fx_tick_aggregator.py` + `market_data_hub.py` 已形成 WebSocket-first、REST fallback、warm-cache、degraded handling 基線，且 `v1.4.9` 已把 bar freshness semantics 收斂到 effective close time | 不再是 PoC，而是 production 依賴 |
 | **Learn** | structured reflection payload、persistent lesson retrieval、`historical_pnl_context`、`retrieved_trade_lessons` 已存在 | 學習迴圈已閉合，但還未完全穩定化 |
-| **Act** | 已有 tactical entry gate、tactical pending / retry lifecycle、close control plane、close reconciler、execution metadata 回寫 | 已具備完整控制面雛形 |
+| **Act** | 已有 tactical entry gate、tactical pending / retry lifecycle、close control plane、close reconciler、execution metadata 回寫，且 `v1.5.0_beta` 已把 scanner bundle validation gate 合入主線 | 已具備完整控制面雛形 |
 | **Operate** | run-specific logs、bundle manifest、Dropbox diagnostics sync、live probe、shared version helper 已落地 | 已具備事故排查基線 |
 | **Close consistency** | `v1.4.8` 已把 tactical exit、reduce exposure、emergency close、best-day close、reeval close 收斂到單一 close-domain schema | 平倉不再只是分散路徑，而是可審計控制面 |
-| **Hotfix discipline** | `v1.4.5a`、`v1.4.6b`、`v1.4.6c`、`v1.4.6d` 連續修正 stale fallback、scanner compatibility、freshness、REST loop | 顯示目前瓶頸在可靠性與控制面一致性，而不是缺功能 |
+| **Cross-repo contract** | `v1.5.0_beta` 已把 scanner `manifest/schema/version/validation status` ingestion gate、metadata persistence 與 upstream `1d` canonical cadence 決議吸收到 pilot 主線 | 三倉庫契約已從 ad-hoc integration 升級為 beta 基線 |
+| **Hotfix discipline** | `v1.4.5a`、`v1.4.6b`、`v1.4.6c`、`v1.4.6d`、`v1.4.9` 連續修正 stale fallback、scanner compatibility、freshness semantics、REST loop 與 warning noise | 顯示目前瓶頸在可靠性與控制面一致性，而不是缺功能 |
 
 ### 2.2 已知事實
 
 - 系統已經不是「每日一次掃描 + 單次決策」那麼簡單，而是持續運作的 24/7 async pipeline。
 - tactical entry / exit 已存在，但仍有 correctness、provenance、read-back verification、state consistency 的尾端問題。
-- `qlib_market_scanner` 現在仍偏向日線節奏，這限制了每日可交易宗數與 intraday alpha 的利用率。
+- `qlib_market_scanner` 已完成第一輪 FX cadence research，`v1.5.0_beta` 正式凍結 release cadence 為 `1d`；眼前重點已不是「要不要立刻升到 `1h`」，而是如何在穩定契約下吸收研究結果。
 - `TradingAgents` 已經能用 lessons 與市場上下文，但仍未真正為 intraday FX 節奏而設計。
 - 市場資料問題已證明：只修單一 bug 不夠，必須把 entry/exit、memory、risk、scanner cadence 一起重整。
 
@@ -91,19 +94,22 @@
 
 這也是為什麼 `v1.4.8` 必須專注在 exit，而不是把 exit 當作附屬小修。
 
-### 3.3 `qlib_market_scanner` 的日線設計限制了交易頻率
+### 3.3 `qlib_market_scanner` 的 cadence 問題已從「是否可研究」轉為「如何穩定落地」
 
-目前 scanner 的根本問題不是分數高低，而是 cadence mismatch：
+`v1.5.0_beta` 之前，scanner 的核心問題是 cadence mismatch；`v1.5.0_beta` 之後，這個問題已經有了第一輪正式答案。
 
-- 原設計偏向日線 / 美股量化研究
-- 本專案是 FX、持續監察、持續管理、需要更高頻率候選更新
-- 即使 tactical monitor 是分鐘級，若 strategic score 每日才有效變一次，候選池還是嚴重受限
+目前已知事實是：
 
-因此真正要研究的是：
+- 上游 `qlib_market_scanner` 已完成 FX cadence matrix，比較 `1d`、`1h`、`4h+1h`、`1d+1h`
+- 第一輪正式 release decision 維持 `1d` 為 canonical FX cadence
+- `1h` 仍是後續最值得深挖的 follow-up 候選，但不屬於 `v1.5.0_beta` 的 release default
+- pilot 現在已把這個結果吸收為 versioned bundle contract，而不是繼續把 cadence choice 當作未定問題
 
-- `qlib` 是否能有效支援 FX 的 `1h`、`15m`、甚至更細粒度研究？
-- 若可以，哪些 horizon / label / feature engineering 才有實際訊號價值？
-- 若不適合直接走分鐘級，是否應先走 `1d + 1h` 或 `4h + 1h` 的 hybrid 模式？
+因此眼前真正的問題變成：
+
+- 如何把 `1d` release cadence 的 contract、metadata、validation gate 穩定落地到多日 market-open 運行
+- 如何保留 `1h` / hybrid cadence 作為 `v1.5.x` follow-up 研究，而不污染當前 stable gate
+- 如何讓 downstream 明確理解 scanner score 的時間框架、有效期限與 label version
 
 ### 3.4 TradingAgents 也受制於同樣的 cadence mismatch
 
@@ -149,33 +155,41 @@
 
 `v1.5.0` 若要稱為 stable，就不能只會穩定開一筆倉，而要能穩定管理多筆、不同相關性的倉位。
 
-### 3.7 三個 repo 之間仍缺少穩定的產品契約
+### 3.7 三個 repo 之間已有 beta 契約，但還沒有 stable 契約
 
-目前三倉庫的問題不是不能協作，而是協作邊界仍偏工程暫定：
+`v1.5.0_beta` 已把三倉庫協作邊界從 ad-hoc integration 推進到 beta contract，但還沒有完成 stable-level closure。
 
-- scanner 輸出欄位與含義仍可能變動
+已經落地的部分：
+
+- scanner 輸出已有 `manifest/schema/version/validation` bundle 契約
+- pilot 已能拒收 degraded / stale / invalid scanner bundle
+- 上游 FX canonical cadence 與 label family 已有第一輪凍結口徑
+
+仍未完成的部分：
+
 - TradingAgents 的 state / prompt / risk schema 仍容易隨 feature 演進漂移
-- prop-firm-pilot 需要額外 defensive logic 來承受外部 repo 的變化
+- multi-day validation 尚未證明這套 beta contract 已足以作為 stable release gate
+- 記憶、portfolio guard 與 agent schema 仍未被納入同一個 release-acceptance 框架
 
-`v1.5.0` 前必須把這個問題升級成產品層級的 interface contract。
+`v1.5.0 stable` 前必須把這套 beta contract 升級成產品層級的 stable interface contract。
 
 ---
 
 ## 4. 修訂後版本路線：v1.4.7 → v1.5.0
 
-### 4.1 基線：`v1.4.6d`
+### 4.1 基線：`v1.4.9`
 
-`v1.4.6d` 的角色是結束 market-data fallback loop 這條 hotfix 線，讓後續版本能把焦點從救火轉到 tactical stabilization。
+`v1.4.9` 的角色是收斂 `v1.4.8a` 延續下來的 freshness semantics 與 warning noise 問題，讓後續版本能把焦點從單點 hotfix 轉到 cross-repo beta integration。
 
 這版之後的判斷基準是：
 
-- 市場資料 path 已可用，但必須補足 provenance 與 operational consistency
+- 市場資料 path 已可用，且 closed-bar freshness semantics 已和 tactical stale-bar sanitize 對齊
 - tactical entry / exit 已存在，但還未達 stable release 的可靠性要求
-- `qlib_market_scanner` 與 `TradingAgents` 的 cadence mismatch 已成為新主瓶頸
+- 下一個主瓶頸不再是 REST loop / stale warning，而是 scanner / agent / pilot 三者的 stable contract closure
 
 ### 4.2 v1.4.7 — Tactical Entry Fixes & Optimization
 
-這一版只做一件事：**把 entry 做穩。**
+這一版作為設計工作包仍然成立，但其核心收斂內容已被後續 `v1.4.8a`、`v1.4.9` 與 `v1.5.0_beta` 部分吸收。
 
 #### 目標
 
@@ -234,7 +248,13 @@
 
 ### 4.4 v1.4.9 — Bugfix And Micro-Tuning Pass
 
-這一版的任務是：**用 market-open 實盤結果驗證 `v1.4.7` 與 `v1.4.8`，只修 bug，不擴 scope。**
+這一版的任務是：**用 market-open 實盤結果驗證 `v1.4.7` / `v1.4.8` 的 tactical 主線，只修 bug，不擴 scope。**
+
+#### 目前狀態
+
+- 已於 `2026-03-16` 合入 `main`
+- `MarketDataHub` 與 scheduler stale-bar sanitize 已統一採用 effective close time freshness semantics
+- stale tactical-bar warnings 已做 stateful throttling，operator 不再每分鐘看到同一條重複 warning
 
 #### 目標
 
@@ -257,7 +277,34 @@
 - tactical close 與 tactical entry 的 postmortem 不再出現 schema / reason taxonomy 漂移
 - `v1.5.0` 可以直接接手 stable gate、memory、capital efficiency 與跨 repo 對齊工作
 
-### 4.5 v1.5.0（stable）— Broader Decision / Risk Upgrade
+### 4.5 v1.5.0_beta — Cross-Repo Contract Freeze And Beta Validation Gate
+
+這一版的任務是：**把 upstream scanner research 結果與 versioned bundle contract 正式吸收到 pilot `main`，但仍保留 beta 身分。**
+
+#### 目標
+
+- 將 `prop-firm-pilot` 與 `qlib_market_scanner` 版本統一到 `1.5.0_beta`
+- 在 pilot 主線正式落地 scanner manifest/schema/version/validation gate
+- 持久化 scanner metadata，讓 intents / journal / postmortem 能看見 scanner contract facts
+- 明確宣告 FX canonical release cadence 維持 `1d`，不在 beta 階段翻轉 runtime scanner cadence
+
+#### 核心工作
+
+| 類別 | 工作項 |
+|---|---|
+| **Bundle validation** | 驗證 scanner manifest、schema version、scanner version、validation status 與 required signal columns |
+| **Metadata persistence** | 將 `scanner_version`、`scanner_schema_version`、`scanner_market_date`、`scanner_label_version` 寫入 `TradeIntent` / `DecisionStore` |
+| **Rejection handling** | 對 degraded / stale / invalid bundle 產生 deterministic rejection reason code、journal event 與 operator alert |
+| **Cross-repo alignment** | 對齊 upstream `v1.5.0_beta` release identity，並保留對既有 `v1.5.0` artifacts 的向後相容 |
+| **Docs / release identity** | 將 roadmap、changelog、runtime version source 及 cross-repo note 改寫成 beta baseline 口徑 |
+
+#### 完成條件
+
+- `main` 已能 ingest versioned scanner bundle，而不是只吃 ad-hoc CSV
+- `prop-firm-pilot` 與 `qlib_market_scanner` 對外版本字串一致顯示 `1.5.0_beta`
+- 下一步 stable 驗證可以針對真實跨 repo 契約進行，而不是針對暫時性 fixture 假設進行
+
+### 4.6 v1.5.0（stable）— Broader Decision / Risk Upgrade
 
 `v1.5.0` 的定位不是一般 feature release，而是第一個 **stable release milestone**。
 
@@ -273,6 +320,10 @@
 ---
 
 ## 5. v1.5.0（stable）詳細設計
+
+> **2026-03-16 更新**:
+> `v1.5.0_beta` 已先把 scanner contract freeze、beta version identity 與 FX `1d` cadence decision 合入 `main`。
+> 以下內容描述的是 beta 之後仍需完成的 stable gate closure，而不是說這些工作都還沒開始。
 
 ### 5.1 版本定義
 
@@ -354,18 +405,22 @@ Stable 在這裡的意思是：**核心交易閉環可以被信任，可以被�
 
 #### 5.4.1 問題定義
 
-目前 scanner 分數主要依賴日線變化，這在 FX intraday 專案上有兩個直接後果：
+`v1.5.0_beta` 前，這個工作流的核心是判斷 FX release cadence 應不應升到更高頻；`v1.5.0_beta` 後，第一輪 release decision 已經做完。
 
-- 每日可交易候選宗數被嚴重限制
-- 即使分鐘級監察很勤快，也只是反覆檢查同一批 daily-style candidate
+目前 scanner 相關的現況是：
+
+- `qlib_market_scanner` 已完成 `1d`、`1h`、`4h+1h`、`1d+1h` matrix
+- 第一輪正式 release decision 維持 `1d` 為 canonical FX cadence
+- `1h` 仍是最值得在 `v1.5.x` 深挖的 follow-up 候選，但不屬於當前 stable release default
+- pilot 已將這個決議吸收為 versioned ingestion contract，而不是把 cadence choice 留在 runtime 配置層即興決定
 
 #### 5.4.2 核心研究問題
 
-`v1.5.0` 不應直接假設「分鐘級一定更好」，而應回答：
+因此 `v1.5.0 stable` 在這條工作流真正要回答的是：
 
-1. `qlib` 對 FX 做 `1h` / `15m` / `5m` 研究是否技術可行？
-2. 這些頻率下的 label、特徵與回測結果是否有實際訊號價值？
-3. 在 execution cost、spread、噪音下，哪個頻率最適合當 scanner cadence？
+1. 如何把已凍結的 `1d` release cadence 轉成 multi-day、可驗收的 stable contract？
+2. 如何保留 `1h` / hybrid cadence 作為 `v1.5.x` follow-up research，而不污染當前 stable gate？
+3. scanner metadata、prediction horizon 與 label version 要如何持續被 downstream 正確理解與驗證？
 
 #### 5.4.3 建議分階段設計
 
@@ -518,9 +573,9 @@ Stable 在這裡的意思是：**核心交易閉環可以被信任，可以被�
   ├─ v1.4.6c ✅ ─── Scanner CLI Backward-Compatibility Hotfix
   ├─ v1.4.6d ✅ ─── MarketDataHub REST Fallback Loop Fix
   │
-  ├─ v1.4.7 ────── Tactical Entry Fixes & Optimization
+  ├─ v1.4.7 ~~~~~~ Tactical Entry Fixes & Optimization
+  │                · work-package scope later absorbed by v1.4.8a / v1.4.9 / v1.5.0_beta
   │                · entry correctness
-  │                · calibration
   │                · provenance
   │
   ├─ v1.4.8 ✅ ─── Tactical Exit Fixes & Optimization
@@ -528,17 +583,21 @@ Stable 在這裡的意思是：**核心交易閉環可以被信任，可以被�
   │                · canonical reconciliation
   │                · unified trade-closed payload
   │
-  ├─ v1.4.9 ────── Bugfix And Micro-Tuning Pass
-  │                · market-open validation
-  │                · correctness bugfix
-  │                · narrow tuning only
+  ├─ v1.4.9 ✅ ─── Bugfix And Micro-Tuning Pass
+  │                · market-open validation follow-up
+  │                · close-time freshness semantics
+  │                · stale warning throttling
   │
-  └─ v1.5.0 ────── Stable: Broader Decision / Risk Upgrade
-                   · stable entry / exit
-                   · intraday-capable scanner research outcome
-                   · intraday-aware TradingAgents
-                   · stable trade memory
-                   · diversified capital deployment
+  ├─ v1.5.0_beta ✅ ─── Scanner Contract Gate And Cross-Repo Beta Baseline
+  │                     · versioned scanner bundle ingestion
+  │                     · scanner metadata persistence
+  │                     · FX canonical cadence frozen to 1d
+  │
+  └─ v1.5.0 ────── Stable Gate Closure
+                    · stable entry / exit
+                    · intraday-aware TradingAgents
+                    · stable trade memory
+                    · diversified capital deployment
 ```
 
 ### 6.2 優先級矩陣
@@ -550,8 +609,9 @@ Stable 在這裡的意思是：**核心交易閉環可以被信任，可以被�
 | Exit read-back verification | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.8` |
 | Exit replayability / journal consistency | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.8` |
 | Market-open bugfix / micro-tuning pass | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.4.9` |
+| Scanner contract freeze / bundle validation gate | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.5.0_beta` |
 | Exposure budget / diversified sizing | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.5.0` |
-| Intraday scanner feasibility / effectiveness research | 🔴 高 | 🔴 高 | ⭐⭐⭐ | `v1.5.0` |
+| Intraday scanner feasibility / effectiveness research | 🔴 高 | 🔴 高 | ⭐⭐⭐ | `v1.5.0_beta` |
 | TradingAgents intraday schema alignment | 🔴 高 | 🔴 高 | ⭐⭐⭐ | `v1.5.0` |
 | Stable trade memory infrastructure | 🔴 高 | 🟡 中 | ⭐⭐⭐ | `v1.5.0` |
 
@@ -563,7 +623,8 @@ Stable 在這裡的意思是：**核心交易閉環可以被信任，可以被�
 | **M1: Entry 可回放** | 每次 entry verdict 都有 deterministic reason code、source provenance、score breakdown | `v1.4.7` |
 | **M2: Exit 可審計** | 每次 exit 都有 trigger source、broker read-back、journal consistency、close reason；close-control 已進入 `main` | `v1.4.8` |
 | **M3: Tactical 驗證收斂** | `v1.4.7` / `v1.4.8` 經 market-open run 驗證後，主線只剩可接受的小幅微調 | `v1.4.9` |
-| **M4: Stable 閉環成立** | scanner cadence、agent schema、trade memory、capital efficiency 與 tactical control plane 一起穩定運作 | `v1.5.0` |
+| **M4: Beta 契約凍結** | scanner cadence decision、bundle schema、version identity 與 pilot ingestion gate 已一起進入 `main` | `v1.5.0_beta` |
+| **M5: Stable 閉環成立** | agent schema、trade memory、capital efficiency 與 tactical control plane 一起穩定運作 | `v1.5.0` |
 
 ---
 
@@ -573,9 +634,10 @@ Stable 在這裡的意思是：**核心交易閉環可以被信任，可以被�
 
 下一階段的正確做法，不是再堆新功能，而是按順序完成：
 
-1. `v1.4.7` 把 entry 做穩
-2. `v1.4.8` 把 exit close-control 做穩，並已經先合入 `main`
-3. `v1.4.9` 只做 `v1.4.7 / v1.4.8` 的 bugfix、微調與 market-open validation
-4. `v1.5.0` 把 scanner、agents、memory、risk、execution 一起提升到 stable 等級
+1. `v1.4.7` 的 entry-hardening scope 已由後續版本逐步吸收
+2. `v1.4.8` 把 exit close-control 做穩，並已先合入 `main`
+3. `v1.4.9` 收斂 freshness semantics 與 warning noise，完成 bugfix / micro-tuning pass
+4. `v1.5.0_beta` 已把 scanner contract、cadence decision 與 beta version identity 吸收入 `main`
+5. `v1.5.0` 再把 scanner、agents、memory、risk、execution 一起提升到 stable 等級
 
 這樣的版本順序，才能讓 `v1.5.0` 真正代表一個可以被信任的 FX 自動交易系統基線，而不是另一個需要連續熱修補才能勉強運行的版本。

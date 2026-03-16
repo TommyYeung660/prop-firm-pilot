@@ -137,13 +137,32 @@ def _seed_scanner_output_bundle(
     dest = signals_dir / "signals.csv"
     shutil.copy(FIXTURES_DIR / fixture_name, dest)
     _write_contract_sidecars(
-        scanner_root / "data" / "shared_export",
+        scanner_root / "outputs",
         scanner_root / "outputs" / "metrics",
         scanner_version=scanner_version,
         schema_version=schema_version,
         label_version=label_version,
         cadence=cadence,
         validation_status=validation_status,
+    )
+    return dest
+
+
+def _seed_runtime_output_only(
+    scanner_root: Path,
+    fixture_name: str = "signals_single.csv",
+    *,
+    validation_status: str = "passed",
+) -> Path:
+    signals_dir = scanner_root / "outputs" / "signals"
+    metrics_dir = scanner_root / "outputs" / "metrics"
+    signals_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    dest = signals_dir / "signals.csv"
+    shutil.copy(FIXTURES_DIR / fixture_name, dest)
+    (metrics_dir / "metrics.json").write_text(
+        json.dumps(_build_metrics_payload(validation_status), indent=2),
+        encoding="utf-8",
     )
     return dest
 
@@ -314,6 +333,40 @@ class TestCSVParsing:
         assert signals == []
         assert chosen_date == ""
         assert bridge.get_last_rejection_reason_code() == "scanner.bundle.degraded"
+
+    def test_runtime_outputs_do_not_fallback_to_shared_export_manifest(
+        self, bridge: ScannerBridge, tmp_path: Path
+    ) -> None:
+        csv_path = _seed_runtime_output_only(tmp_path)
+        _write_contract_sidecars(
+            tmp_path / "data" / "shared_export",
+            tmp_path / "data" / "shared_export" / "scanner_outputs" / "metrics",
+        )
+
+        signals, chosen_date = bridge.load_signals_from_file(csv_path, target_date="2026-02-16")
+
+        assert signals == []
+        assert chosen_date == ""
+        assert bridge.get_last_rejection_reason_code() == "scanner.contract.invalid"
+        assert "runtime manifest.json not found" in bridge.get_last_rejection_message()
+
+    def test_runtime_outputs_report_missing_runtime_manifest_even_if_shared_export_is_invalid(
+        self, bridge: ScannerBridge, tmp_path: Path
+    ) -> None:
+        csv_path = _seed_runtime_output_only(tmp_path)
+        shared_manifest_dir = tmp_path / "data" / "shared_export"
+        shared_manifest_dir.mkdir(parents=True, exist_ok=True)
+        (shared_manifest_dir / "manifest.json").write_text(
+            json.dumps({"source": "legacy_bundle"}, indent=2),
+            encoding="utf-8",
+        )
+
+        signals, chosen_date = bridge.load_signals_from_file(csv_path, target_date="2026-02-16")
+
+        assert signals == []
+        assert chosen_date == ""
+        assert bridge.get_last_rejection_reason_code() == "scanner.contract.invalid"
+        assert "runtime manifest.json not found" in bridge.get_last_rejection_message()
 
     def test_scanner_signal_repr(self) -> None:
         """ScannerSignal repr should include key fields."""

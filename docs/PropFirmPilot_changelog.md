@@ -11,33 +11,56 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ---
 
 ## [Unreleased]
-**Post-v1.4.9 Mainline Validation Window**
+**Post-v1.5.0_beta Mainline Validation Window**
 
-> **Status**: `v1.4.9` 已於 2026-03-16 合入 `main`，等待 market-open validation
-> **Reason**: `v1.4.9` 已補上 closed-bar freshness semantics、stale tactical warning 節流與 REST fallback open/close instrumentation；下一步應以 market-open run 驗證 `v1.4.8` / `v1.4.8a` / `v1.4.9` 的實盤行為是否與設計一致
-
-### Planned: v1.4.7 — Tactical Entry Fixes & Optimization
-- tactical entry gate correctness、mixed-source freshness、degraded path 行為與 stale attribution 收尾
-- `WAIT` / retry / degrade / timed_out 生命周期重新校準，避免 intent churn、假性卡死與過早取消
-- per-symbol / session / regime tactical entry threshold calibration，補上可持續調參依據
-- tactical entry diagnostics、reason code、score breakdown、candidate provenance 與 rescan provenance 補齊
-- 與 `qlib_market_scanner` 的輸出契約對齊，為後續 intraday scanner 研究保留 metadata 擴充位
+> **Status**: `v1.5.0_beta` 已於 2026-03-16 合入 `main`，等待 cross-repo / market-open validation
+> **Reason**: core pilot 已完成 scanner manifest/schema gate、versioned scanner metadata persistence、DecisionStore contract extension 與 beta version bump；下一步是用真實 market-open run 驗證 `v1.5.0_beta` 是否可作為 `v1.5.0 stable` 候選基線
 
 ### Planned: v1.5.0 (stable) — Broader Decision / Risk Upgrade
 - 定義第一個「穩定版」基準：系統必須能穩定可靠地進出場，而不是只靠 hotfix 維持可用
 - tactical entry 與 tactical exit 需達到 production-grade reliability，包含 data provenance、execution integrity、close verification 與 postmortem replayability
-- 把 `v1.4.9` 驗證完成的 entry / exit control plane 升級為 stable release gate，而不是再做一次大重寫
-- 重新評估 `qlib_market_scanner` 是否能有效支援 FX 的小時級或分鐘級量化分析，而不再受限於原本偏日線 / 美股導向的 scoring cadence
+- 把 `v1.5.0_beta` 已吸收的 scanner contract、cadence decision 與 entry / exit control plane 升級為 stable release gate，而不是再做一次大重寫
+- 不重新開啟 `qlib_market_scanner` 的 FX release cadence 選型；`v1.5.0 stable` 直接沿用已凍結的 `1d` canonical cadence
 - 重新設計 `TradingAgents` 與 intraday FX 場景的耦合方式，使其能消化更高頻率的 scanner / market context 與交易記憶
 - 建立穩定可靠的交易記憶體系，將 trade journal、reflection、lesson memory、execution outcome 串成可持續改善的 learning loop
 - 將多元化倉位與資金效率正式納入風控與配置層，而不是只做單筆交易最小風險化
 
 ### Cross-Repo Note
-- `v1.5.0 (stable)` 的核心工作明確跨越 `prop-firm-pilot`、`../qlib_market_scanner`、`../TradingAgents` 三個 repo；本 changelog 只追蹤 core pilot repo 的發版節點，完整設計見 roadmap
-- `2026-03-16` 已確認上游 `qlib_market_scanner v1.5.0` 的 FX canonical cadence 維持 `1d`；這次升級的是 research governance、output contract 與 validation gate，不是 `prop-firm-pilot` 的 FX runtime cadence 翻轉
+- `v1.5.0_beta` 已先把 `prop-firm-pilot`、`../qlib_market_scanner` 的版本與 artifact contract 對齊；`v1.5.0 stable` 再接手多日驗證與 stable gate closure
+- `2026-03-16` 已確認上游 `qlib_market_scanner v1.5.0_beta` 的 FX canonical cadence 維持 `1d`；這次 beta 升級的是 research governance、output contract 與 validation gate，不是 `prop-firm-pilot` 的 FX runtime cadence 翻轉
 
 ### Tracking
 - Roadmap: `docs/PropFirmPilot_v1.4.0_road_map.md`
+- Cross-repo note: `docs/PropFirmPilot_v1.5.0_Cross_Repo_Change_Note.md`
+
+---
+
+## [1.5.0_beta] — 2026-03-16
+**Scanner Contract Gate And Cross-Repo Beta Baseline**
+
+> **Status**: 已合入 `main`，作為 `v1.5.0 stable` 的 beta integration baseline
+> **Reason**: 上游 `qlib_market_scanner` 已凍結 FX cadence decision 與 versioned artifact contract；pilot 必須在主線正式吸收 bundle validation、metadata persistence 與 beta version identity，才能開始 stable gate 驗證
+
+### Added
+- `ScannerBridge` 現在會在 ingest 前驗證 `manifest.json` / `metrics.json` 的 schema version、scanner version、validation status 與 required signal columns
+- `TradeIntent` / `DecisionStore` 現在會持久化 `scanner_version`、`scanner_schema_version`、`scanner_market_date` 與 `scanner_label_version`
+- scanner bundle 被拒收時，scheduler 現在會記錄 `SCANNER_BUNDLE_REJECTED` trade event 並發出對應 alert
+- scanner fixtures 現在帶有 versioned manifest / metrics sidecars，測試不再只依賴裸 `signals.csv`
+
+### Changed
+- runtime shared version source 現在顯示 `1.5.0_beta`，讓 runtime / release tag / packer 版本一致
+- pilot ingestion 現在同時接受 `v1.5.0` 與 `v1.5.0_beta` scanner bundle，兼容既有研究 artifacts 與 beta upstream release
+- 上游 `qlib_market_scanner` 已正式凍結 FX canonical release cadence 為 `1d`；pilot runtime 不因這次 beta 升級而切換 `scanner_timeframe`
+- runtime `outputs/signals/signals.csv` 現在只會解析同一 bundle family 下的 `outputs/manifest.json` 與 `outputs/metrics/metrics.json`，不再回退讀取 legacy `data/shared_export` sidecars
+
+### Cross-Repo
+- 上游 `qlib_market_scanner` 已在 `v1.5.0_beta` 完成 FX cadence matrix、versioned export contract、DuckDB intraday timestamp preservation 與 cadence-leg isolation
+- 本 repo 的責任是把這些 artifacts 轉成可拒收 degraded / stale / invalid bundle 的 ingestion gate，而不是自行重做 cadence 選型
+
+### Validated
+- `uv run pytest tests/test_scanner_bridge.py tests/test_scheduler.py tests/test_version.py -q` → `169 passed`
+- `uv run ruff check src/signal/scanner_bridge.py tests/test_scanner_bridge.py tests/test_scheduler.py tests/test_version.py` → `All checks passed!`
+- `uv run python -c "from src.version import get_app_version, get_release_tag; print(get_app_version()); print(get_release_tag())"` → `1.5.0_beta` / `v1.5.0_beta`
 
 ---
 

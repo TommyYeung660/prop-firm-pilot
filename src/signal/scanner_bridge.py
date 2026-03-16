@@ -223,42 +223,46 @@ class ScannerBridge:
                 return candidate
         return None
 
+    def _bundle_family(self, signals_path: Path) -> str:
+        if signals_path.parent.name == "signals" and len(signals_path.parents) > 1:
+            parent_name = signals_path.parents[1].name
+            if parent_name == "outputs":
+                return "runtime"
+            if parent_name == "scanner_outputs":
+                return "shared_export"
+        return "standalone"
+
     def _resolve_manifest_path(self, signals_path: Path) -> Path | None:
-        candidates = [signals_path.parent / "manifest.json"]
-        if len(signals_path.parents) > 1:
-            candidates.append(signals_path.parents[1] / "manifest.json")
-        if len(signals_path.parents) > 2:
-            candidates.append(signals_path.parents[2] / "manifest.json")
-        candidates.extend(
-            [
-                self._scanner_path / "data" / "shared_export" / "manifest.json",
-                self._scanner_path / "manifest.json",
-            ]
-        )
+        family = self._bundle_family(signals_path)
+        if family == "runtime":
+            candidates = [signals_path.parents[1] / "manifest.json"]
+        elif family == "shared_export":
+            candidates = [signals_path.parents[2] / "manifest.json"]
+        else:
+            candidates = [signals_path.parent / "manifest.json"]
+            if len(signals_path.parents) > 1:
+                candidates.append(signals_path.parents[1] / "manifest.json")
+            if len(signals_path.parents) > 2:
+                candidates.append(signals_path.parents[2] / "manifest.json")
         return self._first_existing_path(candidates)
 
     def _resolve_metrics_path(self, signals_path: Path) -> Path | None:
-        candidates = [signals_path.parent / "metrics.json"]
-        if len(signals_path.parents) > 1:
-            candidates.append(signals_path.parents[1] / "metrics" / "metrics.json")
-        if len(signals_path.parents) > 2:
-            candidates.append(
-                signals_path.parents[2]
-                / "scanner_outputs"
-                / "metrics"
-                / "metrics.json"
-            )
-        candidates.extend(
-            [
-                self._scanner_path / "outputs" / "metrics" / "metrics.json",
-                self._scanner_path
-                / "data"
-                / "shared_export"
-                / "scanner_outputs"
-                / "metrics"
-                / "metrics.json",
-            ]
-        )
+        family = self._bundle_family(signals_path)
+        if family == "runtime":
+            candidates = [signals_path.parents[1] / "metrics" / "metrics.json"]
+        elif family == "shared_export":
+            candidates = [signals_path.parents[1] / "metrics" / "metrics.json"]
+        else:
+            candidates = [signals_path.parent / "metrics.json"]
+            if len(signals_path.parents) > 1:
+                candidates.append(signals_path.parents[1] / "metrics" / "metrics.json")
+            if len(signals_path.parents) > 2:
+                candidates.append(
+                    signals_path.parents[2]
+                    / "scanner_outputs"
+                    / "metrics"
+                    / "metrics.json"
+                )
         return self._first_existing_path(candidates)
 
     def _read_json_file(self, path: Path) -> dict[str, Any]:
@@ -268,9 +272,11 @@ class ScannerBridge:
         return payload
 
     def _load_contract_context(self, signals_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+        family = self._bundle_family(signals_path)
+        family_prefix = "" if family == "standalone" else f"{family} "
         manifest_path = self._resolve_manifest_path(signals_path)
         if manifest_path is None:
-            raise ValueError("manifest.json not found")
+            raise ValueError(f"{family_prefix}manifest.json not found")
         manifest = self._read_json_file(manifest_path)
         metrics: dict[str, Any] = {}
         metrics_path = self._resolve_metrics_path(signals_path)
