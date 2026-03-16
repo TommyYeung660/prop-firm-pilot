@@ -243,6 +243,7 @@ class ScannerBridge:
         if tickers:
             cmd.extend(["--tickers", ",".join(tickers)])
 
+        cmd.extend(["--topk", str(self._topk)])
         cmd.extend(["--interval", interval])
         cmd_without_benchmark = list(cmd)
         if "--benchmark" in cmd_without_benchmark:

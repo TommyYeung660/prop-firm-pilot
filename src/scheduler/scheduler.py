@@ -29,6 +29,7 @@ from numbers import Real
 from typing import Any
 
 import httpx
+import pandas as pd
 from loguru import logger
 
 from src.compliance.best_day_tracker import BestDayTracker
@@ -1403,25 +1404,25 @@ class Scheduler:
                         self._config.websocket.warmup_1h_bars,
                     ),
                 )
-                if not bars_5min_result.bars.empty:
-                    data.bars_5min = bars_5min_result.bars
-                    data.bars_5min_source = bars_5min_result.source
-                if not bars_1h_result.bars.empty:
-                    data.bars_1h = bars_1h_result.bars
-                    data.bars_1h_source = bars_1h_result.source
-                sources = {
-                    source
-                    for source in (
-                        data.quote_source,
-                        data.bars_5min_source,
-                        data.bars_1h_source,
-                    )
-                    if source
-                }
-                if len(sources) == 1:
-                    data.data_source = next(iter(sources))
-                elif sources:
-                    data.data_source = "mixed"
+                bars_5min, bars_5min_source = self._sanitize_tactical_bars(
+                    symbol=symbol,
+                    timeframe="5m",
+                    bars=bars_5min_result.bars,
+                    source=bars_5min_result.source,
+                )
+                bars_1h, bars_1h_source = self._sanitize_tactical_bars(
+                    symbol=symbol,
+                    timeframe="1h",
+                    bars=bars_1h_result.bars,
+                    source=bars_1h_result.source,
+                )
+                if not bars_5min.empty:
+                    data.bars_5min = bars_5min
+                    data.bars_5min_source = bars_5min_source
+                if not bars_1h.empty:
+                    data.bars_1h = bars_1h
+                    data.bars_1h_source = bars_1h_source
+                self._refresh_tactical_data_source(data)
                 hub_supplied_data = (
                     data.current_spread > 0 or not data.bars_5min.empty or not data.bars_1h.empty
                 )
@@ -1481,9 +1482,21 @@ class Scheduler:
                         ),
                         self._eodhd.fetch_bars(symbol, start_1h, end_date, client, interval="1h"),
                     )
+                bars_5min, bars_5min_source = self._sanitize_tactical_bars(
+                    symbol=symbol,
+                    timeframe="5m",
+                    bars=bars_5min,
+                    source="rest_fallback",
+                )
+                bars_1h, bars_1h_source = self._sanitize_tactical_bars(
+                    symbol=symbol,
+                    timeframe="1h",
+                    bars=bars_1h,
+                    source="rest_fallback",
+                )
                 if not bars_5min.empty:
                     data.bars_5min = bars_5min
-                    data.bars_5min_source = "rest_fallback"
+                    data.bars_5min_source = bars_5min_source
                     # Note: latest_bar_time is now set from MatchTrader quote above.
                     # EODHD bar timestamps are NOT used for data_freshness due to
                     # potential multi-hour delay during DST transitions.
@@ -1494,14 +1507,13 @@ class Scheduler:
                     )
                 if not bars_1h.empty:
                     data.bars_1h = bars_1h
-                    data.bars_1h_source = "rest_fallback"
+                    data.bars_1h_source = bars_1h_source
                     logger.debug(
                         "Tactical: fetched {} 1h bars for {}",
                         len(bars_1h),
                         symbol,
                     )
-                if data.bars_5min_source or data.bars_1h_source:
-                    data.data_source = "rest_fallback"
+                self._refresh_tactical_data_source(data)
             except Exception as e:
                 logger.warning("Failed to fetch EODHD intraday bars for {}: {}", symbol, e)
 
@@ -1919,7 +1931,7 @@ class Scheduler:
 
             try:
                 # Auto-throttle: increase sleep when API budget is low
-                base_interval = self._config.scheduler.position_monitor_interval_seconds
+                base_interval = self._position_monitor_base_interval_seconds()
                 limiter = self._matchtrader._rate_limiter
                 remaining = self._coerce_numeric(
                     getattr(limiter, "write_remaining", getattr(limiter, "remaining", 0)),
@@ -2973,6 +2985,7 @@ class Scheduler:
             if intent.position_id is not None
         }
         budget = self._get_tactical_exit_budget_snapshot()
+        evaluation_summaries: list[str] = []
 
         for pos in open_positions:
             intent = intent_lookup.get(str(pos.position_id))
@@ -2987,6 +3000,16 @@ class Scheduler:
                 now=self._now_utc(),
             )
             await self._handle_tactical_exit_evaluation(pos, intent, evaluation)
+            evaluation_summaries.append(
+                self._format_tactical_exit_cycle_entry(intent.symbol, evaluation)
+            )
+
+        if evaluation_summaries:
+            logger.info(
+                "Tactical exit cycle: evaluated {} position(s) [{}]",
+                len(evaluation_summaries),
+                "; ".join(evaluation_summaries),
+            )
 
     async def _reevaluate_open_positions(
         self, open_positions: list[Any], opened_intents: list[TradeIntent]
@@ -3457,6 +3480,106 @@ class Scheduler:
     def _now_utc() -> datetime:
         """Return current UTC datetime."""
         return datetime.now(timezone.utc)
+
+    def _position_monitor_base_interval_seconds(self) -> int:
+        """Return the effective position-monitor cadence in seconds."""
+        intervals = [self._config.scheduler.position_monitor_interval_seconds]
+        tactical_interval = self._config.tactical.exit.evaluation_interval_seconds
+        if self._config.tactical.exit.enabled and tactical_interval > 0:
+            intervals.append(tactical_interval)
+        positive_intervals = [interval for interval in intervals if interval > 0]
+        return min(positive_intervals) if positive_intervals else 0
+
+    @staticmethod
+    def _latest_tactical_bar_time(bars: pd.DataFrame) -> datetime | None:
+        """Return the latest tactical bar timestamp as aware UTC datetime."""
+        if bars.empty or "datetime" not in bars.columns:
+            return None
+        timestamps = pd.to_datetime(bars["datetime"], utc=True, errors="coerce").dropna()
+        if timestamps.empty:
+            return None
+        return timestamps.max().to_pydatetime()
+
+    @staticmethod
+    def _tactical_bar_max_age(timeframe: str) -> timedelta:
+        """Return the freshness threshold for live tactical bars."""
+        if timeframe == "1h":
+            return timedelta(hours=4)
+        return timedelta(minutes=20)
+
+    def _sanitize_tactical_bars(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        bars: pd.DataFrame,
+        source: str,
+    ) -> tuple[pd.DataFrame, str]:
+        """Drop tactical bars that are too stale for live exit decisions."""
+        if bars.empty:
+            return bars, source
+
+        latest_bar_time = self._latest_tactical_bar_time(bars)
+        if latest_bar_time is None:
+            logger.warning(
+                "Tactical: dropping {} bars for {} from {} due to invalid timestamps",
+                timeframe,
+                symbol,
+                source or "unknown",
+            )
+            return bars.iloc[0:0].copy(), ""
+
+        max_age = self._tactical_bar_max_age(timeframe)
+        age = self._now_utc() - latest_bar_time
+        if age > max_age:
+            logger.warning(
+                "Tactical: dropping stale {} bars for {} from {} "
+                "(latest={}, age={:.0f}s, max_age={:.0f}s)",
+                timeframe,
+                symbol,
+                source or "unknown",
+                latest_bar_time.isoformat(),
+                age.total_seconds(),
+                max_age.total_seconds(),
+            )
+            return bars.iloc[0:0].copy(), ""
+
+        return bars, source
+
+    @staticmethod
+    def _refresh_tactical_data_source(data: TacticalData) -> None:
+        """Recompute the composite tactical data source after bar filtering."""
+        sources = {
+            source
+            for source in (
+                data.quote_source,
+                data.bars_5min_source,
+                data.bars_1h_source,
+            )
+            if source
+        }
+        if len(sources) == 1:
+            data.data_source = next(iter(sources))
+        elif sources:
+            data.data_source = "mixed"
+        else:
+            data.data_source = ""
+
+    @staticmethod
+    def _format_tactical_exit_cycle_entry(
+        symbol: str, evaluation: TacticalExitEvaluation
+    ) -> str:
+        """Format one tactical-exit result for operator-visible cycle logs."""
+        decision = evaluation.decision
+        summary = f"{symbol}:{decision.action}/{decision.state}/{decision.reason}"
+        extras: list[str] = []
+        if evaluation.skip_reason:
+            extras.append(f"skip={evaluation.skip_reason}")
+        if evaluation.requires_llm_exception_review:
+            extras.append("llm_exception=1")
+        if extras:
+            return f"{summary} ({', '.join(extras)})"
+        return summary
 
     @staticmethod
     def _coerce_numeric(value: Any, fallback: float) -> float:

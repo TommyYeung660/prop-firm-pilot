@@ -344,7 +344,7 @@ Qlib、LEAN、Freqtrade、FinRL、TradingAgents 都是很有價值的參照物�
 
 但要非常保守地說:
 
-- universe 只有 4 個 FX pairs
+- `qlib_market_scanner` 的內建 FX research baseline 仍只有 4 個 pairs；雖然 `prop-firm-pilot` runtime 已可透過 `--tickers` 覆寫到 7 個 pairs，但研究基線與實盤 universe 仍未完全對齊
 - intraday 支援帶有 compatibility mapping
 - 目前更像 feasibility / scaffolding
 - 還不是 robust cross-regime alpha proof
@@ -437,7 +437,7 @@ TradingAgents 對本系統的價值不在於「神奇預測」，而在於:
 
 ### 16.1 FX Alpha Research
 
-- 擴大 FX universe，不要只停在 4 個 pairs
+- 擴大並凍結 `qlib_market_scanner` 的 FX research baseline，不要只停在內建 4 個 pairs；並與 `prop-firm-pilot` 目前的 7-pair runtime universe 對齊
 - 研究 `1d + 1h`、`4h + 1h`、`1h` 等 hybrid cadence
 - 重寫更貼近 FX 的 label，而不是沿用 stock-ish 假設
 - 補 regime segmentation

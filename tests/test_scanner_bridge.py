@@ -233,6 +233,28 @@ class TestScannerBridgeInit:
         assert "--benchmark" in cmd
         assert cmd[cmd.index("--benchmark") + 1] == "FX"
 
+    def test_run_pipeline_includes_configured_topk(self, tmp_path: Path) -> None:
+        """Configured topk should be passed to qlib scanner CLI."""
+        signals_dir = tmp_path / "outputs" / "signals"
+        signals_dir.mkdir(parents=True)
+        src_csv = FIXTURES_DIR / "signals_single.csv"
+        shutil.copy(src_csv, signals_dir / "signals.csv")
+
+        bridge = ScannerBridge(scanner_path=tmp_path, topk=5)
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "ok"
+        mock_result.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            signals = bridge.run_pipeline(date="2026-02-16")
+
+        assert len(signals) == 1
+        cmd = mock_run.call_args.args[0]
+        assert "--topk" in cmd
+        assert cmd[cmd.index("--topk") + 1] == "5"
+
     def test_run_pipeline_retries_without_benchmark_when_cli_rejects_argument(
         self, tmp_path: Path
     ) -> None:

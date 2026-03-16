@@ -10,7 +10,7 @@ import asyncio
 import json
 import time
 import unittest.mock
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -4201,6 +4201,9 @@ async def test_fetch_tactical_data_prefers_market_data_hub_cache(
     """v1.4.0: tactical reads should prefer websocket-derived hub data when healthy."""
     import pandas as pd
 
+    now = datetime.now(timezone.utc)
+    fresh_quote_ts_ms = int((now - timedelta(seconds=15)).timestamp() * 1000)
+
     sched = Scheduler(
         config=config,
         store=store,
@@ -4213,7 +4216,7 @@ async def test_fetch_tactical_data_prefers_market_data_hub_cache(
     bars_5min = pd.DataFrame(
         [
             {
-                "datetime": pd.Timestamp("2026-03-11T12:00:00Z"),
+                "datetime": pd.Timestamp(now - timedelta(minutes=5)),
                 "open": 1.10,
                 "high": 1.11,
                 "low": 1.09,
@@ -4225,7 +4228,7 @@ async def test_fetch_tactical_data_prefers_market_data_hub_cache(
     bars_1h = pd.DataFrame(
         [
             {
-                "datetime": pd.Timestamp("2026-03-11T12:00:00Z"),
+                "datetime": pd.Timestamp(now - timedelta(minutes=55)),
                 "open": 1.09,
                 "high": 1.12,
                 "low": 1.08,
@@ -4239,7 +4242,7 @@ async def test_fetch_tactical_data_prefers_market_data_hub_cache(
     sched._market_data_hub.get_quote = AsyncMock(
         return_value=MagicMock(
             source="websocket_cache",
-            quote={"bid": 1.0848, "ask": 1.0850, "timestamp_ms": 1_741_696_000_000},
+            quote={"bid": 1.0848, "ask": 1.0850, "timestamp_ms": fresh_quote_ts_ms},
         )
     )
     sched._market_data_hub.get_bars = AsyncMock(
@@ -4267,6 +4270,9 @@ async def test_fetch_tactical_data_uses_hub_rest_fallback_for_stale_symbol(
     """v1.4.0: stale websocket symbols should still resolve through hub fallback."""
     import pandas as pd
 
+    now = datetime.now(timezone.utc)
+    fresh_quote_ts_ms = int((now - timedelta(seconds=15)).timestamp() * 1000)
+
     sched = Scheduler(
         config=config,
         store=store,
@@ -4279,7 +4285,7 @@ async def test_fetch_tactical_data_uses_hub_rest_fallback_for_stale_symbol(
     bars_5min = pd.DataFrame(
         [
             {
-                "datetime": pd.Timestamp("2026-03-11T12:00:00Z"),
+                "datetime": pd.Timestamp(now - timedelta(minutes=5)),
                 "open": 1.10,
                 "high": 1.11,
                 "low": 1.09,
@@ -4291,7 +4297,7 @@ async def test_fetch_tactical_data_uses_hub_rest_fallback_for_stale_symbol(
     bars_1h = pd.DataFrame(
         [
             {
-                "datetime": pd.Timestamp("2026-03-11T12:00:00Z"),
+                "datetime": pd.Timestamp(now - timedelta(minutes=55)),
                 "open": 1.09,
                 "high": 1.12,
                 "low": 1.08,
@@ -4305,7 +4311,7 @@ async def test_fetch_tactical_data_uses_hub_rest_fallback_for_stale_symbol(
     sched._market_data_hub.get_quote = AsyncMock(
         return_value=MagicMock(
             source="rest_fallback",
-            quote={"bid": 1.0848, "ask": 1.0850, "timestamp_ms": 1_741_696_000_000},
+            quote={"bid": 1.0848, "ask": 1.0850, "timestamp_ms": fresh_quote_ts_ms},
         )
     )
     sched._market_data_hub.get_bars = AsyncMock(
@@ -4322,6 +4328,142 @@ async def test_fetch_tactical_data_uses_hub_rest_fallback_for_stale_symbol(
     assert data.data_source == "rest_fallback"
 
 
+async def test_fetch_tactical_data_drops_stale_hub_1h_bars(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Stale 1h hub bars must not be passed into tactical exit evaluation."""
+    now = datetime.now(timezone.utc)
+    fresh_quote_ts_ms = int((now - timedelta(seconds=15)).timestamp() * 1000)
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    bars_5min = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp(now - timedelta(minutes=5)),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    bars_1h = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp(now - timedelta(days=2)),
+                "open": 1.09,
+                "high": 1.12,
+                "low": 1.08,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    sched._market_data_ready = True
+    sched._market_data_hub = MagicMock()
+    sched._market_data_hub.get_quote = AsyncMock(
+        return_value=MagicMock(
+            source="rest_fallback",
+            quote={"bid": 1.0848, "ask": 1.0850, "timestamp_ms": fresh_quote_ts_ms},
+        )
+    )
+    sched._market_data_hub.get_bars = AsyncMock(
+        side_effect=[
+            MagicMock(source="rest_fallback", bars=bars_5min),
+            MagicMock(source="rest_fallback", bars=bars_1h),
+        ]
+    )
+
+    with patch.object(sched, "_now_utc", return_value=now):
+        data = await sched._fetch_tactical_data("EURUSD")
+
+    assert data.bars_5min.equals(bars_5min)
+    assert data.bars_1h.empty
+    assert data.bars_1h_source == ""
+
+
+async def test_fetch_tactical_data_drops_stale_hub_5min_bars(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Stale 5m hub bars must not be passed into tactical exit evaluation."""
+    now = datetime.now(timezone.utc)
+    fresh_quote_ts_ms = int((now - timedelta(seconds=15)).timestamp() * 1000)
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    bars_5min = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp(now - timedelta(hours=2)),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    bars_1h = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp(now - timedelta(minutes=55)),
+                "open": 1.09,
+                "high": 1.12,
+                "low": 1.08,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    sched._market_data_ready = True
+    sched._market_data_hub = MagicMock()
+    sched._market_data_hub.get_quote = AsyncMock(
+        return_value=MagicMock(
+            source="rest_fallback",
+            quote={"bid": 1.0848, "ask": 1.0850, "timestamp_ms": fresh_quote_ts_ms},
+        )
+    )
+    sched._market_data_hub.get_bars = AsyncMock(
+        side_effect=[
+            MagicMock(source="rest_fallback", bars=bars_5min),
+            MagicMock(source="rest_fallback", bars=bars_1h),
+        ]
+    )
+
+    with patch.object(sched, "_now_utc", return_value=now):
+        data = await sched._fetch_tactical_data("EURUSD")
+
+    assert data.bars_5min.empty
+    assert data.bars_5min_source == ""
+    assert data.bars_1h.equals(bars_1h)
+
+
 async def test_fetch_tactical_data_uses_matchtrader_quote_when_hub_has_bars_only(
     config: AppConfig,
     store: DecisionStore,
@@ -4333,6 +4475,7 @@ async def test_fetch_tactical_data_uses_matchtrader_quote_when_hub_has_bars_only
     """When hub only has bars, scheduler should still fetch broker quote for freshness."""
     now_ms = int(time.time() * 1000)
     expected_quote_time = datetime.fromtimestamp((now_ms - 15_000) / 1000, tz=timezone.utc)
+    now = datetime.now(timezone.utc)
     mock_matchtrader.get_quote.return_value = {
         "ask": 0.6012,
         "bid": 0.6009,
@@ -4351,7 +4494,7 @@ async def test_fetch_tactical_data_uses_matchtrader_quote_when_hub_has_bars_only
     bars_5min = pd.DataFrame(
         [
             {
-                "datetime": pd.Timestamp("2026-03-12T22:00:00Z"),
+                "datetime": pd.Timestamp(now - timedelta(minutes=5)),
                 "open": 0.6010,
                 "high": 0.6020,
                 "low": 0.6000,
@@ -4363,7 +4506,7 @@ async def test_fetch_tactical_data_uses_matchtrader_quote_when_hub_has_bars_only
     bars_1h = pd.DataFrame(
         [
             {
-                "datetime": pd.Timestamp("2026-03-12T22:00:00Z"),
+                "datetime": pd.Timestamp(now - timedelta(minutes=55)),
                 "open": 0.5990,
                 "high": 0.6030,
                 "low": 0.5980,
@@ -4404,6 +4547,7 @@ async def test_fetch_tactical_data_hub_bars_only_without_quote_timestamp_keeps_f
     """Hub bars without any quote timestamp must not backfill freshness from bar time."""
     import pandas as pd
 
+    now = datetime.now(timezone.utc)
     mock_matchtrader.get_quote.return_value = {"ask": 0.6012, "bid": 0.6009}
 
     sched = Scheduler(
@@ -4418,7 +4562,7 @@ async def test_fetch_tactical_data_hub_bars_only_without_quote_timestamp_keeps_f
     bars_5min = pd.DataFrame(
         [
             {
-                "datetime": pd.Timestamp("2026-03-12T22:00:00Z"),
+                "datetime": pd.Timestamp(now - timedelta(minutes=5)),
                 "open": 0.6010,
                 "high": 0.6020,
                 "low": 0.6000,
@@ -4430,7 +4574,7 @@ async def test_fetch_tactical_data_hub_bars_only_without_quote_timestamp_keeps_f
     bars_1h = pd.DataFrame(
         [
             {
-                "datetime": pd.Timestamp("2026-03-12T22:00:00Z"),
+                "datetime": pd.Timestamp(now - timedelta(minutes=55)),
                 "open": 0.5990,
                 "high": 0.6030,
                 "low": 0.5980,
