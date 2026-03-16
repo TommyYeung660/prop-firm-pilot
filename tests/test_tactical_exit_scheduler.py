@@ -1,5 +1,6 @@
 """Tests for scheduler integration with tactical exit manager."""
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -16,7 +17,17 @@ from src.decision.tactical_exit_manager import TacticalExitEvaluation
 from src.decision.tactical_exit_rules import TacticalExitDecision
 from src.decision.tactical_validator import TacticalData
 from src.decision_store.sqlite_store import DecisionStore
+from src.scheduler import scheduler as scheduler_module
 from src.scheduler.scheduler import Scheduler
+
+
+def _tactical_cycle_log_calls(mock_info: MagicMock) -> list:
+    """Return only tactical-exit cycle summary log calls."""
+    return [
+        call
+        for call in mock_info.call_args_list
+        if call.args and "Tactical exit cycle" in call.args[0]
+    ]
 
 
 @pytest.fixture
@@ -176,3 +187,136 @@ async def test_non_exception_tactical_exit_does_not_call_llm_reeval(scheduler: S
         mp.setattr(scheduler, "_reevaluate_open_positions", mock_reeval)
         await scheduler._run_tactical_exit_cycle([_make_position()], [_make_opened_intent()])
         mock_reeval.assert_not_awaited()
+
+
+def test_position_monitor_base_interval_uses_tactical_exit_cadence(scheduler: Scheduler) -> None:
+    """Position monitor cadence should honor faster tactical exit evaluation settings."""
+    scheduler._config.scheduler.position_monitor_interval_seconds = 120
+    scheduler._config.tactical.exit.evaluation_interval_seconds = 60
+
+    assert scheduler._position_monitor_base_interval_seconds() == 60
+
+
+@pytest.mark.asyncio
+async def test_run_tactical_exit_cycle_logs_hold_summary(
+    scheduler: Scheduler, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hold-only tactical cycles should still emit an operator-visible summary log."""
+    scheduler._fetch_tactical_data = AsyncMock(return_value=TacticalData())
+    scheduler._handle_tactical_exit_evaluation = AsyncMock()
+    scheduler._tactical_exit_manager = MagicMock()
+    scheduler._tactical_exit_manager.evaluate_position.return_value = TacticalExitEvaluation(
+        decision=TacticalExitDecision(
+            action="HOLD",
+            state="INITIAL_RISK",
+            reason="no_tactical_exit_action",
+        )
+    )
+
+    mock_info = MagicMock()
+    monkeypatch.setattr(scheduler_module.logger, "info", mock_info)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(scheduler, "_now_utc", MagicMock(return_value=datetime.now(timezone.utc)))
+        await scheduler._run_tactical_exit_cycle([_make_position()], [_make_opened_intent()])
+
+    assert _tactical_cycle_log_calls(mock_info)
+
+
+@pytest.mark.asyncio
+async def test_run_tactical_exit_cycle_suppresses_redundant_identical_hold_summary(
+    scheduler: Scheduler, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated identical HOLD summaries should not be logged every cycle."""
+    scheduler._fetch_tactical_data = AsyncMock(return_value=TacticalData())
+    scheduler._handle_tactical_exit_evaluation = AsyncMock()
+    scheduler._tactical_exit_manager = MagicMock()
+    scheduler._tactical_exit_manager.evaluate_position.return_value = TacticalExitEvaluation(
+        decision=TacticalExitDecision(
+            action="HOLD",
+            state="INITIAL_RISK",
+            reason="no_tactical_exit_action",
+        )
+    )
+
+    t0 = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+    clock = MagicMock(return_value=t0)
+    mock_info = MagicMock()
+    monkeypatch.setattr(scheduler_module.logger, "info", mock_info)
+    monkeypatch.setattr(scheduler, "_now_utc", clock)
+
+    await scheduler._run_tactical_exit_cycle([_make_position()], [_make_opened_intent()])
+    clock.return_value = t0 + timedelta(minutes=5)
+    await scheduler._run_tactical_exit_cycle([_make_position()], [_make_opened_intent()])
+
+    assert len(_tactical_cycle_log_calls(mock_info)) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_tactical_exit_cycle_relogs_identical_summary_after_heartbeat(
+    scheduler: Scheduler, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Identical summaries should emit a low-frequency heartbeat log."""
+    scheduler._fetch_tactical_data = AsyncMock(return_value=TacticalData())
+    scheduler._handle_tactical_exit_evaluation = AsyncMock()
+    scheduler._tactical_exit_manager = MagicMock()
+    scheduler._tactical_exit_manager.evaluate_position.return_value = TacticalExitEvaluation(
+        decision=TacticalExitDecision(
+            action="HOLD",
+            state="INITIAL_RISK",
+            reason="no_tactical_exit_action",
+        )
+    )
+
+    t0 = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+    clock = MagicMock(return_value=t0)
+    mock_info = MagicMock()
+    monkeypatch.setattr(scheduler_module.logger, "info", mock_info)
+    monkeypatch.setattr(scheduler, "_now_utc", clock)
+
+    await scheduler._run_tactical_exit_cycle([_make_position()], [_make_opened_intent()])
+    clock.return_value = t0 + timedelta(minutes=10)
+    await scheduler._run_tactical_exit_cycle([_make_position()], [_make_opened_intent()])
+    clock.return_value = t0 + timedelta(minutes=16)
+    await scheduler._run_tactical_exit_cycle([_make_position()], [_make_opened_intent()])
+
+    assert len(_tactical_cycle_log_calls(mock_info)) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_tactical_exit_cycle_logs_immediately_when_summary_changes(
+    scheduler: Scheduler, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Summary changes should be logged immediately without waiting for heartbeat."""
+    scheduler._fetch_tactical_data = AsyncMock(return_value=TacticalData())
+    scheduler._handle_tactical_exit_evaluation = AsyncMock()
+    scheduler._tactical_exit_manager = MagicMock()
+    scheduler._tactical_exit_manager.evaluate_position.side_effect = [
+        TacticalExitEvaluation(
+            decision=TacticalExitDecision(
+                action="HOLD",
+                state="INITIAL_RISK",
+                reason="no_tactical_exit_action",
+            )
+        ),
+        TacticalExitEvaluation(
+            decision=TacticalExitDecision(
+                action="HOLD",
+                state="PROFIT_PROTECTION",
+                reason="write_budget_blocked",
+            ),
+            skip_reason="write_budget_blocked",
+        ),
+    ]
+
+    t0 = datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc)
+    clock = MagicMock(return_value=t0)
+    mock_info = MagicMock()
+    monkeypatch.setattr(scheduler_module.logger, "info", mock_info)
+    monkeypatch.setattr(scheduler, "_now_utc", clock)
+
+    await scheduler._run_tactical_exit_cycle([_make_position()], [_make_opened_intent()])
+    clock.return_value = t0 + timedelta(minutes=1)
+    await scheduler._run_tactical_exit_cycle([_make_position()], [_make_opened_intent()])
+
+    assert len(_tactical_cycle_log_calls(mock_info)) == 2

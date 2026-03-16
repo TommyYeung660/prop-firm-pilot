@@ -92,6 +92,44 @@ async def test_market_data_hub_prefers_websocket_cache_for_healthy_symbol() -> N
 
 
 @pytest.mark.asyncio
+async def test_market_data_hub_treats_closed_1h_websocket_bar_as_fresh_by_close_time() -> None:
+    provider = DummyProvider([])
+    aggregator = FXTickAggregator()
+    aggregator.add_tick(
+        _tick(
+            "EURUSD",
+            1.10,
+            1.11,
+            datetime(2026, 3, 11, 4, 52, 10, tzinfo=timezone.utc),
+        )
+    )
+    aggregator.add_tick(
+        _tick(
+            "EURUSD",
+            1.1001,
+            1.1101,
+            datetime(2026, 3, 11, 5, 0, 10, tzinfo=timezone.utc),
+        )
+    )
+    aggregator.close_elapsed_bars(now=datetime(2026, 3, 11, 5, 1, tzinfo=timezone.utc))
+
+    hub = MarketDataHub(
+        aggregator=aggregator,
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=provider,
+        symbols=["EURUSD"],
+        bar_cache_max_age_seconds=3600,
+        now_provider=lambda: datetime(2026, 3, 11, 5, 52, tzinfo=timezone.utc),
+    )
+
+    bars = await hub.get_bars("EURUSD", "1h", 10)
+
+    assert bars.source == "websocket_cache"
+    assert len(bars.bars) == 1
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
 async def test_market_data_hub_tracks_quote_freshness_separately_from_bar_freshness() -> None:
     aggregator = FXTickAggregator()
     aggregator.add_tick(
@@ -402,6 +440,55 @@ async def test_market_data_hub_suppresses_repeated_stale_quote_warnings_within_c
 
     assert len(provider.calls) == 1
     assert mock_warning.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_market_data_hub_rest_fallback_warning_includes_open_and_close_times() -> None:
+    current_now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
+    provider = DummyProvider(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T10:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    hub = MarketDataHub(
+        aggregator=FXTickAggregator(),
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=provider,
+        symbols=["EURUSD"],
+        bar_cache_max_age_seconds=60,
+        now_provider=lambda: current_now,
+    )
+    hub._warm_cache[("EURUSD", "1h")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T06:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+
+    with patch("src.data.market_data_hub.logger.warning") as mock_warning:
+        await hub.get_bars("EURUSD", "1h", 10)
+
+    assert mock_warning.call_count == 1
+    warning_args = mock_warning.call_args.args
+    assert "latest_rest_bar_open_time" in warning_args[0]
+    assert "latest_rest_bar_close_time" in warning_args[0]
+    assert "latest_rest_bar_age_by_close_sec" in warning_args[0]
+    assert "2026-03-12T10:00:00+00:00" in warning_args
+    assert "2026-03-12T11:00:00+00:00" in warning_args
+    assert 3600.0 in warning_args
 
 
 @pytest.mark.asyncio

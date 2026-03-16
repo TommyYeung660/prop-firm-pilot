@@ -78,4 +78,4 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.prop_firm_pilot]
-display_version = "1.4.6d"
+display_version = "1.4.9"

@@ -128,7 +128,7 @@ class MarketDataHub:
                     return QuoteResult(symbol=symbol, source="websocket_cache", quote=quote)
         bars = self._warm_cache.get((symbol, "1m"))
         rows_fetched = 0
-        if bars is None or bars.empty or not self._bars_are_fresh(bars):
+        if bars is None or bars.empty or not self._bars_are_fresh(bars, "1m"):
             bars, rows_fetched, refreshed = await self._refresh_rest_cache_serialized(
                 symbol=symbol,
                 timeframe="1m",
@@ -141,7 +141,7 @@ class MarketDataHub:
                     bars=bars,
                 )
         self._record_market_data_read("rest_fallback", rows_fetched)
-        if bars is None or bars.empty or not self._bars_are_fresh(bars):
+        if bars is None or bars.empty or not self._bars_are_fresh(bars, "1m"):
             return QuoteResult(symbol=symbol, source="rest_fallback", quote=None)
         quote = self._build_quote_from_bars(symbol, bars)
         return QuoteResult(symbol=symbol, source="rest_fallback", quote=quote)
@@ -160,7 +160,7 @@ class MarketDataHub:
                 timeframe=timeframe,
                 limit=limit,
             )
-            if not websocket_bars.empty and self._bars_are_fresh(websocket_bars):
+            if not websocket_bars.empty and self._bars_are_fresh(websocket_bars, timeframe):
                 self._record_market_data_read("websocket_cache")
                 return BarResult(
                     symbol=symbol,
@@ -169,7 +169,7 @@ class MarketDataHub:
                     bars=websocket_bars,
                 )
         warm = self._warm_cache.get((symbol, timeframe))
-        if warm is not None and not warm.empty and self._bars_are_fresh(warm):
+        if warm is not None and not warm.empty and self._bars_are_fresh(warm, timeframe):
             self._record_market_data_read("warmup_cache")
             return BarResult(
                 symbol=symbol,
@@ -228,9 +228,9 @@ class MarketDataHub:
         ]
         return pd.DataFrame(rows)
 
-    def _bars_are_fresh(self, bars: pd.DataFrame) -> bool:
+    def _bars_are_fresh(self, bars: pd.DataFrame, timeframe: Literal["1m", "5m", "1h"]) -> bool:
         """Check bar freshness independently from quote freshness."""
-        latest_ts = self._latest_bar_time(bars)
+        latest_ts = self._latest_bar_close_time(bars, timeframe)
         if latest_ts is None:
             return False
         age = self._now_provider() - latest_ts
@@ -244,6 +244,17 @@ class MarketDataHub:
         if latest_ts.tzinfo is None:
             return latest_ts.replace(tzinfo=timezone.utc)
         return latest_ts.astimezone(timezone.utc)
+
+    def _latest_bar_close_time(
+        self,
+        bars: pd.DataFrame | None,
+        timeframe: Literal["1m", "5m", "1h"],
+    ) -> datetime | None:
+        """Return the effective close time for the latest closed bar."""
+        latest_open = self._latest_bar_time(bars)
+        if latest_open is None:
+            return None
+        return latest_open + timedelta(seconds=self._TIMEFRAME_SECONDS[timeframe])
 
     def _build_quote_from_bars(
         self,
@@ -374,20 +385,26 @@ class MarketDataHub:
     ) -> None:
         """Log degraded market-data fallback with current websocket health context."""
         status = self._websocket_client.get_status()
-        latest_bar_at = self._latest_bar_time(bars)
-        latest_bar_age_sec = None
-        if latest_bar_at is not None:
-            latest_bar_age_sec = round((self._now_provider() - latest_bar_at).total_seconds(), 1)
+        latest_bar_open_at = self._latest_bar_time(bars)
+        latest_bar_close_at = self._latest_bar_close_time(bars, timeframe)
+        latest_bar_age_by_close_sec = None
+        if latest_bar_close_at is not None:
+            latest_bar_age_by_close_sec = round(
+                (self._now_provider() - latest_bar_close_at).total_seconds(),
+                1,
+            )
         logger.warning(
             "MarketDataHub: REST fallback for {} {} (rows_fetched={}, ws_state={}, last_error={}, "
-            "latest_rest_bar_time={}, latest_rest_bar_age_sec={})",
+            "latest_rest_bar_open_time={}, latest_rest_bar_close_time={}, "
+            "latest_rest_bar_age_by_close_sec={})",
             symbol,
             timeframe,
             rows_fetched,
             status.get("state"),
             status.get("last_error") or "none",
-            latest_bar_at.isoformat() if latest_bar_at is not None else "none",
-            latest_bar_age_sec if latest_bar_age_sec is not None else "none",
+            latest_bar_open_at.isoformat() if latest_bar_open_at is not None else "none",
+            latest_bar_close_at.isoformat() if latest_bar_close_at is not None else "none",
+            latest_bar_age_by_close_sec if latest_bar_age_by_close_sec is not None else "none",
         )
 
     async def _fetch_rest_bars(
