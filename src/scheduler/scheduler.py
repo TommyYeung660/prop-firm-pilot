@@ -77,6 +77,7 @@ from src.signal.scanner_bridge import ScannerBridge
 
 CONFIDENCE_MAP: dict[str, float] = {"high": 0.9, "medium": 0.6, "low": 0.3}
 TACTICAL_EXIT_LOG_HEARTBEAT = timedelta(minutes=15)
+TACTICAL_STALE_BAR_LOG_HEARTBEAT = timedelta(minutes=15)
 
 
 class Scheduler:
@@ -192,6 +193,7 @@ class Scheduler:
         self._last_known_profit: dict[str, float] = {}  # pos_id -> last polled profit
         self._last_tactical_exit_cycle_summary: str = ""
         self._last_tactical_exit_cycle_log_at: datetime | None = None
+        self._last_tactical_stale_bar_warning: dict[tuple[str, str, str], tuple[str, datetime]] = {}
 
         # v1.2.0: Event-driven re-scan when a position closes (frees a slot)
         self._rescan_event = asyncio.Event()
@@ -3507,6 +3509,23 @@ class Scheduler:
         return timestamps.max().to_pydatetime()
 
     @staticmethod
+    def _tactical_bar_duration(timeframe: str) -> timedelta:
+        """Return the duration of one bar for the given timeframe."""
+        if timeframe == "1h":
+            return timedelta(hours=1)
+        if timeframe == "5m":
+            return timedelta(minutes=5)
+        return timedelta(minutes=1)
+
+    @classmethod
+    def _latest_tactical_bar_close_time(cls, timeframe: str, bars: pd.DataFrame) -> datetime | None:
+        """Return the effective close time of the latest tactical bar."""
+        latest_open = cls._latest_tactical_bar_time(bars)
+        if latest_open is None:
+            return None
+        return latest_open + cls._tactical_bar_duration(timeframe)
+
+    @staticmethod
     def _tactical_bar_max_age(timeframe: str) -> timedelta:
         """Return the freshness threshold for live tactical bars."""
         if timeframe == "1h":
@@ -3525,8 +3544,8 @@ class Scheduler:
         if bars.empty:
             return bars, source
 
-        latest_bar_time = self._latest_tactical_bar_time(bars)
-        if latest_bar_time is None:
+        latest_bar_open_time = self._latest_tactical_bar_time(bars)
+        if latest_bar_open_time is None:
             logger.warning(
                 "Tactical: dropping {} bars for {} from {} due to invalid timestamps",
                 timeframe,
@@ -3535,19 +3554,46 @@ class Scheduler:
             )
             return bars.iloc[0:0].copy(), ""
 
-        max_age = self._tactical_bar_max_age(timeframe)
-        age = self._now_utc() - latest_bar_time
-        if age > max_age:
+        latest_bar_close_time = self._latest_tactical_bar_close_time(timeframe, bars)
+        if latest_bar_close_time is None:
             logger.warning(
-                "Tactical: dropping stale {} bars for {} from {} "
-                "(latest={}, age={:.0f}s, max_age={:.0f}s)",
+                "Tactical: dropping {} bars for {} from {} due to invalid close timestamps",
                 timeframe,
                 symbol,
                 source or "unknown",
-                latest_bar_time.isoformat(),
-                age.total_seconds(),
-                max_age.total_seconds(),
             )
+            return bars.iloc[0:0].copy(), ""
+
+        max_age = self._tactical_bar_max_age(timeframe)
+        now = self._now_utc()
+        age = now - latest_bar_close_time
+        if age > max_age:
+            warning_source = source or "unknown"
+            warning_key = (symbol, timeframe, warning_source)
+            warning_summary = "|".join(
+                (
+                    warning_source,
+                    latest_bar_open_time.isoformat(),
+                    latest_bar_close_time.isoformat(),
+                    f"{int(max_age.total_seconds())}",
+                )
+            )
+            if self._should_log_tactical_stale_bar_warning(
+                warning_key=warning_key,
+                warning_summary=warning_summary,
+                now=now,
+            ):
+                logger.warning(
+                    "Tactical: dropping stale {} bars for {} from {} "
+                    "(latest_open={}, latest_close={}, age={:.0f}s, max_age={:.0f}s)",
+                    timeframe,
+                    symbol,
+                    warning_source,
+                    latest_bar_open_time.isoformat(),
+                    latest_bar_close_time.isoformat(),
+                    age.total_seconds(),
+                    max_age.total_seconds(),
+                )
             return bars.iloc[0:0].copy(), ""
 
         return bars, source
@@ -3603,6 +3649,25 @@ class Scheduler:
 
         if now - self._last_tactical_exit_cycle_log_at >= TACTICAL_EXIT_LOG_HEARTBEAT:
             self._last_tactical_exit_cycle_log_at = now
+            return True
+
+        return False
+
+    def _should_log_tactical_stale_bar_warning(
+        self,
+        *,
+        warning_key: tuple[str, str, str],
+        warning_summary: str,
+        now: datetime,
+    ) -> bool:
+        """Throttle repeated identical stale tactical-bar warnings."""
+        last = self._last_tactical_stale_bar_warning.get(warning_key)
+        if last is None or last[0] != warning_summary:
+            self._last_tactical_stale_bar_warning[warning_key] = (warning_summary, now)
+            return True
+
+        if now - last[1] >= TACTICAL_STALE_BAR_LOG_HEARTBEAT:
+            self._last_tactical_stale_bar_warning[warning_key] = (warning_summary, now)
             return True
 
         return False

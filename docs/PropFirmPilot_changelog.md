@@ -11,10 +11,10 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ---
 
 ## [Unreleased]
-**Post-v1.4.8a Mainline Validation Window**
+**Post-v1.4.9 Mainline Validation Window**
 
-> **Status**: `v1.4.8a` 已於 2026-03-16 合入 `main`，等待 market-open validation
-> **Reason**: close-control 主線已經落地，且最新一輪 production follow-up 已補齊 tactical exit observability、scanner topk 契約與 stale tactical-bar 防護；下一步仍應先把 `v1.4.7` / `v1.4.8` / `v1.4.8a` 的實盤行為驗證完，再將 `v1.4.9` 限定為 bugfix 與微調版本
+> **Status**: `v1.4.9` 已於 2026-03-16 合入 `main`，等待 market-open validation
+> **Reason**: `v1.4.9` 已補上 closed-bar freshness semantics、stale tactical warning 節流與 REST fallback open/close instrumentation；下一步應以 market-open run 驗證 `v1.4.8` / `v1.4.8a` / `v1.4.9` 的實盤行為是否與設計一致
 
 ### Planned: v1.4.7 — Tactical Entry Fixes & Optimization
 - tactical entry gate correctness、mixed-source freshness、degraded path 行為與 stale attribution 收尾
@@ -22,12 +22,6 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - per-symbol / session / regime tactical entry threshold calibration，補上可持續調參依據
 - tactical entry diagnostics、reason code、score breakdown、candidate provenance 與 rescan provenance 補齊
 - 與 `qlib_market_scanner` 的輸出契約對齊，為後續 intraday scanner 研究保留 metadata 擴充位
-
-### Planned: v1.4.9 — Bugfix And Micro-Tuning Pass
-- 以 market-open run 結果驗證 `v1.4.7` entry hardening、`v1.4.8` close-control 與 `v1.4.8a` tactical-exit follow-up 實際表現
-- 只處理實盤暴露出的 correctness bug、journal 欄位細節、close reason 誤分類與 write-budget 邊界
-- 保留 tactical threshold、read-back tolerance、alert wording、postmortem payload 的小幅微調空間
-- 不新增更大範圍的新控制面，避免把 validation 版重新變成 feature 版
 
 ### Planned: v1.5.0 (stable) — Broader Decision / Risk Upgrade
 - 定義第一個「穩定版」基準：系統必須能穩定可靠地進出場，而不是只靠 hotfix 維持可用
@@ -40,9 +34,33 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ### Cross-Repo Note
 - `v1.5.0 (stable)` 的核心工作明確跨越 `prop-firm-pilot`、`../qlib_market_scanner`、`../TradingAgents` 三個 repo；本 changelog 只追蹤 core pilot repo 的發版節點，完整設計見 roadmap
+- `2026-03-16` 已確認上游 `qlib_market_scanner v1.5.0` 的 FX canonical cadence 維持 `1d`；這次升級的是 research governance、output contract 與 validation gate，不是 `prop-firm-pilot` 的 FX runtime cadence 翻轉
 
 ### Tracking
 - Roadmap: `docs/PropFirmPilot_v1.4.0_road_map.md`
+
+---
+
+## [1.4.9] — 2026-03-16
+**Market Data Freshness Semantics And Tactical Warning Throttling**
+
+> **Status**: 已合入 `main`，等待下一輪 market-open production validation
+> **Reason**: `v1.4.8a` production follow-up 顯示 tactical exit 雖然有持續執行，但 closed `1h` bar freshness 仍以 open-time 判斷，且 stale tactical-bar warning 會對相同狀態每分鐘重複刷屏，導致 operator 難以分辨是 provider 資料過舊還是本地 freshness 語義偏差
+
+### Fixed
+- `MarketDataHub` 的 bar freshness 現在以 effective close time 判斷，不再用 bucket open time 錯殺 websocket 聚合出的 closed `1h` bar
+- scheduler tactical stale-bar sanitize 也改為用 effective close time 判斷，避免 closed `1h` bar 在 live exit path 被過早視為 stale
+- repeated identical stale tactical-bar warnings 現在會做 stateful throttling；內容不變時只保留 15 分鐘 heartbeat，不再每分鐘刷同一條 warning
+
+### Added
+- `MarketDataHub` REST fallback warning 現在同時輸出 `latest_rest_bar_open_time`、`latest_rest_bar_close_time` 與 `latest_rest_bar_age_by_close_sec`
+- tactical stale-bar warning 現在同時輸出 `latest_open` 與 `latest_close`，可直接區分 provider 資料本身過舊與本地 freshness semantics 問題
+- regression tests 覆蓋 closed `1h` websocket bar 以 close time 判定仍屬 fresh、stale tactical warning throttling，以及 fallback instrumentation 欄位
+
+### Validated
+- `uv run pytest tests/data/test_market_data_hub.py tests/test_scheduler.py tests/test_tactical_exit_scheduler.py -q` → `142 passed`
+- `uv run ruff check src/data/market_data_hub.py src/scheduler/scheduler.py tests/data/test_market_data_hub.py tests/test_scheduler.py tests/test_tactical_exit_scheduler.py docs/plans/2026-03-16-market-data-freshness-and-warning-design.md docs/plans/2026-03-16-market-data-freshness-and-warning.md` → `All checks passed!`
+- `uv run python -c "from src.version import get_app_version, get_release_tag; print(get_app_version()); print(get_release_tag())"` → `1.4.9` / `v1.4.9`
 
 ---
 

@@ -4464,6 +4464,151 @@ async def test_fetch_tactical_data_drops_stale_hub_5min_bars(
     assert data.bars_1h.equals(bars_1h)
 
 
+async def test_fetch_tactical_data_keeps_1h_bar_when_close_time_is_still_fresh(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """A closed 1h bar should be judged by close time, not bucket open time."""
+    now = datetime(2026, 3, 16, 6, 30, tzinfo=timezone.utc)
+    fresh_quote_ts_ms = int((now - timedelta(seconds=15)).timestamp() * 1000)
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    bars_5min = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp(now - timedelta(minutes=5)),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    bars_1h = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp(now - timedelta(hours=4, minutes=30)),
+                "open": 1.09,
+                "high": 1.12,
+                "low": 1.08,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    sched._market_data_ready = True
+    sched._market_data_hub = MagicMock()
+    sched._market_data_hub.get_quote = AsyncMock(
+        return_value=MagicMock(
+            source="rest_fallback",
+            quote={"bid": 1.0848, "ask": 1.0850, "timestamp_ms": fresh_quote_ts_ms},
+        )
+    )
+    sched._market_data_hub.get_bars = AsyncMock(
+        side_effect=[
+            MagicMock(source="rest_fallback", bars=bars_5min),
+            MagicMock(source="rest_fallback", bars=bars_1h),
+        ]
+    )
+
+    with patch.object(sched, "_now_utc", return_value=now):
+        data = await sched._fetch_tactical_data("EURUSD")
+
+    assert data.bars_1h.equals(bars_1h)
+    assert data.bars_1h_source == "rest_fallback"
+
+
+def test_sanitize_tactical_bars_suppresses_redundant_identical_stale_warnings(
+    scheduler: Scheduler,
+) -> None:
+    """Repeated stale-bar warnings should be throttled until heartbeat/change."""
+    now = datetime(2026, 3, 16, 14, 0, tzinfo=timezone.utc)
+    stale_bars = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp(now - timedelta(hours=6)),
+                "open": 1.09,
+                "high": 1.12,
+                "low": 1.08,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+
+    with (
+        patch.object(scheduler, "_now_utc", return_value=now),
+        patch("src.scheduler.scheduler.logger.warning") as mock_warning,
+    ):
+        scheduler._sanitize_tactical_bars(
+            symbol="EURUSD",
+            timeframe="1h",
+            bars=stale_bars,
+            source="rest_fallback",
+        )
+        scheduler._sanitize_tactical_bars(
+            symbol="EURUSD",
+            timeframe="1h",
+            bars=stale_bars,
+            source="rest_fallback",
+        )
+
+    assert mock_warning.call_count == 1
+    warning_args = mock_warning.call_args.args
+    assert "latest_open" in warning_args[0]
+    assert "latest_close" in warning_args[0]
+
+
+def test_sanitize_tactical_bars_relogs_after_heartbeat_window(
+    scheduler: Scheduler,
+) -> None:
+    """Identical stale-bar warnings should reappear after the heartbeat window."""
+    start = datetime(2026, 3, 16, 14, 0, tzinfo=timezone.utc)
+    stale_bars = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp(start - timedelta(hours=6)),
+                "open": 1.09,
+                "high": 1.12,
+                "low": 1.08,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+
+    with patch("src.scheduler.scheduler.logger.warning") as mock_warning:
+        with patch.object(scheduler, "_now_utc", return_value=start):
+            scheduler._sanitize_tactical_bars(
+                symbol="EURUSD",
+                timeframe="1h",
+                bars=stale_bars,
+                source="rest_fallback",
+            )
+        with patch.object(scheduler, "_now_utc", return_value=start + timedelta(minutes=16)):
+            scheduler._sanitize_tactical_bars(
+                symbol="EURUSD",
+                timeframe="1h",
+                bars=stale_bars,
+                source="rest_fallback",
+            )
+
+    assert mock_warning.call_count == 2
+
+
 async def test_fetch_tactical_data_uses_matchtrader_quote_when_hub_has_bars_only(
     config: AppConfig,
     store: DecisionStore,
