@@ -184,6 +184,39 @@ class TestBuildExecutionMeta:
         assert data["side"] == "SELL"
         assert data["fill_price"] == 1.0856
 
+    def test_includes_optional_risk_and_capital_allocation_fields(self) -> None:
+        """Risk audit fields should be persisted when provided."""
+        result = ExecutionEngine._build_execution_meta(
+            fill_price=1.0856,
+            volume=0.1,
+            side="BUY",
+            sl_price=1.0806,
+            tp_price=1.0956,
+            sl_pips=50.0,
+            tp_pips=100.0,
+            pre_trade_bid=1.08555,
+            pre_trade_ask=1.08565,
+            slippage_pips=0.5,
+            execution_latency_ms=125.5,
+            random_delay_seconds=0.75,
+            compliance_passed=True,
+            order_raw_response={"positionId": "POS-123", "openPrice": 1.0856},
+            risk_pct=0.02,
+            capital_allocation_meta={
+                "effective_risk_pct": 0.02,
+                "default_risk_pct": 0.01,
+                "bounded_cap_pct": 0.02,
+                "slot_budget_pct": 0.03,
+                "confidence_factor": 1.0,
+                "uplift_applied": True,
+            },
+        )
+
+        data = json.loads(result)
+        assert data["risk_pct"] == 0.02
+        assert data["capital_allocation"]["effective_risk_pct"] == 0.02
+        assert data["capital_allocation"]["uplift_applied"] is True
+
 
 # ── Test update_execution_meta ──────────────────────────────────────────────
 

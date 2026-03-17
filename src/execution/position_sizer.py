@@ -36,6 +36,7 @@ class PositionSizer:
         symbol: str,
         account_equity: float,
         stop_loss_pips: float,
+        risk_pct_override: float | None = None,
     ) -> float:
         """Calculate optimal lot size for a trade.
 
@@ -50,6 +51,8 @@ class PositionSizer:
             symbol: FX pair (e.g. "EURUSD").
             account_equity: Current account equity in USD.
             stop_loss_pips: Stop loss distance in pips.
+            risk_pct_override: Explicit risk percentage override for bounded
+                capital allocation. Uses config default when omitted.
 
         Returns:
             Volume in lots (rounded to 0.01 precision).
@@ -64,7 +67,12 @@ class PositionSizer:
             return 0.01
 
         # Core calculation
-        risk_amount = account_equity * self._config.default_risk_pct
+        resolved_risk_pct = (
+            max(risk_pct_override, 0.0)
+            if risk_pct_override is not None
+            else self._config.default_risk_pct
+        )
+        risk_amount = account_equity * resolved_risk_pct
         pip_value = inst.pip_value
         volume = risk_amount / (stop_loss_pips * pip_value)
 
@@ -81,12 +89,13 @@ class PositionSizer:
 
         logger.debug(
             "PositionSizer: {} equity=${:.0f} SL={:.0f}pips → {:.2f} lots "
-            "(risk=${:.2f}, pip_val=${:.2f}, offset={:+.1%})",
+            "(risk=${:.2f}, risk_pct={:.2%}, pip_val=${:.2f}, offset={:+.1%})",
             symbol,
             account_equity,
             stop_loss_pips,
             volume,
             risk_amount,
+            resolved_risk_pct,
             pip_value,
             offset,
         )

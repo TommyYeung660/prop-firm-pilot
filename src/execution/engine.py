@@ -31,6 +31,10 @@ from src.config import AppConfig
 from src.decision.decision_formatter import DEFAULT_SL_TP
 from src.decision.schemas import TradeIntent
 from src.decision_store.sqlite_store import DecisionStore
+from src.execution.capital_allocator import (
+    BoundedCapitalAllocator,
+    CapitalAllocationDecision,
+)
 from src.execution.instrument_registry import InstrumentRegistry
 from src.execution.matchtrader_client import MatchTraderClient
 from src.execution.position_sizer import PositionSizer
@@ -82,6 +86,7 @@ class ExecutionEngine:
         self._matchtrader = matchtrader
         self._sizer = sizer
         self._config = config
+        self._capital_allocator = BoundedCapitalAllocator(config.execution)
         self._alert_service = alert_service
         self._registry = instrument_registry
         self._trade_journal = trade_journal
@@ -196,7 +201,12 @@ class ExecutionEngine:
 
         # Step 3: Build TradePlan
         try:
-            trade_plan = self._build_trade_plan(intent, side, account_snapshot.equity)
+            trade_plan, allocation = self._build_trade_plan(
+                intent,
+                side,
+                account_snapshot.equity,
+                account_snapshot.open_positions,
+            )
         except Exception as e:
             logger.error("ExecutionEngine: failed to build trade plan for {}: {}", intent_id, e)
             await asyncio.to_thread(
@@ -396,6 +406,8 @@ class ExecutionEngine:
                     compliance_passed=True,
                     order_raw_response=order.raw_response,
                     model_id=_ab_model_id,
+                    risk_pct=allocation.effective_risk_pct,
+                    capital_allocation_meta=allocation.to_dict(),
                 )
                 await asyncio.to_thread(
                     self._store.update_execution_meta, intent_id, execution_meta
@@ -438,7 +450,8 @@ class ExecutionEngine:
         intent: TradeIntent,
         side: Literal["BUY", "SELL"],
         account_equity: float,
-    ) -> TradePlan:
+        open_positions: int,
+    ) -> tuple[TradePlan, CapitalAllocationDecision]:
         """Build a TradePlan from intent fields and position sizing.
 
         Uses the intent's suggested_sl_pips/tp_pips if set by the LLM worker,
@@ -450,7 +463,7 @@ class ExecutionEngine:
             account_equity: Current account equity for position sizing.
 
         Returns:
-            TradePlan ready for compliance checking.
+            Tuple of compliance-ready TradePlan and capital allocation decision.
         """
         symbol = intent.symbol
 
@@ -460,27 +473,40 @@ class ExecutionEngine:
         tp_pips = intent.suggested_tp_pips if intent.suggested_tp_pips else defaults["tp_pips"]
 
         # Position sizing
-        volume = self._sizer.calculate_volume(symbol, account_equity, sl_pips)
+        allocation = self._capital_allocator.allocate_entry_risk(
+            open_positions=open_positions,
+            scanner_confidence=intent.scanner_confidence,
+        )
+        volume = self._sizer.calculate_volume(
+            symbol,
+            account_equity,
+            sl_pips,
+            risk_pct_override=allocation.effective_risk_pct,
+        )
         risk_amount = self._sizer.calculate_risk_amount(symbol, volume, sl_pips)
 
         logger.debug(
             "ExecutionEngine: trade plan for {} — {} {:.2f} lots, "
-            "SL={:.0f}p TP={:.0f}p risk=${:.2f}",
+            "SL={:.0f}p TP={:.0f}p risk=${:.2f} risk_pct={:.2%}",
             symbol,
             side,
             volume,
             sl_pips,
             tp_pips,
             risk_amount,
+            allocation.effective_risk_pct,
         )
 
-        return TradePlan(
-            symbol=symbol,
-            side=side,
-            volume=volume,
-            stop_loss=sl_pips,
-            take_profit=tp_pips,
-            risk_amount=risk_amount,
+        return (
+            TradePlan(
+                symbol=symbol,
+                side=side,
+                volume=volume,
+                stop_loss=sl_pips,
+                take_profit=tp_pips,
+                risk_amount=risk_amount,
+            ),
+            allocation,
         )
 
     async def _get_account_snapshot(self) -> AccountSnapshot:
@@ -573,6 +599,8 @@ class ExecutionEngine:
         compliance_passed: bool,
         order_raw_response: dict[str, Any],
         model_id: str = "",
+        risk_pct: float | None = None,
+        capital_allocation_meta: dict[str, Any] | None = None,
     ) -> str:
         """Build execution metadata JSON string for persistence."""
         data: dict[str, Any] = {
@@ -593,6 +621,10 @@ class ExecutionEngine:
         }
         if model_id:
             data["model_id"] = model_id
+        if risk_pct is not None:
+            data["risk_pct"] = risk_pct
+        if capital_allocation_meta:
+            data["capital_allocation"] = capital_allocation_meta
         return json.dumps(data, default=str)
 
     # ── SL/TP Price Helpers ───────────────────────────────────────────────

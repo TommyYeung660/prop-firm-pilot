@@ -11,13 +11,14 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ---
 
 ## [Unreleased]
-**Post-v1.5.0_beta_2 Mainline Validation Window**
+**Post-v1.5.0_preview Stable Acceptance Window**
 
-> **Status**: `v1.5.0_beta_2` 已於 2026-03-17 合入 `main`，作為 `v1.5.0 stable` 前的 operational repair baseline
-> **Reason**: core pilot 已完成 scanner manifest/schema gate、versioned scanner metadata persistence、DecisionStore contract extension，以及 beta_2 這輪 live hardening、startup `5m` bar recovery、market-data incident diagnostics 與 account config tuning；下一步是用真實 market-open run 驗證 `v1.5.0_beta_2` 是否可作為 `v1.5.0 stable` 候選基線
+> **Status**: `v1.5.0_preview` 已於 `2026-03-17` 成為當前主線 preview release，建立在 `v1.5.0_beta_2` operational repair baseline 之上
+> **Reason**: core pilot 已先完成 bounded capital utilization uplift preview implementation，並同步核對 `qlib_market_scanner` / `qlib_rd_agent` 的 upstream contract 已落地；下一步不是再做同一輪 feature 實作，而是把 preview uplift 與 exposure / memory / validation closure 一起驗收成 `v1.5.0 stable`
 
-### Planned: v1.5.0 (stable) — Broader Decision / Risk Upgrade
+### Planned: v1.5.0 (stable) — Stable Acceptance On Top Of Preview Uplift
 - 定義第一個「穩定版」基準：系統必須能穩定可靠地進出場，而不是只靠 hotfix 維持可用
+- 將 `v1.5.0_preview` 已落地的 bounded capital utilization uplift 納入 multi-day stable acceptance，而不是把 uplift 本身重新實作一次
 - tactical entry 與 tactical exit 需達到 production-grade reliability，包含 data provenance、execution integrity、close verification 與 postmortem replayability
 - 把 `v1.5.0_beta` 已吸收的 scanner contract、cadence decision 與 entry / exit control plane 升級為 stable release gate，而不是再做一次大重寫
 - 不重新開啟 `qlib_market_scanner` 的 FX release cadence 選型；`v1.5.0 stable` 直接沿用已凍結的 `1d` canonical cadence
@@ -26,12 +27,46 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - 將多元化倉位與資金效率正式納入風控與配置層，而不是只做單筆交易最小風險化
 
 ### Cross-Repo Note
-- `v1.5.0_beta` 已先把 `prop-firm-pilot`、`../qlib_market_scanner` 的版本與 artifact contract 對齊；`v1.5.0 stable` 再接手多日驗證與 stable gate closure
-- `2026-03-16` 已確認上游 `qlib_market_scanner v1.5.0_beta` 的 FX canonical cadence 維持 `1d`；這次 beta 升級的是 research governance、output contract 與 validation gate，不是 `prop-firm-pilot` 的 FX runtime cadence 翻轉
+- `v1.5.0_preview` 已建立在已核對的 upstream contract 之上：`qlib_market_scanner` 已具備 `1d` canonical cadence、`dsr_net_oos_daily_v1`、scorecard / decision artifacts 與 RD-Agent factor promotion gate；`qlib_rd_agent` 已具備 `discovered/candidate/manifest` artifact 與 `runs/<run_id>/...` archive contract
+- `v1.5.0 stable` 的工作重點是 integrated acceptance，不是再替 upstream scanner / rd-agent 重新補 contract plumbing
 
 ### Tracking
-- Roadmap: `docs/PropFirmPilot_v1.4.0_road_map.md`
+- Roadmap: `docs/PropFirmPilot_v1.5.0_road_map.md`
 - Cross-repo note: `docs/PropFirmPilot_v1.5.0_Cross_Repo_Change_Note.md`
+
+---
+
+## [1.5.0_preview] — 2026-03-17
+**Bounded Capital Utilization Preview**
+
+> **Status**: 已成為當前主線 preview release，作為 `v1.5.0 stable` 前的 bounded uplift implementation lane
+> **Reason**: `v1.5.0_beta_2` 已先完成 operational repair gate，但 execution sizing 仍固定鎖在單筆 `default_risk_pct`；preview 的任務是先用 bounded、audit-friendly 的方式改善 sparse portfolio 下的資金使用率，而不提前宣稱 stable acceptance 已完成
+
+### Added
+- `src/execution/capital_allocator.py`：新增 `BoundedCapitalAllocator` 與 `CapitalAllocationDecision`，用 `default_risk_pct * max_positions` 的名目預算、`open_positions` 與 `scanner_confidence` 計算單筆 `effective_risk_pct`
+- `PositionSizer.calculate_volume()` 現在支援 `risk_pct_override`，execution path 可以把 bounded uplift 後的風險百分比直接帶入 sizing
+- `ExecutionEngine` 現在會在 `_build_trade_plan()` 階段套用 bounded allocation，並把 `risk_pct` / `capital_allocation` 寫入 execution metadata，保留 audit trail
+- 新增 preview 專屬測試覆蓋：capital allocator、risk override、engine integration、execution meta risk audit fields、preview version identity
+
+### Changed
+- 專案版本 identity 現在切到 `display_version = 1.5.0_preview`，包裝版本切到 `1.5.0rc0`，讓 runtime / release tag / docs 都明確表達這是 preview lane
+- `docs/PropFirmPilot_v1.5.0_road_map.md` 現在改以 `beta_2 -> preview uplift -> stable acceptance` 作為 `1.5.0` 主線敘事
+
+### Cross-Repo
+- `qlib_market_scanner` 已具備 FX 7-pair universe、`dsr_net_oos_daily_v1` selection metric、`label_version` / `research_cadences` metadata、cadence scorecard / decision artifacts，以及 `candidate -> promoted -> report` RD-Agent factor gate
+- `qlib_rd_agent` 已具備 `discovered_factors.yaml`、`candidate_factors.yaml`、`factor_manifest.json` 與 `runs/<run_id>/...` archive upload contract；preview uplift 直接建立在這些已落地的 upstream 邊界上
+
+### Validated
+- `uv run pytest tests/test_capital_allocator.py -q` → `4 passed`
+- `uv run pytest tests/test_position_sizer.py -q` → `34 passed`
+- `uv run pytest tests/test_engine.py -q` → `58 passed`
+- `uv run pytest tests/test_execution_meta.py -q` → `10 passed`
+- `uv run pytest tests/test_version.py -q` → `4 passed`
+- `uv run ruff check src/execution/capital_allocator.py src/execution/position_sizer.py src/execution/engine.py tests/test_capital_allocator.py tests/test_position_sizer.py tests/test_engine.py tests/test_execution_meta.py tests/test_version.py` → `All checks passed!`
+
+### Files
+- New: `src/execution/capital_allocator.py`, `tests/test_capital_allocator.py`
+- Modified: `src/execution/engine.py`, `src/execution/position_sizer.py`, `tests/test_engine.py`, `tests/test_execution_meta.py`, `tests/test_position_sizer.py`, `tests/test_version.py`, `pyproject.toml`, `docs/PropFirmPilot_v1.5.0_road_map.md`
 
 ---
 

@@ -4,9 +4,9 @@
 >
 > **文件角色**: `v1.5.0` 到 `v1.5.9` 的唯一入口 roadmap
 >
-> **適用範圍**: `prop-firm-pilot` 主線規劃，並直接納入 `qlib_market_scanner` / `TradingAgents` 的必要依賴
+> **適用範圍**: `prop-firm-pilot` 主線規劃，並直接納入 `qlib_market_scanner` / `qlib_rd_agent` / `TradingAgents` 的必要依賴
 >
-> **當前主線狀態**: `v1.5.0_beta_2` 已於 `2026-03-17` 合入 `main`，作為 `v1.5.0_stable` 前的 operational repair baseline
+> **當前主線狀態**: `v1.5.0_preview` 已於 `2026-03-17` 在 `v1.5.0_beta_2` baseline 上落地 bounded capital utilization uplift preview；`v1.5.0_stable` 仍待 exposure / memory / validation acceptance closure
 >
 > **閱讀原則**: 若你只想知道 `1.5.0` 到 `1.5.9` 應做什麼，先看這份；不需要先回頭讀複數文檔
 
@@ -42,9 +42,20 @@
 | **Close control plane** | canonical close schema、`CloseControlPlane`、`CloseReconciler` 已落地 | `v1.4.8` |
 | **Scanner contract gate** | `manifest/schema/version/validation` 檢查、required signal columns 驗證已落地 | `v1.5.0_beta` |
 | **Scanner metadata persistence** | `scanner_version`、`scanner_schema_version`、`scanner_market_date`、`scanner_label_version` 已能落盤 | `v1.5.0_beta` |
-| **Version identity** | `prop-firm-pilot` 與 `qlib_market_scanner` 都已對齊到 `1.5.0_beta` / `v1.5.0_beta` | `v1.5.0_beta` |
+| **Version identity baseline** | `qlib_market_scanner` 的 scanner contract baseline 已凍結在 `1.5.0_beta` / `v1.5.0_beta`；`prop-firm-pilot` 主線則已 bump 到 `1.5.0_preview` / `v1.5.0_preview`，明確標記 bounded uplift preview lane | `v1.5.0_beta` → `v1.5.0_preview` |
 | **FX scanner release cadence decision** | upstream 已完成第一輪 FX cadence research，canonical cadence 凍結為 `1d` | `qlib_market_scanner v1.5.0_beta` |
 | **Runtime bundle family isolation** | runtime `outputs/*` 與 legacy `data/shared_export/*` 已分流，不再混讀 sidecars | `v1.5.0_beta` |
+
+此外，以下 cross-repo implementation 已核對為落地，不應再在本 repo roadmap 中被當成未實作假設：
+
+| Repo | 已核對落地的實作 | 目前意義 |
+|---|---|---|
+| `qlib_market_scanner` | `FX_TICKERS` 已是 7 pairs，`get_profile_selection_metric("fx") == "dsr_net_oos_daily_v1"` | FX scanner baseline 與 selection metric 已定型，不需重開 universe / metric 討論 |
+| `qlib_market_scanner` | `PipelineConfig.label_version` 與 `research_cadences` 已落地 | downstream 可依賴穩定的 label / cadence metadata |
+| `qlib_market_scanner` | `experiment_fx_alpha_matrix.py` 已有 cadence matrix runner 與 scorecard / decision artifacts 輸出 | preview / stable 不需再重做 upstream cadence research plumbing |
+| `qlib_market_scanner` | `rdagent_factors.py` 已有 `candidate -> promoted -> report` factor gate | RD-Agent factor ingestion 已有明確 promotion boundary |
+| `qlib_rd_agent` | `qlib_runner.py` 已會寫出 `discovered_factors.yaml`、`candidate_factors.yaml`、`factor_manifest.json` | factor artifact contract 已存在，不需在 pilot 端假設 upstream 尚未產生 |
+| `qlib_rd_agent` | `dropbox_sync.py` 已支援 factors 三件套上傳與 `runs/<run_id>/...` run archive upload | research provenance / archive contract 已可被 roadmap 視為 upstream baseline |
 
 ### 2.2 `v1.5.0_beta_2` 已作為 stable 前修復閘合入主線
 
@@ -72,7 +83,7 @@
 | **Operational repair closure** | `v1.5.0_beta_2` 所定義的 P0 / P1 repairs 必須先收斂，stable 不接受帶病升版 |
 | **Tactical entry integrity** | deterministic reason code、source provenance、score breakdown、state transition closure |
 | **Tactical exit audit closure** | trigger source、broker read-back、journal consistency、postmortem replayability |
-| **Bounded capital utilization uplift** | 把「資金使用率偏低」作為 stable 的 bounded optimization 處理，在不削弱 safety guard 前提下改善過度保守 gating |
+| **Bounded capital utilization uplift** | preview implementation 已在本 repo 落地；`v1.5.0 stable` 尚需 multi-day validation、integrated acceptance，並與 exposure / memory / validation closure 一起驗收 |
 | **Portfolio / exposure guard v1** | base/quote currency exposure budget、同向集中暴露上限、低相關 setup budget |
 | **Trade-memory v1** | raw event / reflection / retrieval 三層分工、schema freeze、quality gate |
 | **Validation closure** | multi-day market-open validation、live-vs-research consistency review、P0/P1 tactical incident 收斂 |
@@ -134,7 +145,8 @@
 | 版本 | 角色 | 主軸 |
 |---|---|---|
 | `1.5.0_beta_2` | beta hardening repair gate | 已收斂 freshness、stale signals、tactical timeout、monitor / alert hardening，並補齊 market-data diagnostics 與 account config tuning |
-| `1.5.0` | 第一個 stable gate | entry / exit / memory / exposure / validation 的最低 stable closure，外加 bounded capital utilization uplift |
+| `1.5.0_preview` | bounded uplift preview lane | 在 `1.5.0_beta_2` baseline 上落地 bounded capital utilization uplift implementation，先改善 sparse portfolio 的資金使用率，仍不宣稱 stable gate 已完成 |
+| `1.5.0` | 第一個 stable acceptance gate | 把 preview uplift 納入 entry / exit / memory / exposure / validation 的整體驗收，形成第一個可保守稱為 stable 的 release |
 | `1.5.1` | post-stable correctness sweep | 修正 first stable run 暴露的 correctness 與 taxonomy drift |
 | `1.5.2` | validation accumulation | 強化 live-vs-research consistency 與 multi-day acceptance evidence |
 | `1.5.3` | operator + risk hardening | 收斂 operator diagnostics、scheduler consistency、exposure guard v1 hardening |
@@ -187,6 +199,29 @@
 - `bars_5m_unavailable` 類 incident 可直接看出 market-data hub uptime 與 websocket closed bar accumulation 狀態
 - `config/e8_one_5k_challenge.yaml` 已可按高頻調參 / 低頻基礎兩種操作場景直接維護，且淡時段 scanner cadence 降為 `3600s`
 
+### 5.5 `v1.5.0_preview` — Bounded Capital Utilization Preview
+
+`v1.5.0_preview` 建立在 `v1.5.0_beta_2` 的 operational repair baseline 上，任務是把 bounded capital utilization uplift 先做成可驗證的 preview implementation，而不是直接把整個 stable gate 宣稱完成。
+
+這一版在本 repo 已落地：
+
+- `BoundedCapitalAllocator` 依 `default_risk_pct * max_positions` 的名目預算、當前 `open_positions` 與 `scanner_confidence`，計算 `effective_risk_pct`
+- `PositionSizer` 支援 risk override，execution path 會把 uplift 後的 `risk_pct` 傳進 sizing
+- `ExecutionEngine` 會把 `risk_pct` 與 capital allocation metadata 寫入 execution meta，保留 audit trail
+- 專案 version identity 已切到 `1.5.0_preview` / `v1.5.0_preview`，包裝版本為 `1.5.0rc0`
+
+這一版同時建立在已核對的 upstream 事實上：
+
+- `qlib_market_scanner` 已穩定提供 FX `1d` canonical cadence、`dsr_net_oos_daily_v1` selection metric、`label_version` / `research_cadences` metadata，以及 cadence scorecard / decision artifacts
+- `qlib_market_scanner` 已完成 RD-Agent `candidate -> promoted -> report` factor gate
+- `qlib_rd_agent` 已完成 `discovered_factors.yaml`、`candidate_factors.yaml`、`factor_manifest.json` 與 `runs/<run_id>/...` archive upload contract
+
+這一版仍不能被稱為 `v1.5.0 stable`，因為 stable 尚缺：
+
+- exposure guard v1 integrated acceptance
+- trade-memory v1 與 quality gate
+- multi-day market-open validation 與 integrated stable acceptance gate
+
 ---
 
 ## 6. `v1.5.0` — Stable Gate Closure
@@ -195,13 +230,13 @@
 
 `v1.5.0` 是第一個 stable milestone，不是新 feature 大包。
 
-它的任務是把 `v1.5.0_beta` 已經吸收進主線的 scanner contract、version identity 與 `1d` cadence baseline，經過 `v1.5.0_beta_2` repair gate 後，升級成可以被保守驗收的 stable trading system gate。
+它的任務是把 `v1.5.0_beta` 已經吸收進主線的 scanner contract、version identity 與 `1d` cadence baseline，加上 `v1.5.0_preview` 已落地的 bounded capital utilization uplift，經過 `v1.5.0_beta_2` repair gate 後，升級成可以被保守驗收的 stable trading system gate。
 
 ### 6.2 本 repo 主責
 
 - 完成 tactical entry production-grade closure
 - 完成 tactical exit audit / read-back / postmortem closure
-- 上線 bounded capital utilization uplift，改善過度保守 gating 造成的低資金使用率
+- 將 preview 已落地的 bounded capital utilization uplift 納入 stable acceptance，證明其在 live path 可用且未削弱 safety guard
 - 上線 exposure guard v1
 - 上線 trade-memory v1 與 quality gate v1
 - 完成 multi-day stable acceptance gate
@@ -210,7 +245,8 @@
 
 | Repo | `v1.5.0` 需要它完成什麼 |
 |---|---|
-| `qlib_market_scanner` | 維持 `1d` canonical cadence、runtime bundle contract 穩定、metadata 不漂移，並支援 bounded capital utilization uplift 所需的穩定 score metadata |
+| `qlib_market_scanner` | `1d` canonical cadence、`dsr_net_oos_daily_v1`、`label_version` / `research_cadences`、scorecard / decision artifacts、RD-Agent promoted factor gate 都已落地；stable 只要求這些 contract 繼續穩定且 live-compatible |
+| `qlib_rd_agent` | `candidate/discovered/manifest` artifact 與 `runs/<run_id>/...` archive contract 已落地；stable 只要求 artifact freshness、lineage 與 scanner ingestion consistency 不漂移 |
 | `TradingAgents` | 暫不要求大改，但其 risk output / lesson consumption 至少不能破壞 stable contract |
 
 ### 6.4 這版明確不做什麼
@@ -226,7 +262,7 @@
 - `v1.5.0_beta_2` 所定義的 P0 / P1 repair 已先收斂
 - entry verdict 有完整 deterministic reason taxonomy
 - exit action 有完整 broker read-back 與 canonical close facts
-- bounded capital utilization uplift 已落地，且未削弱 safety-critical guard
+- bounded capital utilization uplift 已完成 stable acceptance，且未削弱 safety-critical guard
 - exposure guard v1 在 live path 可用
 - trade-memory schema 與 quality gate 已落地
 - 多日 market-open validation 無重複 P0/P1 tactical correctness incident
@@ -430,14 +466,15 @@
 
 ## 10. Cross-Repo 責任邊界
 
-| 主題 | `prop-firm-pilot` 主責 | `qlib_market_scanner` 依賴 | `TradingAgents` 依賴 |
-|---|---|---|---|
-| **Beta_2 repair gate** | freshness / stale signal / tactical timeout / monitor hardening | runtime bundle contract 與 signal-date metadata 需可被可靠驗證 | 不可讓 decision state transition 破壞 deterministic failure handling |
-| **Stable gate** | entry / exit / exposure / memory / validation closure，加上 bounded capital utilization uplift | 穩定輸出 `1d` scanner contract 與 score metadata | 不破壞既有 stable contract |
-| **Memory** | schema、quality gate、pipeline | 提供穩定 scanner metadata | lesson consumption / retrieval policy 配合 |
-| **Capital efficiency** | exposure budget、allocation discipline | 提供可分群的穩定 metadata | risk output 要能承載 portfolio context |
-| **Follow-up research productization** | bounded ingestion / metadata support | bounded metadata extension，不改 default cadence | bounded context alignment |
-| **Next-major planning** | 以 acceptance evidence 統整方向 | 提供 research evidence | 提供 agent effectiveness evidence |
+| 主題 | `prop-firm-pilot` 主責 | `qlib_market_scanner` 依賴 | `qlib_rd_agent` 依賴 | `TradingAgents` 依賴 |
+|---|---|---|---|---|
+| **Beta_2 repair gate** | freshness / stale signal / tactical timeout / monitor hardening | runtime bundle contract 與 signal-date metadata 需可被可靠驗證 | 無新增 mandatory change | 不可讓 decision state transition 破壞 deterministic failure handling |
+| **Preview uplift** | bounded allocator / sizing override / execution audit metadata | 穩定輸出 scanner confidence / score metadata，讓 uplift 可被 bounded 使用 | candidate / discovered / manifest / archive contract 已存在即可，無新增 preview blocker | 不破壞既有 stable fields 與 decision schema |
+| **Stable gate** | entry / exit / exposure / memory / validation closure，並完成 preview uplift acceptance | 穩定輸出 `1d` scanner contract、score metadata、promotion boundary | 維持 factor artifact / archive lineage 一致，避免 upstream provenance 漂移 | 不破壞既有 stable contract |
+| **Memory** | schema、quality gate、pipeline | 提供穩定 scanner metadata | 提供可追溯的 factor artifact / archive lineage | lesson consumption / retrieval policy 配合 |
+| **Capital efficiency** | exposure budget、allocation discipline | 提供可分群的穩定 metadata | 無新增 mandatory change，但 artifact lineage 要穩定可追溯 | risk output 要能承載 portfolio context |
+| **Follow-up research productization** | bounded ingestion / metadata support | bounded metadata extension，不改 default cadence | 維持 candidate / archive contract backward-compatible | bounded context alignment |
+| **Next-major planning** | 以 acceptance evidence 統整方向 | 提供 research evidence | 提供 research provenance evidence | 提供 agent effectiveness evidence |
 
 ---
 
@@ -451,12 +488,14 @@
 - close control plane 已建立
 - market data freshness semantics 已收斂
 - `v1.5.0_beta_2` 的 repair scope 已被明確定義
+- bounded capital utilization uplift preview 已在本 repo 落地
+- `qlib_market_scanner` / `qlib_rd_agent` 的 upstream implementation 已核對為實作存在
 
 ### 11.2 還不能說「已完成」的
 
 - tactical entry 已達 production-grade reliability
 - tactical exit 已達 fully auditable stable closure
-- bounded capital utilization uplift 已穩定落地
+- bounded capital utilization uplift 已完成 stable acceptance 與 multi-day validation
 - trade-memory contract 已穩定
 - portfolio / exposure control 已達 stable v1
 - integrated validation gate 已成熟
@@ -466,7 +505,7 @@
 `1.5.x` 的角色不是大改世界觀，而是：
 
 - 讓 `v1.5.0 stable` 真正站穩
-- 先經過 `v1.5.0_beta_2` repair，再把 bounded capital utilization、memory 與 bounded research productization 補齊
+- 先經過 `v1.5.0_beta_2` repair，再把 `v1.5.0_preview` 的 bounded uplift 納入 stable acceptance，之後補 memory 與 bounded research productization
 - 累積足夠證據，決定 `1.6.0` 要往哪裡走
 
 ---
@@ -475,4 +514,4 @@
 
 如果只用一句話描述這份 roadmap：
 
-> `v1.5.0_beta_2` 先做 operational repair；`v1.5.0` 完成第一個 stable gate 並補 bounded capital utilization uplift；`1.5.1-1.5.3` 收斂 correctness 與 validation；`1.5.4-1.5.6` 建立 memory 與完整 capital efficiency；`1.5.7-1.5.9` 只做 bounded follow-up 與 `1.6.0` preflight，不重開大賭注。`
+> `v1.5.0_beta_2` 先做 operational repair；`v1.5.0_preview` 先落地 bounded capital utilization uplift；`v1.5.0` 再完成第一個 stable acceptance gate；之後的 `1.5.1-1.5.9` 才沿著 correctness、validation、memory、capital efficiency 與 bounded follow-up 繼續推進。`

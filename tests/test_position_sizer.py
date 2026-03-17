@@ -165,6 +165,28 @@ class TestCalculateVolume:
             volume = sizer.calculate_volume("EURUSD", 10000.0, 20.0)
             assert volume == 0.50
 
+    def test_risk_pct_override_increases_volume(self, sizer: PositionSizer) -> None:
+        """Explicit risk overrides should use the override instead of default_risk_pct."""
+        with patch("src.execution.position_sizer.random.uniform", return_value=0.0):
+            volume = sizer.calculate_volume(
+                "EURUSD",
+                10000.0,
+                20.0,
+                risk_pct_override=0.02,
+            )
+            assert volume == 1.00
+
+    def test_none_risk_override_preserves_existing_behavior(self, sizer: PositionSizer) -> None:
+        """Passing no risk override should preserve the pre-existing default sizing formula."""
+        with patch("src.execution.position_sizer.random.uniform", return_value=0.0):
+            volume = sizer.calculate_volume(
+                "EURUSD",
+                10000.0,
+                20.0,
+                risk_pct_override=None,
+            )
+            assert volume == 0.50
+
 
 # ── calculate_risk_amount ──────────────────────────────────────────────────────
 

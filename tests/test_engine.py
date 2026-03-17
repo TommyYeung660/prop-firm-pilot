@@ -118,13 +118,14 @@ def _make_ready_intent(
     side: str = "BUY",
     sl_pips: float = 40.0,
     tp_pips: float = 80.0,
+    scanner_confidence: str = "high",
 ) -> TradeIntent:
     """Create and advance an intent to ready_for_exec state."""
     intent = TradeIntent(
         trade_date="2026-02-16",
         symbol=symbol,
         scanner_score=0.85,
-        scanner_confidence="high",
+        scanner_confidence=scanner_confidence,
     )
     store.insert_intent(intent)
 
@@ -470,7 +471,12 @@ class TestPositionSizing:
         await engine.execute_ready_intents()
 
         # Verify sizer received the intent's SL pips
-        mock_sizer.calculate_volume.assert_called_once_with("EURUSD", 50000.0, 60.0)
+        mock_sizer.calculate_volume.assert_called_once_with(
+            "EURUSD",
+            50000.0,
+            60.0,
+            risk_pct_override=0.02,
+        )
         mock_sizer.calculate_risk_amount.assert_called_once_with("EURUSD", 0.10, 60.0)
 
     async def test_falls_back_to_default_sl_tp(
@@ -484,8 +490,53 @@ class TestPositionSizing:
         await engine.execute_ready_intents()
 
         # DEFAULT_SL_TP for EURUSD is sl_pips=40, tp_pips=80
-        mock_sizer.calculate_volume.assert_called_once_with("EURUSD", 50000.0, 40)
+        mock_sizer.calculate_volume.assert_called_once_with(
+            "EURUSD",
+            50000.0,
+            40,
+            risk_pct_override=0.02,
+        )
         mock_sizer.calculate_risk_amount.assert_called_once_with("EURUSD", 0.10, 40)
+
+    async def test_high_confidence_sparse_portfolio_uses_uplifted_risk_pct(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_sizer: MagicMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Sparse portfolios should pass an uplifted risk override to the sizer."""
+        mock_matchtrader.get_open_positions.return_value = []
+
+        _make_ready_intent(store, scanner_confidence="high")
+        await engine.execute_ready_intents()
+
+        mock_sizer.calculate_volume.assert_called_once_with(
+            "EURUSD",
+            50000.0,
+            40.0,
+            risk_pct_override=0.02,
+        )
+
+    async def test_low_confidence_keeps_default_risk_pct(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_sizer: MagicMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Low-confidence signals should keep the default risk sizing path."""
+        mock_matchtrader.get_open_positions.return_value = []
+
+        _make_ready_intent(store, scanner_confidence="low")
+        await engine.execute_ready_intents()
+
+        mock_sizer.calculate_volume.assert_called_once_with(
+            "EURUSD",
+            50000.0,
+            40.0,
+            risk_pct_override=0.01,
+        )
 
 
 # ── Account Snapshot Tests ──────────────────────────────────────────────────
