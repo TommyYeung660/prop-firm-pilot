@@ -186,8 +186,16 @@ class LLMThresholdOverrideConfig(BaseModel):
         default=False,
         description="Force fixed LLM thresholds at runtime",
     )
-    min_confidence: Literal["low", "medium", "high"] = Field(default="medium")
-    min_blended_confidence: float = Field(default=0.55)
+    min_confidence: Literal["low", "medium", "high"] = Field(
+        default="medium",
+        description="Minimum categorical confidence gate when override is enabled",
+    )
+    min_blended_confidence: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+        description="Minimum blended confidence gate in range [0.0, 1.0]",
+    )
 
 
 class SchedulerConfig(BaseModel):

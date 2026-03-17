@@ -1,5 +1,8 @@
 """Tests for configuration defaults and validation."""
 
+import pytest
+from pydantic import ValidationError
+
 from src.config import AppConfig, ScannerConfig, SchedulerConfig
 
 
@@ -90,6 +93,21 @@ def test_e8_one_5k_threshold_override_from_config():
     assert override.enabled is True
     assert override.min_confidence == "medium"
     assert override.min_blended_confidence == 0.55
+
+
+@pytest.mark.parametrize("invalid_value", [-0.01, 1.01])
+def test_scheduler_threshold_override_rejects_out_of_range_blended_confidence(
+    invalid_value: float,
+) -> None:
+    """Task 1 follow-up: min_blended_confidence must stay within 0.0..1.0."""
+    with pytest.raises(ValidationError):
+        SchedulerConfig(
+            llm_threshold_override={
+                "enabled": True,
+                "min_confidence": "medium",
+                "min_blended_confidence": invalid_value,
+            }
+        )
 
 
 class TestTacticalConfig:
