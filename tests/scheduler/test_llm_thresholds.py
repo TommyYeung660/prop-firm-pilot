@@ -94,6 +94,42 @@ class TestThresholdHelpers:
         assert Scheduler._passes_threshold("low", 0.9, thresholds) is False
         assert Scheduler._passes_threshold("high", 0.7, thresholds) is True
 
+    def test_get_effective_thresholds_prefers_override_over_optimization_state(
+        self,
+        scheduler: Scheduler,
+    ) -> None:
+        scheduler._optimization_state = OptimizationState(
+            global_thresholds=Thresholds(min_confidence="high", min_blended_confidence=0.9),
+            symbol_thresholds={
+                "EURUSD": Thresholds(min_confidence="high", min_blended_confidence=0.95)
+            },
+        )
+        scheduler._config.scheduler.llm_threshold_override.enabled = True
+        scheduler._config.scheduler.llm_threshold_override.min_confidence = "low"
+        scheduler._config.scheduler.llm_threshold_override.min_blended_confidence = 0.2
+
+        thresholds, source = scheduler._get_effective_thresholds("EURUSD")
+
+        assert source == "override"
+        assert thresholds == Thresholds(min_confidence="low", min_blended_confidence=0.2)
+
+    def test_get_effective_thresholds_returns_dynamic_when_override_disabled(
+        self,
+        scheduler: Scheduler,
+    ) -> None:
+        scheduler._optimization_state = OptimizationState(
+            global_thresholds=Thresholds(min_confidence="medium", min_blended_confidence=0.6),
+            symbol_thresholds={
+                "EURUSD": Thresholds(min_confidence="high", min_blended_confidence=0.88)
+            },
+        )
+        scheduler._config.scheduler.llm_threshold_override.enabled = False
+
+        thresholds, source = scheduler._get_effective_thresholds("EURUSD")
+
+        assert source == "dynamic"
+        assert thresholds == Thresholds(min_confidence="high", min_blended_confidence=0.88)
+
 
 class TestPrePostFiltering:
     """Integration tests for pre/post threshold filtering."""

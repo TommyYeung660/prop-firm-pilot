@@ -849,7 +849,12 @@ class Scheduler:
         if self._latest_market_event_context:
             qlib_data["market_event_context"] = self._latest_market_event_context
 
-        thresholds = self._get_thresholds_for_symbol(intent.symbol)
+        thresholds, threshold_source = self._get_effective_thresholds(intent.symbol)
+        threshold_context = {
+            "threshold_source": threshold_source,
+            "threshold_min_confidence": thresholds.min_confidence,
+            "threshold_min_blended_confidence": thresholds.min_blended_confidence,
+        }
         pre_blended = self._blend_confidence(intent.scanner_confidence, intent.scanner_score)
         if not self._passes_threshold(intent.scanner_confidence, pre_blended, thresholds):
             cancelled = await self._cancel_intent_safe(
@@ -865,6 +870,7 @@ class Scheduler:
                         "intent_id": intent.id,
                         "symbol": intent.symbol,
                         "reason": "LLM pre-filter: low confidence",
+                        **threshold_context,
                     },
                 )
                 logger.info(
@@ -889,6 +895,7 @@ class Scheduler:
                     "symbol": intent.symbol,
                     "cache_key": cache_key,
                     "decision": decision.decision,
+                    **threshold_context,
                 },
             )
         else:
@@ -911,6 +918,7 @@ class Scheduler:
                 "symbol": intent.symbol,
                 "decision": decision.decision,
                 "risk_report": decision.risk_report,
+                **threshold_context,
             },
         )
         if self._memory_journal is not None:
@@ -922,6 +930,7 @@ class Scheduler:
                     "score_gap": intent.scanner_score_gap,
                     "drop_distance": intent.scanner_drop_distance,
                     "topk_spread": intent.scanner_topk_spread,
+                    **threshold_context,
                 }
                 if decision.risk_report:
                     context["risk_report"] = decision.risk_report
@@ -1039,6 +1048,7 @@ class Scheduler:
                             "intent_id": intent.id,
                             "symbol": intent.symbol,
                             "reason": "LLM post-filter: low confidence",
+                            **threshold_context,
                         },
                     )
                     logger.info(
@@ -3942,6 +3952,19 @@ class Scheduler:
         if symbol in self._optimization_state.symbol_thresholds:
             return self._optimization_state.symbol_thresholds[symbol]
         return self._optimization_state.global_thresholds
+
+    def _get_effective_thresholds(self, symbol: str) -> tuple[Thresholds, str]:
+        """Return runtime thresholds and whether they came from override or dynamic state."""
+        override = self._config.scheduler.llm_threshold_override
+        if override.enabled:
+            return (
+                Thresholds(
+                    min_confidence=override.min_confidence,
+                    min_blended_confidence=override.min_blended_confidence,
+                ),
+                "override",
+            )
+        return self._get_thresholds_for_symbol(symbol), "dynamic"
 
     def _get_pip_size(self, symbol: str) -> float:
         """Look up pip size from instrument config, with safe default."""

@@ -28,7 +28,7 @@ from src.config import (
 from src.decision.agent_bridge import AgentDecision
 from src.decision.schemas import TradeIntent
 from src.decision_store.sqlite_store import DecisionStore, InvalidTransitionError
-from src.optimize.optimization_state import OptimizationState
+from src.optimize.optimization_state import OptimizationState, Thresholds
 from src.scheduler.scheduler import Scheduler
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -1214,6 +1214,154 @@ class TestProcessClaimedIntent:
         assert latest is not None
         assert latest.status == "timed_out"
         assert latest.suggested_side is None
+
+    async def test_pre_filter_logs_threshold_source_and_values(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        """Pre-filter cancellation event should include threshold source and values."""
+        from src.monitor.trade_journal import TradeJournal
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            trade_journal=journal,
+        )
+        sched._optimization_state = OptimizationState(
+            global_thresholds=Thresholds(min_confidence="low", min_blended_confidence=0.1),
+            symbol_thresholds={
+                "EURUSD": Thresholds(min_confidence="low", min_blended_confidence=0.1)
+            },
+        )
+        sched._config.scheduler.llm_threshold_override.enabled = True
+        sched._config.scheduler.llm_threshold_override.min_confidence = "high"
+        sched._config.scheduler.llm_threshold_override.min_blended_confidence = 0.9
+
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.35,
+            scanner_confidence="low",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        await sched._process_claimed_intent("llm-0", claimed)
+
+        lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+        events = [json.loads(line) for line in lines]
+        cancel_event = next(
+            event
+            for event in events
+            if event["type"] == "INTENT_CANCELLED"
+            and event["reason"] == "LLM pre-filter: low confidence"
+        )
+        assert cancel_event["threshold_source"] == "override"
+        assert cancel_event["threshold_min_confidence"] == "high"
+        assert cancel_event["threshold_min_blended_confidence"] == 0.9
+
+    async def test_post_filter_logs_threshold_source_and_values(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        """Post-filter decision/cancel events should include threshold source and values."""
+        from src.monitor.trade_journal import TradeJournal
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            trade_journal=journal,
+        )
+        sched._optimization_state = OptimizationState(
+            global_thresholds=Thresholds(min_confidence="low", min_blended_confidence=0.8)
+        )
+        sched._config.scheduler.llm_threshold_override.enabled = False
+
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.95,
+            scanner_confidence="high",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        with patch("src.scheduler.scheduler.format_decision") as mock_format:
+            mock_format.return_value = MagicMock(confidence_score=0.4)
+            await sched._process_claimed_intent("llm-0", claimed)
+
+        lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+        events = [json.loads(line) for line in lines]
+        decision_event = next(event for event in events if event["type"] == "LLM_DECISION")
+        cancel_event = next(
+            event
+            for event in events
+            if event["type"] == "INTENT_CANCELLED"
+            and event["reason"] == "LLM post-filter: low confidence"
+        )
+
+        assert decision_event["threshold_source"] == "dynamic"
+        assert decision_event["threshold_min_confidence"] == "low"
+        assert decision_event["threshold_min_blended_confidence"] == 0.8
+        assert cancel_event["threshold_source"] == "dynamic"
+        assert cancel_event["threshold_min_confidence"] == "low"
+        assert cancel_event["threshold_min_blended_confidence"] == 0.8
+
+    async def test_memory_journal_context_includes_threshold_fields(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+    ) -> None:
+        """Memory journal decision context should include threshold metadata."""
+        scheduler._memory_journal = MagicMock()
+        scheduler._optimization_state = OptimizationState(
+            global_thresholds=Thresholds(min_confidence="high", min_blended_confidence=0.95)
+        )
+        scheduler._config.scheduler.llm_threshold_override.enabled = True
+        scheduler._config.scheduler.llm_threshold_override.min_confidence = "medium"
+        scheduler._config.scheduler.llm_threshold_override.min_blended_confidence = 0.62
+
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.85,
+            scanner_confidence="high",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        await scheduler._process_claimed_intent("llm-0", claimed)
+
+        scheduler._memory_journal.log_decision.assert_called_once()
+        context = scheduler._memory_journal.log_decision.call_args.kwargs["context"]
+        assert context["threshold_source"] == "override"
+        assert context["threshold_min_confidence"] == "medium"
+        assert context["threshold_min_blended_confidence"] == 0.62
 
 
 # ── Execution Loop Tests ────────────────────────────────────────────────────
