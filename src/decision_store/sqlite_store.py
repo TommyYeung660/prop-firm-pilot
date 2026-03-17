@@ -127,7 +127,8 @@ INSERT INTO intents (
     id, created_at, trade_date, symbol,
     scanner_score, scanner_confidence, scanner_score_gap,
     scanner_drop_distance, scanner_topk_spread,
-    scanner_version, scanner_schema_version, scanner_market_date, scanner_label_version, scanner_side,
+    scanner_version, scanner_schema_version, scanner_market_date,
+    scanner_label_version, scanner_side,
     suggested_side, suggested_sl_pips, suggested_tp_pips,
     agent_risk_report, agent_state_json,
     source, status, claim_worker_id, claim_ts,
@@ -138,7 +139,8 @@ INSERT INTO intents (
     :id, :created_at, :trade_date, :symbol,
     :scanner_score, :scanner_confidence, :scanner_score_gap,
     :scanner_drop_distance, :scanner_topk_spread,
-    :scanner_version, :scanner_schema_version, :scanner_market_date, :scanner_label_version, :scanner_side,
+    :scanner_version, :scanner_schema_version, :scanner_market_date,
+    :scanner_label_version, :scanner_side,
     :suggested_side, :suggested_sl_pips, :suggested_tp_pips,
     :agent_risk_report, :agent_state_json,
     :source, :status, :claim_worker_id, :claim_ts,
@@ -493,8 +495,7 @@ class DecisionStore:
                 if not updated:
                     self._conn.rollback()
                     raise InvalidTransitionError(
-                        f"Cannot update expiry for {intent_id}: "
-                        f"not in {allowed_statuses!r} state"
+                        f"Cannot update expiry for {intent_id}: not in {allowed_statuses!r} state"
                     )
                 self._conn.commit()
             except Exception:
