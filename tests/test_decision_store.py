@@ -83,6 +83,20 @@ class TestInsertIntent:
         with pytest.raises(DecisionStoreError, match="Duplicate"):
             store.insert_intent(intent2)
 
+    def test_store_round_trips_scanner_side(self, store: DecisionStore) -> None:
+        """scanner_side should persist through insert and reload."""
+        intent = TradeIntent(
+            trade_date="2026-02-16",
+            symbol="USDCHF",
+            scanner_side="short",
+        )
+
+        store.insert_intent(intent)
+        retrieved = store.get_intent(intent.id)
+
+        assert retrieved is not None
+        assert retrieved.scanner_side == "short"
+
 
 # ── Claim Tests ─────────────────────────────────────────────────────────────
 
@@ -457,6 +471,30 @@ class TestIdempotency:
         store.mark_cancelled(intent.id, "Stale signal")
 
         assert store.intent_exists("EURUSD", "2026-02-16", "scanner") is False
+
+    def test_intent_exists_can_scope_by_scanner_side(self, store: DecisionStore) -> None:
+        """scanner_side should allow long/short intents for the same symbol to coexist."""
+        store.insert_intent(
+            TradeIntent(
+                trade_date="2026-02-16",
+                symbol="USDCHF",
+                source="scanner",
+                scanner_side="short",
+            )
+        )
+
+        assert store.intent_exists(
+            "USDCHF",
+            "2026-02-16",
+            "scanner",
+            scanner_side="short",
+        ) is True
+        assert store.intent_exists(
+            "USDCHF",
+            "2026-02-16",
+            "scanner",
+            scanner_side="long",
+        ) is False
 
 
 # ── Claim Management Tests ──────────────────────────────────────────────────

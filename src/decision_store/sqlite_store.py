@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS intents (
     scanner_schema_version TEXT DEFAULT '',
     scanner_market_date TEXT DEFAULT '',
     scanner_label_version TEXT DEFAULT '',
+    scanner_side        TEXT,
 
     -- LLM decision
     suggested_side      TEXT,
@@ -126,7 +127,7 @@ INSERT INTO intents (
     id, created_at, trade_date, symbol,
     scanner_score, scanner_confidence, scanner_score_gap,
     scanner_drop_distance, scanner_topk_spread,
-    scanner_version, scanner_schema_version, scanner_market_date, scanner_label_version,
+    scanner_version, scanner_schema_version, scanner_market_date, scanner_label_version, scanner_side,
     suggested_side, suggested_sl_pips, suggested_tp_pips,
     agent_risk_report, agent_state_json,
     source, status, claim_worker_id, claim_ts,
@@ -137,7 +138,7 @@ INSERT INTO intents (
     :id, :created_at, :trade_date, :symbol,
     :scanner_score, :scanner_confidence, :scanner_score_gap,
     :scanner_drop_distance, :scanner_topk_spread,
-    :scanner_version, :scanner_schema_version, :scanner_market_date, :scanner_label_version,
+    :scanner_version, :scanner_schema_version, :scanner_market_date, :scanner_label_version, :scanner_side,
     :suggested_side, :suggested_sl_pips, :suggested_tp_pips,
     :agent_risk_report, :agent_state_json,
     :source, :status, :claim_worker_id, :claim_ts,
@@ -256,6 +257,7 @@ class DecisionStore:
             ("intents", "scanner_schema_version", "TEXT DEFAULT ''"),
             ("intents", "scanner_market_date", "TEXT DEFAULT ''"),
             ("intents", "scanner_label_version", "TEXT DEFAULT ''"),
+            ("intents", "scanner_side", "TEXT"),
             ("decisions", "realized_pnl", "REAL"),
             ("decisions", "exit_reason", "TEXT"),
             ("api_calls", "read_count", "INTEGER DEFAULT 0"),
@@ -298,6 +300,7 @@ class DecisionStore:
             "scanner_schema_version": intent.scanner_schema_version,
             "scanner_market_date": intent.scanner_market_date,
             "scanner_label_version": intent.scanner_label_version,
+            "scanner_side": intent.scanner_side,
             "suggested_side": intent.suggested_side,
             "suggested_sl_pips": intent.suggested_sl_pips,
             "suggested_tp_pips": intent.suggested_tp_pips,
@@ -924,7 +927,13 @@ class DecisionStore:
 
     # ── Idempotency ─────────────────────────────────────────────────
 
-    def intent_exists(self, symbol: str, trade_date: str, source: str) -> bool:
+    def intent_exists(
+        self,
+        symbol: str,
+        trade_date: str,
+        source: str,
+        scanner_side: str | None = None,
+    ) -> bool:
         """Check if an *in-progress* intent already exists for this symbol+date+source.
 
         Only intents that are still being processed (pending, claimed, ready_for_exec)
@@ -937,9 +946,15 @@ class DecisionStore:
                WHERE symbol = :symbol
                  AND trade_date = :td
                  AND source = :source
+                 AND (:scanner_side IS NULL OR scanner_side = :scanner_side)
                  AND status IN ('pending', 'claimed', 'tactical_pending', 'ready_for_exec')
                LIMIT 1""",
-            {"symbol": symbol, "td": trade_date, "source": source},
+            {
+                "symbol": symbol,
+                "td": trade_date,
+                "source": source,
+                "scanner_side": scanner_side,
+            },
         ).fetchone()
         return row is not None
 

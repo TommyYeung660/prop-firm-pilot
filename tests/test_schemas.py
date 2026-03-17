@@ -66,6 +66,16 @@ class TestTradeIntent:
         assert intent.scanner_drop_distance == 0.05
         assert intent.scanner_topk_spread == 0.03
 
+    def test_scanner_side_field(self) -> None:
+        """TradeIntent should accept scanner_side for side-aware scanner bundles."""
+        intent = TradeIntent(
+            trade_date="2026-02-16",
+            symbol="USDCHF",
+            scanner_side="short",
+        )
+
+        assert intent.scanner_side == "short"
+
     def test_llm_decision_fields(self) -> None:
         """LLM decision fields should be settable."""
         intent = TradeIntent(
