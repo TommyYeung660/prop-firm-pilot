@@ -605,6 +605,17 @@ class TacticalValidator:
                 provenance=self._build_provenance(data),
             )
 
+        if data.quote_source == "websocket_cache" and data.bars_5min.empty:
+            logger.debug("Tactical WAIT: awaiting first websocket 5m closed bar")
+            return TacticalResult(
+                action="WAIT",
+                resolution="RETRY_PENDING",
+                detail="Awaiting first websocket 5m closed bar after startup",
+                summary_reason_code="market_data.startup_5m_bar_pending",
+                policy_hints=self._default_policy_hints(retryable=True, degrade_allowed=True),
+                provenance=self._build_provenance(data),
+            )
+
         hard_results = self.check_hard_gates(data)
         hard_passed = all(r.passed for r in hard_results)
 

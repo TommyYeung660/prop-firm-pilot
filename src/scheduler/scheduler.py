@@ -619,6 +619,61 @@ class Scheduler:
                                 getattr(entry_readiness, "block_reason", "unknown"),
                             )
                             continue
+                        if entry_readiness is not None and getattr(
+                            entry_readiness,
+                            "requires_tactical_retry",
+                            False,
+                        ):
+                            feed_status = self._get_market_data_feed_status()
+                            self._log_trade_event(
+                                "SCANNER_ADMITTED",
+                                {
+                                    "symbol": signal.instrument,
+                                    "reason": "market_data_startup_retryable",
+                                    "pending_reason": getattr(
+                                        entry_readiness,
+                                        "pending_reason",
+                                        "",
+                                    ),
+                                    "feed_state": getattr(
+                                        entry_readiness,
+                                        "websocket_state",
+                                        "",
+                                    ),
+                                    "ws_last_error": getattr(
+                                        entry_readiness,
+                                        "ws_last_error",
+                                        "",
+                                    ),
+                                    "quote_source": getattr(
+                                        entry_readiness,
+                                        "quote_source",
+                                        "",
+                                    ),
+                                    "bars_5m_source": getattr(
+                                        entry_readiness,
+                                        "bars_5m_source",
+                                        "",
+                                    ),
+                                    "bars_1h_source": getattr(
+                                        entry_readiness,
+                                        "bars_1h_source",
+                                        "",
+                                    ),
+                                    "market_data_initialized_at": feed_status.get(
+                                        "initialized_at",
+                                        "",
+                                    ),
+                                    "market_data_uptime_seconds": feed_status.get(
+                                        "uptime_seconds",
+                                        0,
+                                    ),
+                                    "websocket_closed_bar_counts": feed_status.get(
+                                        "websocket_closed_bar_counts",
+                                        {},
+                                    ),
+                                },
+                            )
 
                         intent = TradeIntent(
                             trade_date=today,

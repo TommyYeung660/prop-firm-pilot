@@ -532,3 +532,25 @@ class TestTacticalVerdictSchema:
         assert payload["summary_reason_code"] == "spread.fail.ratio_too_wide"
         assert payload["policy_hints"]["retryable"] is True
         assert payload["provenance"]["data_source"] == "rest_fallback"
+
+    def test_waits_for_first_5m_bar_when_quote_is_fresh_but_bars_are_missing(self) -> None:
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        data = TacticalData(
+            bars_5min=pd.DataFrame(),
+            bars_1h=pd.DataFrame(),
+            current_spread=0.0,
+            typical_spread=0.00015,
+            latest_bar_time=datetime.now(timezone.utc) - timedelta(seconds=20),
+            quote_source="websocket_cache",
+            bars_5min_source="rest_fallback",
+            bars_1h_source="warmup_cache",
+            data_source="websocket_cache",
+        )
+
+        result = validator.evaluate(side="BUY", data=data)
+
+        assert result.action == "WAIT"
+        assert result.resolution == "RETRY_PENDING"
+        assert result.summary_reason_code == "market_data.startup_5m_bar_pending"
+        assert result.policy_hints["retryable"] is True

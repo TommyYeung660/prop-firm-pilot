@@ -375,6 +375,71 @@ async def test_market_data_hub_blocks_entry_when_feed_is_degraded_and_rest_data_
 
 
 @pytest.mark.asyncio
+async def test_entry_readiness_marks_startup_5m_gap_as_retryable() -> None:
+    tick_time = datetime(2026, 3, 17, 6, 42, 10, tzinfo=timezone.utc)
+    aggregator = FXTickAggregator()
+    aggregator.add_tick(_tick("EURUSD", 1.10, 1.1002, tick_time))
+
+    client = EODHDFXWebSocketClient(
+        api_token="token",
+        symbols=["EURUSD"],
+        stale_after_seconds=86400,
+    )
+    client._connected = True
+    client._record_tick(_tick("EURUSD", 1.10, 1.1002, tick_time))
+
+    hub = MarketDataHub(
+        aggregator=aggregator,
+        websocket_client=client,
+        rest_provider=DummyProvider([]),
+        symbols=["EURUSD"],
+        now_provider=lambda: datetime(2026, 3, 17, 6, 42, 30, tzinfo=timezone.utc),
+    )
+    hub._warm_cache[("EURUSD", "1h")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-17T05:00:00Z"),
+                "open": 1.0995,
+                "high": 1.1005,
+                "low": 1.0990,
+                "close": 1.1000,
+                "volume": 0,
+            }
+        ]
+    )
+
+    readiness = await hub.get_entry_readiness("EURUSD")
+
+    assert readiness.entry_safe is True
+    assert readiness.block_reason == ""
+    assert readiness.requires_tactical_retry is True
+    assert readiness.pending_reason == "market_data.startup_5m_bar_pending"
+    assert readiness.websocket_state == "healthy"
+    assert readiness.quote_source == "websocket_cache"
+    assert readiness.quote_available is True
+    assert readiness.bars_5m_fresh is False
+    assert readiness.bars_1h_fresh is True
+
+
+@pytest.mark.asyncio
+async def test_entry_readiness_still_blocks_when_quote_is_missing() -> None:
+    hub = MarketDataHub(
+        aggregator=FXTickAggregator(),
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=DummyProvider([]),
+        symbols=["EURUSD"],
+        now_provider=lambda: datetime(2026, 3, 17, 6, 42, 30, tzinfo=timezone.utc),
+    )
+
+    readiness = await hub.get_entry_readiness("EURUSD")
+
+    assert readiness.entry_safe is False
+    assert readiness.block_reason == "market_data.quote_unavailable"
+    assert readiness.requires_tactical_retry is False
+    assert readiness.pending_reason == ""
+
+
+@pytest.mark.asyncio
 async def test_market_data_hub_refreshes_stale_warm_cache_incrementally() -> None:
     now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
     provider = DummyProvider(

@@ -354,6 +354,69 @@ class TestScannerLoop:
             "1h": 0,
         }
 
+    async def test_creates_intent_when_market_data_gap_is_retryable(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        from src.monitor.trade_journal import TradeJournal
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            trade_journal=journal,
+        )
+        sched._market_data_ready = True
+        sched._market_data_hub = MagicMock()
+        sched._market_data_hub.get_entry_readiness = AsyncMock(
+            return_value=MagicMock(
+                entry_safe=True,
+                requires_tactical_retry=True,
+                pending_reason="market_data.startup_5m_bar_pending",
+                block_reason="",
+                websocket_state="healthy",
+                ws_last_error=None,
+                quote_source="websocket_cache",
+                bars_5m_source="rest_fallback",
+                bars_1h_source="warmup_cache",
+            )
+        )
+        sched._market_data_hub.feed_status.return_value = {
+            "initialized_at": "2026-03-17T03:00:00+00:00",
+            "uptime_seconds": 42,
+            "websocket_closed_bar_counts": {
+                "EURUSD": {"1m": 0, "5m": 0, "1h": 0},
+            },
+        }
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("EURUSD")]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        assert len(intents) == 1
+        sched._market_data_hub.get_entry_readiness.assert_awaited_once_with("EURUSD")
+
+        lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+        events = [json.loads(line) for line in lines]
+        assert not any(e["type"] == "SCANNER_SKIP" for e in events)
+        admitted_event = next(e for e in events if e["type"] == "SCANNER_ADMITTED")
+        assert admitted_event["symbol"] == "EURUSD"
+        assert admitted_event["reason"] == "market_data_startup_retryable"
+        assert admitted_event["pending_reason"] == "market_data.startup_5m_bar_pending"
+        assert admitted_event["quote_source"] == "websocket_cache"
+        assert admitted_event["bars_5m_source"] == "rest_fallback"
+        assert admitted_event["bars_1h_source"] == "warmup_cache"
+
     async def test_logs_scanner_bundle_rejection_reason_code(
         self,
         config: AppConfig,
@@ -3988,6 +4051,66 @@ async def test_tactical_wait_retries_then_ready_for_exec_when_gate_passes(
 
     tactical_wait = TacticalResult(action="WAIT", detail="Need another 5min bar")
     tactical_pass = TacticalResult(action="PASS", detail="Momentum aligned")
+    with (
+        patch.object(sched, "_run_tactical_validation", new_callable=AsyncMock) as mock_tac,
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        mock_tac.side_effect = [tactical_wait, tactical_pass]
+        await sched._process_claimed_intent("llm-0", claimed)
+
+    final = store.get_intent(claimed.id)
+    assert final.status == "ready_for_exec"
+    assert mock_tac.await_count == 2
+
+
+async def test_tactical_retry_promotes_intent_after_first_5m_bar_arrives(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Startup 5m warmup WAIT should resume to ready_for_exec on the next retry."""
+    from src.decision.tactical_validator import TacticalResult
+
+    config.tactical.enabled = True
+    config.tactical.shadow_mode = False
+    config.tactical.retry.max_retries = 2
+    config.tactical.retry.interval_seconds = 0
+    config.tactical.retry.jitter_seconds = 0
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+
+    tactical_wait = TacticalResult(
+        action="WAIT",
+        resolution="RETRY_PENDING",
+        detail="Awaiting first websocket 5m closed bar after startup",
+        summary_reason_code="market_data.startup_5m_bar_pending",
+    )
+    tactical_pass = TacticalResult(
+        action="PASS",
+        resolution="EXECUTE_NOW",
+        detail="Momentum aligned",
+        summary_reason_code="tactical.pass.all_gates_aligned",
+    )
     with (
         patch.object(sched, "_run_tactical_validation", new_callable=AsyncMock) as mock_tac,
         patch("asyncio.sleep", new_callable=AsyncMock),

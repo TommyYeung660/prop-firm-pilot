@@ -61,6 +61,8 @@ class EntryReadinessResult:
     bars_5m_fresh: bool
     bars_1h_source: str
     bars_1h_fresh: bool
+    requires_tactical_retry: bool = False
+    pending_reason: str = ""
 
 
 @dataclass
@@ -230,6 +232,7 @@ class MarketDataHub:
     async def get_entry_readiness(self, symbol: str) -> EntryReadinessResult:
         """Return whether current market data is sufficient for a new entry."""
         websocket_status = self._websocket_client.get_status()
+        websocket_state = str(websocket_status.get("state", ""))
         quote_result = await self.get_quote(symbol)
         bars_5m_result, bars_1h_result = await asyncio.gather(
             self.get_bars(symbol, "5m", 10),
@@ -244,18 +247,23 @@ class MarketDataHub:
         )
 
         block_reason = ""
+        requires_tactical_retry = False
+        pending_reason = ""
         if not quote_available:
             block_reason = "market_data.quote_unavailable"
+        elif websocket_state != "healthy" and not bars_5m_fresh:
+            block_reason = "market_data.feed_degraded"
         elif not bars_5m_fresh:
-            block_reason = "market_data.bars_5m_unavailable"
-        elif not bars_1h_fresh:
-            block_reason = "market_data.bars_1h_unavailable"
+            requires_tactical_retry = True
+            pending_reason = "market_data.startup_5m_bar_pending"
 
         return EntryReadinessResult(
             symbol=symbol,
             entry_safe=block_reason == "",
             block_reason=block_reason,
-            websocket_state=str(websocket_status.get("state", "")),
+            requires_tactical_retry=requires_tactical_retry,
+            pending_reason=pending_reason,
+            websocket_state=websocket_state,
             ws_last_error=websocket_status.get("last_error"),
             quote_source=quote_result.source,
             quote_available=quote_available,
