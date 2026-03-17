@@ -179,6 +179,17 @@ class MarketHoursConfig(BaseModel):
     )
 
 
+class LLMThresholdOverrideConfig(BaseModel):
+    """Manual override values for LLM confidence gating."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Force fixed LLM thresholds at runtime",
+    )
+    min_confidence: Literal["low", "medium", "high"] = Field(default="medium")
+    min_blended_confidence: float = Field(default=0.55)
+
+
 class SchedulerConfig(BaseModel):
     """Async scheduler cadences for the Hybrid EA+LLM pipeline."""
 
@@ -210,6 +221,10 @@ class SchedulerConfig(BaseModel):
     market_hours: MarketHoursConfig = Field(
         default_factory=MarketHoursConfig,
         description="Weekend market closure settings",
+    )
+    llm_threshold_override: LLMThresholdOverrideConfig = Field(
+        default_factory=LLMThresholdOverrideConfig,
+        description="Manual override for pre/post LLM confidence gating",
     )
 
     # v1.2.0: Session-aware scanning cadence

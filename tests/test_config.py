@@ -72,6 +72,26 @@ def test_e8_one_5k_v136_tuned_params():
     assert config.scheduler.volatility_threshold_pct == 0.5
 
 
+def test_scheduler_threshold_override_defaults():
+    """Task 1: Scheduler should expose default manual LLM threshold override config."""
+    config = SchedulerConfig()
+    override = config.llm_threshold_override
+    assert override.enabled is False
+    assert override.min_confidence == "medium"
+    assert override.min_blended_confidence == 0.55
+
+
+def test_e8_one_5k_threshold_override_from_config():
+    """Task 1: e8_one_5k_challenge should enable manual LLM threshold override."""
+    from src.config import load_config
+
+    config = load_config("config/e8_one_5k_challenge.yaml")
+    override = config.scheduler.llm_threshold_override
+    assert override.enabled is True
+    assert override.min_confidence == "medium"
+    assert override.min_blended_confidence == 0.55
+
+
 class TestTacticalConfig:
     """Verify TacticalConfig loads with defaults and from YAML."""
 

@@ -76,6 +76,10 @@ scheduler:
   volatility_poll_interval_seconds: 30  # 檢查報價波動的頻率；越小反應越快，但 API / CPU 負擔更高
 
   llm_poll_interval_seconds: 10  # LLM worker 輪詢 pending intent 的頻率；越小代表回應越快
+  llm_threshold_override:
+    enabled: true  # 啟用人工固定 LLM 閾值覆寫
+    min_confidence: "medium"  # 最低文字信心門檻
+    min_blended_confidence: 0.55  # 最低 blended_confidence 門檻
 
   multi_timeframe_enabled: true  # 啟用多時間框架流程；daily 給方向，較短週期做進場時機確認
   entry_timeframe: "4h"  # 多時間框架的進場確認週期；目前用 4h 供 tactical / agent 參考
