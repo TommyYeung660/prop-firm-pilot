@@ -8,6 +8,11 @@ from scripts import pack_prod_logs
 from src.version import get_app_version, get_release_tag
 
 
+def test_get_app_version_reports_beta_2_release_identity() -> None:
+    assert get_app_version() == "1.5.0_beta_2"
+    assert get_release_tag() == "v1.5.0_beta_2"
+
+
 def test_get_app_version_matches_pyproject() -> None:
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     version_line = next(

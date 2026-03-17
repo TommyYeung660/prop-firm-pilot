@@ -309,6 +309,29 @@ class TestCSVParsing:
         assert chosen_date == ""
         assert bridge.get_last_rejection_reason_code() == "scanner.contract.invalid"
 
+    def test_load_signals_accepts_beta_2_scanner_bundle(
+        self, bridge: ScannerBridge, tmp_path: Path
+    ) -> None:
+        """beta_2 scanner bundles should pass the ingestion version gate."""
+        csv_path = tmp_path / "signals.csv"
+        csv_path.write_text(
+            (FIXTURES_DIR / "signals_single.csv")
+            .read_text(encoding="utf-8")
+            .replace(DEFAULT_SCANNER_VERSION, "v1.5.0_beta_2"),
+            encoding="utf-8",
+        )
+        _write_contract_sidecars(
+            tmp_path,
+            tmp_path,
+            scanner_version="v1.5.0_beta_2",
+        )
+
+        signals, chosen_date = bridge.load_signals_from_file(csv_path, target_date="2026-02-16")
+
+        assert len(signals) == 1
+        assert chosen_date == "2026-02-16"
+        assert signals[0].scanner_version == "v1.5.0_beta_2"
+
     def test_load_signals_rejects_missing_manifest(
         self, bridge: ScannerBridge, tmp_path: Path
     ) -> None:

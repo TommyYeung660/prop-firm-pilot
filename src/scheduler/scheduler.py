@@ -1250,7 +1250,10 @@ class Scheduler:
         retry_count: int = 0,
     ) -> None:
         """Log and alert tactical validation results."""
-        feed_status = self._market_data_hub.feed_status() if self._market_data_hub is not None else {}
+        if self._market_data_hub is not None:
+            feed_status = self._market_data_hub.feed_status()
+        else:
+            feed_status = {}
         websocket_status = feed_status.get("websocket", {}) if isinstance(feed_status, dict) else {}
         payload = tactical_result.to_log_dict()
         payload.update(

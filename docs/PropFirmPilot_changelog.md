@@ -35,6 +35,25 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.0_beta_2] — 2026-03-17
+**Operational Hardening Repair Release**
+
+> **Status**: 已在修復分支完整落地，作為 `v1.5.0 stable` 前的 operational repair gate
+> **Reason**: `2026-03-16` 晚間到 `2026-03-17` 上午的 production run 暴露出 stale signal fallback、market-data degraded entry、tactical pending lifecycle、sqlite snapshot write safety 與 tactical alert noise 等 live correctness 缺口，需先收斂後才能進 stable gate
+
+### Fixed
+- `ScannerBridge` 現在在 live target date 缺失時 fail-closed，不再 fallback 到最新可用 signals，且 stale rejection 不會污染 pipeline cache
+- `EODHDFXWebSocketClient` 與 `MarketDataHub` 現在會把 WebSocket `keepalive ping timeout` / reconnect failure 映射成 entry-visible degraded state，scheduler 在 feed 不安全時直接 block 新 intents / 新開倉
+- tactical pending lifecycle 現在會把 `expires_at` 對齊完整 retry budget，避免 janitor 在 tactical retry 尚未跑完前提早回收 intent
+- `SQLiteDecisionStore.insert_equity_snapshot()` 現在與其他寫入共用 `_write_lock`，避免長跑中出現 nested transaction 錯誤
+- tactical Telegram alert 現在有 keyed throttling / dedupe，且 trade event payload 會帶出 scanner / feed / deadline diagnostics
+
+### Changed
+- runtime shared version source 現在顯示 `1.5.0_beta_2`，release tag / packer 預設值同步輸出 `v1.5.0_beta_2`
+- pilot ingestion gate 現在同時接受 `v1.5.0`、`v1.5.0_beta` 與 `v1.5.0_beta_2` scanner bundle，保留與既有 beta artifacts 的向後相容
+
+---
+
 ## [1.5.0_beta] — 2026-03-16
 **Scanner Contract Gate And Cross-Repo Beta Baseline**
 

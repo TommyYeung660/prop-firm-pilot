@@ -16,7 +16,7 @@ from typing import Any
 from loguru import logger
 
 SUPPORTED_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v1"}
-SUPPORTED_SCANNER_VERSIONS = {"v1.5.0", "v1.5.0_beta"}
+SUPPORTED_SCANNER_VERSIONS = {"v1.5.0", "v1.5.0_beta", "v1.5.0_beta_2"}
 PASSING_VALIDATION_STATUSES = {"", "ok", "pass", "passed", "ready", "success", "valid", "validated"}
 REQUIRED_SIGNAL_COLUMNS = {
     "datetime",
