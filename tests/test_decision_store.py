@@ -902,6 +902,28 @@ class TestMarkClosedWithPnL:
         assert decision.closed_at is not None
 
 
+class TestTacticalExpiry:
+    """Tests for tactical_pending expiry management."""
+
+    def test_update_intent_expiry_overrides_claim_ttl_for_tactical_pending(
+        self, store: DecisionStore, sample_intent: TradeIntent
+    ) -> None:
+        sample_intent.claim_ttl_minutes = 30
+        store.insert_intent(sample_intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        store.mark_tactical_pending(sample_intent.id)
+        tactical_deadline = datetime.now(timezone.utc) + timedelta(hours=1)
+        store.update_intent_expiry(sample_intent.id, tactical_deadline)
+
+        updated = store.get_intent(sample_intent.id)
+        assert updated is not None
+        assert updated.status == "tactical_pending"
+        assert updated.expires_at is not None
+        assert updated.expires_at >= tactical_deadline - timedelta(seconds=1)
+
+
 # ── Get Closed Intents Tests ───────────────────────────────────────────────
 
 

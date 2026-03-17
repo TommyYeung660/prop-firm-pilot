@@ -464,6 +464,40 @@ class DecisionStore:
         """Transition intent from claimed \u2192 tactical_pending (v1.3.7)."""
         self._transition(intent_id, "claimed", "tactical_pending")
 
+    def update_intent_expiry(
+        self,
+        intent_id: str,
+        expires_at: datetime,
+        allowed_statuses: tuple[str, ...] = ("claimed", "tactical_pending"),
+    ) -> None:
+        """Override expires_at for an in-flight intent without changing its status."""
+        if not allowed_statuses:
+            raise ValueError("allowed_statuses must not be empty")
+
+        status_placeholders = ", ".join(f"'{status}'" for status in allowed_statuses)
+        with self._write_lock:
+            try:
+                updated = self._conn.execute(
+                    f"""UPDATE intents
+                           SET expires_at = :expires_at
+                         WHERE id = :id
+                           AND status IN ({status_placeholders})""",
+                    {
+                        "expires_at": _dt_to_str(expires_at),
+                        "id": intent_id,
+                    },
+                ).rowcount
+                if not updated:
+                    self._conn.rollback()
+                    raise InvalidTransitionError(
+                        f"Cannot update expiry for {intent_id}: "
+                        f"not in {allowed_statuses!r} state"
+                    )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
     def mark_ready_for_exec_from_tactical(self, intent_id: str) -> None:
         """Transition intent from tactical_pending \u2192 ready_for_exec (v1.3.7)."""
         self._transition(intent_id, "tactical_pending", "ready_for_exec")
@@ -1056,20 +1090,25 @@ class DecisionStore:
             open_positions: Number of currently open positions.
         """
         now_str = datetime.now(timezone.utc).isoformat()
-        self._conn.execute(
-            """INSERT INTO equity_snapshots
-               (timestamp, equity, balance, daily_dd_pct, max_dd_pct, open_positions)
-               VALUES (:ts, :equity, :balance, :daily_dd, :max_dd, :positions)""",
-            {
-                "ts": now_str,
-                "equity": equity,
-                "balance": balance,
-                "daily_dd": daily_dd_pct,
-                "max_dd": max_dd_pct,
-                "positions": open_positions,
-            },
-        )
-        self._conn.commit()
+        with self._write_lock:
+            try:
+                self._conn.execute(
+                    """INSERT INTO equity_snapshots
+                       (timestamp, equity, balance, daily_dd_pct, max_dd_pct, open_positions)
+                       VALUES (:ts, :equity, :balance, :daily_dd, :max_dd, :positions)""",
+                    {
+                        "ts": now_str,
+                        "equity": equity,
+                        "balance": balance,
+                        "daily_dd": daily_dd_pct,
+                        "max_dd": max_dd_pct,
+                        "positions": open_positions,
+                    },
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def get_equity_history(self, hours: int = 24) -> list[dict[str, Any]]:
         """Query equity snapshots from the last N hours.

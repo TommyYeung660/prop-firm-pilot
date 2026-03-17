@@ -3985,6 +3985,59 @@ async def test_tactical_wait_retries_then_ready_for_exec_when_gate_passes(
     assert mock_tac.await_count == 2
 
 
+async def test_tactical_wait_extends_expiry_to_cover_retry_budget(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Tactical WAIT should extend expires_at beyond the base claim TTL."""
+    from src.decision.tactical_validator import TacticalResult
+
+    config.tactical.enabled = True
+    config.tactical.shadow_mode = False
+    config.tactical.retry.max_retries = 12
+    config.tactical.retry.interval_seconds = 300
+    config.tactical.retry.jitter_seconds = 0
+    config.tactical.retry.expire_action = "cancel"
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+        claim_ttl_minutes=30,
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+
+    tactical_wait = TacticalResult(action="WAIT", detail="Need more confirmation")
+    with (
+        patch.object(sched, "_run_tactical_validation", new_callable=AsyncMock) as mock_tac,
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        mock_tac.side_effect = [tactical_wait] * 13
+        await sched._process_claimed_intent("llm-0", claimed)
+
+    final = store.get_intent(claimed.id)
+    assert final is not None
+    assert final.claim_ts is not None
+    assert final.expires_at is not None
+    assert (final.expires_at - final.claim_ts).total_seconds() >= 3600
+
+
 async def test_tactical_wait_degrades_to_ready_for_exec_on_retry_expiry(
     config: AppConfig,
     store: DecisionStore,

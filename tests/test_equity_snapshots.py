@@ -22,6 +22,27 @@ def store(tmp_path: object) -> DecisionStore:
 class TestInsertEquitySnapshot:
     """Tests for insert_equity_snapshot() method."""
 
+    def test_insert_uses_write_lock(self, store: DecisionStore) -> None:
+        """Snapshot writes should use the shared write lock."""
+
+        class TrackingLock:
+            def __init__(self) -> None:
+                self.enter_count = 0
+
+            def __enter__(self):
+                self.enter_count += 1
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        tracking_lock = TrackingLock()
+        store._write_lock = tracking_lock
+
+        store.insert_equity_snapshot(equity=50000.0, daily_dd_pct=0.02, max_dd_pct=0.05)
+
+        assert tracking_lock.enter_count == 1
+
     def test_insert_single_snapshot(self, store: DecisionStore) -> None:
         """Insert and retrieve a single snapshot."""
         store.insert_equity_snapshot(

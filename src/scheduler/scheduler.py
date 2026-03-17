@@ -1297,7 +1297,9 @@ class Scheduler:
         initial_result: TacticalResult,
     ) -> bool:
         """Retry tactical WAIT decisions before expiring them."""
+        tactical_deadline = self._compute_tactical_retry_deadline()
         await asyncio.to_thread(self._store.mark_tactical_pending, intent.id)
+        await asyncio.to_thread(self._store.update_intent_expiry, intent.id, tactical_deadline)
         retry_cfg = self._config.tactical.retry
         self._log_trade_event(
             "TACTICAL_PENDING",
@@ -1307,6 +1309,7 @@ class Scheduler:
                 "side": side,
                 "detail": initial_result.detail,
                 "max_retries": retry_cfg.max_retries,
+                "tactical_deadline_at": tactical_deadline.isoformat(),
             },
         )
 
@@ -3748,6 +3751,13 @@ class Scheduler:
         if isinstance(value, Real):
             return float(value)
         return fallback
+
+    def _compute_tactical_retry_deadline(self) -> datetime:
+        """Return a deterministic expiry covering the full tactical retry budget."""
+        retry_cfg = self._config.tactical.retry
+        per_attempt_seconds = retry_cfg.interval_seconds + max(retry_cfg.jitter_seconds, 0)
+        total_retry_seconds = retry_cfg.max_retries * per_attempt_seconds
+        return self._now_utc() + timedelta(seconds=total_retry_seconds)
 
     def _should_pause_new_entries(self) -> bool:
         """Return True when Best Day protection says we should avoid new entries."""
