@@ -11,10 +11,10 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ---
 
 ## [Unreleased]
-**Post-v1.5.0_beta Mainline Validation Window**
+**Post-v1.5.0_beta_2 Mainline Validation Window**
 
-> **Status**: `v1.5.0_beta` 已於 2026-03-16 合入 `main`，等待 cross-repo / market-open validation
-> **Reason**: core pilot 已完成 scanner manifest/schema gate、versioned scanner metadata persistence、DecisionStore contract extension 與 beta version bump；下一步是用真實 market-open run 驗證 `v1.5.0_beta` 是否可作為 `v1.5.0 stable` 候選基線
+> **Status**: `v1.5.0_beta_2` 已於 2026-03-17 合入 `main`，作為 `v1.5.0 stable` 前的 operational repair baseline
+> **Reason**: core pilot 已完成 scanner manifest/schema gate、versioned scanner metadata persistence、DecisionStore contract extension，以及 beta_2 這輪 live hardening、market-data incident diagnostics 與 account config tuning；下一步是用真實 market-open run 驗證 `v1.5.0_beta_2` 是否可作為 `v1.5.0 stable` 候選基線
 
 ### Planned: v1.5.0 (stable) — Broader Decision / Risk Upgrade
 - 定義第一個「穩定版」基準：系統必須能穩定可靠地進出場，而不是只靠 hotfix 維持可用
@@ -38,7 +38,7 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ## [1.5.0_beta_2] — 2026-03-17
 **Operational Hardening Repair Release**
 
-> **Status**: 已在修復分支完整落地，作為 `v1.5.0 stable` 前的 operational repair gate
+> **Status**: 已合入 `main`，作為 `v1.5.0 stable` 前的 operational repair baseline
 > **Reason**: `2026-03-16` 晚間到 `2026-03-17` 上午的 production run 暴露出 stale signal fallback、market-data degraded entry、tactical pending lifecycle、sqlite snapshot write safety 與 tactical alert noise 等 live correctness 缺口，需先收斂後才能進 stable gate
 
 ### Fixed
@@ -47,10 +47,18 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - tactical pending lifecycle 現在會把 `expires_at` 對齊完整 retry budget，避免 janitor 在 tactical retry 尚未跑完前提早回收 intent
 - `SQLiteDecisionStore.insert_equity_snapshot()` 現在與其他寫入共用 `_write_lock`，避免長跑中出現 nested transaction 錯誤
 - tactical Telegram alert 現在有 keyed throttling / dedupe，且 trade event payload 會帶出 scanner / feed / deadline diagnostics
+- `MarketDataHub.feed_status()` 與 scheduler `SCANNER_SKIP` payload 現在會帶出 `initialized_at`、`uptime_seconds` 與 per-symbol websocket closed bar counts，讓 `market_data.bars_5m_unavailable` 能直接區分是 websocket closed bars 尚未 ready，還是 REST fallback 本身 stale
 
 ### Changed
 - runtime shared version source 現在顯示 `1.5.0_beta_2`，release tag / packer 預設值同步輸出 `v1.5.0_beta_2`
 - pilot ingestion gate 現在同時接受 `v1.5.0`、`v1.5.0_beta` 與 `v1.5.0_beta_2` scanner bundle，保留與既有 beta artifacts 的向後相容
+- `config/e8_one_5k_challenge.yaml` 現在把 off-hours scanner cadence 從 `7200s` 降到 `3600s`，降低 market-data block 後在淡時段等待下一輪 scanner 的時間
+- `config/e8_one_5k_challenge.yaml` 現在依「高頻常調參數 / 低頻基礎參數」重排，並為主要欄位補齊中文作用註解，讓日常調參與 incident 時的 config triage 更直接
+
+### Validated
+- `uv run python -m pytest tests/data/test_market_data_hub.py tests/test_scheduler.py tests/test_config.py tests/test_tactical_integration.py -q` → `161 passed`
+- `uv run ruff check src/data/fx_tick_aggregator.py src/data/market_data_hub.py src/scheduler/scheduler.py tests/data/test_market_data_hub.py tests/test_scheduler.py tests/test_config.py tests/test_tactical_integration.py` → `All checks passed!`
+- `uv run python -c "from src.config import load_config; cfg = load_config('config/e8_one_5k_challenge.yaml'); print(cfg.account.initial_balance); print(cfg.scheduler.quiet_session_interval_seconds); print(cfg.tactical.soft_gates.min_score)"` → `5000.0` / `3600` / `2`
 
 ---
 
