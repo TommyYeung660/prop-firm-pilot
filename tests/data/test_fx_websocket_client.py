@@ -128,3 +128,13 @@ def test_get_status_reports_degraded_state_for_stale_symbols() -> None:
 
     assert status["state"] == "degraded"
     assert status["stale_symbols"] == ["EURUSD"]
+
+
+def test_get_status_reports_degraded_state_after_connection_error() -> None:
+    client = EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"])
+    client._last_error = "keepalive ping timeout"
+
+    status = client.get_status()
+
+    assert status["state"] == "degraded"
+    assert status["last_error"] == "keepalive ping timeout"

@@ -288,6 +288,57 @@ class TestScannerLoop:
         assert skip_event["reason"] == "low_confidence_cooldown"
         assert skip_event["consecutive_cancels"] == 2
 
+    async def test_blocks_intent_creation_when_market_data_entry_not_safe(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        from src.monitor.trade_journal import TradeJournal
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            trade_journal=journal,
+        )
+        sched._market_data_ready = True
+        sched._market_data_hub = MagicMock()
+        sched._market_data_hub.get_entry_readiness = AsyncMock(
+            return_value=MagicMock(
+                entry_safe=False,
+                block_reason="market_data.quote_unavailable",
+                websocket_state="degraded",
+                ws_last_error="keepalive ping timeout",
+                quote_source="rest_fallback",
+                bars_5m_source="rest_fallback",
+                bars_1h_source="rest_fallback",
+            )
+        )
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("EURUSD")]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        assert intents == []
+        sched._market_data_hub.get_entry_readiness.assert_awaited_once_with("EURUSD")
+
+        lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+        events = [json.loads(line) for line in lines]
+        skip_event = next(e for e in events if e["type"] == "SCANNER_SKIP")
+        assert skip_event["symbol"] == "EURUSD"
+        assert skip_event["reason"] == "market_data_entry_block"
+        assert skip_event["entry_block_reason"] == "market_data.quote_unavailable"
+        assert skip_event["feed_state"] == "degraded"
+
     async def test_logs_scanner_bundle_rejection_reason_code(
         self,
         config: AppConfig,

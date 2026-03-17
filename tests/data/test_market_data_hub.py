@@ -304,6 +304,43 @@ async def test_market_data_hub_returns_no_quote_when_rest_fallback_tail_is_still
 
 
 @pytest.mark.asyncio
+async def test_market_data_hub_blocks_entry_when_feed_is_degraded_and_rest_data_is_stale() -> None:
+    now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
+    provider = DummyProvider(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-12T10:00:00Z"),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+        ]
+    )
+    client = EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"])
+    client._last_error = "keepalive ping timeout"
+
+    hub = MarketDataHub(
+        aggregator=FXTickAggregator(),
+        websocket_client=client,
+        rest_provider=provider,
+        symbols=["EURUSD"],
+        bar_cache_max_age_seconds=60,
+        now_provider=lambda: now,
+    )
+
+    readiness = await hub.get_entry_readiness("EURUSD")
+
+    assert readiness.entry_safe is False
+    assert readiness.block_reason == "market_data.quote_unavailable"
+    assert readiness.websocket_state == "degraded"
+    assert readiness.ws_last_error == "keepalive ping timeout"
+    assert readiness.quote_source == "rest_fallback"
+    assert readiness.quote_available is False
+
+
+@pytest.mark.asyncio
 async def test_market_data_hub_refreshes_stale_warm_cache_incrementally() -> None:
     now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
     provider = DummyProvider(

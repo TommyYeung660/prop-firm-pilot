@@ -26,6 +26,7 @@ import random
 from collections.abc import Coroutine
 from datetime import datetime, timedelta, timezone
 from numbers import Real
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -543,6 +544,54 @@ class Scheduler:
                                     symbol_sl_limit,
                                 )
                                 continue  # Skip this symbol, try next
+
+                        entry_readiness = await self._get_entry_readiness(signal.instrument)
+                        if entry_readiness is not None and not getattr(
+                            entry_readiness, "entry_safe", True
+                        ):
+                            self._log_trade_event(
+                                "SCANNER_SKIP",
+                                {
+                                    "symbol": signal.instrument,
+                                    "reason": "market_data_entry_block",
+                                    "entry_block_reason": getattr(
+                                        entry_readiness,
+                                        "block_reason",
+                                        "market_data.entry_blocked",
+                                    ),
+                                    "feed_state": getattr(
+                                        entry_readiness,
+                                        "websocket_state",
+                                        "",
+                                    ),
+                                    "ws_last_error": getattr(
+                                        entry_readiness,
+                                        "ws_last_error",
+                                        "",
+                                    ),
+                                    "quote_source": getattr(
+                                        entry_readiness,
+                                        "quote_source",
+                                        "",
+                                    ),
+                                    "bars_5m_source": getattr(
+                                        entry_readiness,
+                                        "bars_5m_source",
+                                        "",
+                                    ),
+                                    "bars_1h_source": getattr(
+                                        entry_readiness,
+                                        "bars_1h_source",
+                                        "",
+                                    ),
+                                },
+                            )
+                            logger.warning(
+                                "Scanner loop: {} blocked by market-data entry guard ({})",
+                                signal.instrument,
+                                getattr(entry_readiness, "block_reason", "unknown"),
+                            )
+                            continue
 
                         intent = TradeIntent(
                             trade_date=today,
@@ -3730,6 +3779,29 @@ class Scheduler:
         if isinstance(reason_code, str) and reason_code.startswith("scanner."):
             return reason_code
         return ""
+
+    async def _get_entry_readiness(self, symbol: str) -> Any | None:
+        """Return current entry-safety verdict from the market-data hub."""
+        if not self._market_data_ready or self._market_data_hub is None:
+            return None
+
+        getter = getattr(self._market_data_hub, "get_entry_readiness", None)
+        if not callable(getter):
+            return None
+
+        try:
+            return await getter(symbol)
+        except Exception as e:
+            logger.warning("Scheduler: failed to evaluate entry readiness for {}: {}", symbol, e)
+            return SimpleNamespace(
+                entry_safe=False,
+                block_reason="market_data.readiness_error",
+                websocket_state="",
+                ws_last_error=str(e),
+                quote_source="",
+                bars_5m_source="",
+                bars_1h_source="",
+            )
 
     def _get_thresholds_for_symbol(self, symbol: str) -> Thresholds:
         """Return thresholds for a symbol, falling back to global defaults."""

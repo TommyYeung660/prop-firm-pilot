@@ -71,6 +71,7 @@ class EODHDFXWebSocketClient:
         self._connected = False
         self._running = False
         self._last_error: str | None = None
+        self._consecutive_failures = 0
         self._websocket: Any = None
 
     def _build_url(self) -> str:
@@ -155,7 +156,9 @@ class EODHDFXWebSocketClient:
     def get_status(self) -> dict[str, Any]:
         """Expose client runtime state for monitoring and fallback decisions."""
         stale_symbols = sorted(self.stale_symbols())
-        if not self._connected:
+        if not self._connected and self._last_error:
+            state = "degraded"
+        elif not self._connected:
             state = "disconnected"
         elif stale_symbols:
             state = "degraded"
@@ -166,6 +169,7 @@ class EODHDFXWebSocketClient:
             "connected": self._connected,
             "running": self._running,
             "last_error": self._last_error,
+            "consecutive_failures": self._consecutive_failures,
             "last_message_at": self._last_message_at,
             "subscribed_symbols": list(self._symbols),
             "stale_symbols": stale_symbols,
@@ -189,6 +193,7 @@ class EODHDFXWebSocketClient:
                     self._websocket = websocket
                     self._connected = True
                     self._last_error = None
+                    self._consecutive_failures = 0
                     attempt = 0
                     await websocket.send(json.dumps(self._build_subscribe_message()))
                     async for raw_message in websocket:
@@ -213,6 +218,7 @@ class EODHDFXWebSocketClient:
             except Exception as e:
                 self._connected = False
                 self._last_error = str(e)
+                self._consecutive_failures += 1
                 backoff = self._compute_backoff_seconds(attempt)
                 attempt += 1
                 logger.warning(

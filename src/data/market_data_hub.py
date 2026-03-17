@@ -47,6 +47,23 @@ class BarResult:
 
 
 @dataclass
+class EntryReadinessResult:
+    """Entry-safety verdict derived from current quote and bar availability."""
+
+    symbol: str
+    entry_safe: bool
+    block_reason: str
+    websocket_state: str
+    ws_last_error: str | None
+    quote_source: str
+    quote_available: bool
+    bars_5m_source: str
+    bars_5m_fresh: bool
+    bars_1h_source: str
+    bars_1h_fresh: bool
+
+
+@dataclass
 class _RestRefreshState:
     """Tracks the latest observed REST tail for refresh suppression."""
 
@@ -204,6 +221,44 @@ class MarketDataHub:
             "forced_stale_symbols": sorted(self._forced_stale_symbols),
             "warm_cache_keys": sorted(f"{symbol}:{tf}" for symbol, tf in self._warm_cache.keys()),
         }
+
+    async def get_entry_readiness(self, symbol: str) -> EntryReadinessResult:
+        """Return whether current market data is sufficient for a new entry."""
+        websocket_status = self._websocket_client.get_status()
+        quote_result = await self.get_quote(symbol)
+        bars_5m_result, bars_1h_result = await asyncio.gather(
+            self.get_bars(symbol, "5m", 10),
+            self.get_bars(symbol, "1h", 10),
+        )
+        quote_available = quote_result.quote is not None
+        bars_5m_fresh = not bars_5m_result.bars.empty and self._bars_are_fresh(
+            bars_5m_result.bars, "5m"
+        )
+        bars_1h_fresh = not bars_1h_result.bars.empty and self._bars_are_fresh(
+            bars_1h_result.bars, "1h"
+        )
+
+        block_reason = ""
+        if not quote_available:
+            block_reason = "market_data.quote_unavailable"
+        elif not bars_5m_fresh:
+            block_reason = "market_data.bars_5m_unavailable"
+        elif not bars_1h_fresh:
+            block_reason = "market_data.bars_1h_unavailable"
+
+        return EntryReadinessResult(
+            symbol=symbol,
+            entry_safe=block_reason == "",
+            block_reason=block_reason,
+            websocket_state=str(websocket_status.get("state", "")),
+            ws_last_error=websocket_status.get("last_error"),
+            quote_source=quote_result.source,
+            quote_available=quote_available,
+            bars_5m_source=bars_5m_result.source,
+            bars_5m_fresh=bars_5m_fresh,
+            bars_1h_source=bars_1h_result.source,
+            bars_1h_fresh=bars_1h_fresh,
+        )
 
     def _bars_from_aggregator(
         self,
