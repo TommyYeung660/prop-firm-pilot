@@ -6,7 +6,7 @@
 >
 > **適用範圍**: `prop-firm-pilot` 主線規劃，並直接納入 `qlib_market_scanner` / `TradingAgents` 的必要依賴
 >
-> **當前主線狀態**: `v1.5.0_beta_2` 已合入 `main`，作為 `v1.5.0_stable` 前的 operational repair baseline
+> **當前主線狀態**: `v1.5.0_beta_2` 已於 `2026-03-17` 合入 `main`，作為 `v1.5.0_stable` 前的 operational repair baseline
 >
 > **閱讀原則**: 若你只想知道 `1.5.0` 到 `1.5.9` 應做什麼，先看這份；不需要先回頭讀複數文檔
 
@@ -50,7 +50,7 @@
 
 根據 `2026-03-16` 晚間到 `2026-03-17` 上午這輪 production run，`v1.5.0_beta_2` 已先完成 stable 前必須經過的 repair gate，並作為後續 `v1.5.0 stable` 驗證的 operational baseline。
 
-`v1.5.0_beta_2` 的角色不是新增 feature，而是把這輪長時間運行暴露出的 P0 / P1 incident 收斂掉，避免系統在 market data、signal freshness、tactical state transition 與 operator observability 上繼續帶病進 stable；同時吸收必要的 scanner cadence / config ergonomics 調整，降低下一輪 live 驗證的操作摩擦。
+`v1.5.0_beta_2` 的角色不是新增 feature，而是把這輪長時間運行暴露出的 P0 / P1 incident 收斂掉，避免系統在 market data、signal freshness、tactical state transition 與 operator observability 上繼續帶病進 stable；同時吸收必要的 scanner cadence / config ergonomics 調整，並修正啟動後首輪 scanner 因第一根 `5m` bar 尚未形成而容易白跑的問題，降低下一輪 live 驗證的操作摩擦。
 
 | 嚴重度 | `v1.5.0_beta_2` 已納入的 repair / tuning |
 |---|---|
@@ -59,6 +59,7 @@
 | **P0** | tactical pending timeout / expired claim recycle closure：intent 必須 deterministic 地完成、取消或失敗，不可長時間 recycle 漂移 |
 | **P1** | EquityMonitor transaction nesting 修復：避免長跑中出現 `cannot start a transaction within a transaction` |
 | **P1** | Telegram tactical gate 限流 / 去重：降低 operator noise，不再出現高頻重複提示 |
+| **P1** | startup first-run `5m` bar recovery：當 `quote fresh + websocket healthy` 但第一根 websocket `5m` closed bar 尚未形成時，不再直接 block scanner，而是建立 intent 並轉入 tactical retry |
 | **P1** | incident diagnostics closure：`bars_5m_unavailable` 類 incident 現在會帶出 market-data hub 初始化時間、uptime 與 per-symbol websocket closed bar counts |
 | **P2** | account config tuning / ergonomics：`e8_one_5k_challenge` 已把 off-hours scanner cadence 下調到 `3600s`，並按「高頻常調 / 低頻基礎」重排 YAML 結構與中文註解 |
 
@@ -152,7 +153,7 @@
 
 `v1.5.0_beta_2` 是 `v1.5.0 stable` 前的修復閘，不是新 feature release。
 
-它的任務是根據這輪 production run 暴露出的真實 incident，優先收斂 operational correctness：市場資料 freshness、signal freshness、tactical state transition、monitor reliability 與 operator noise。這一版也同步吸收了必要的 scanner cadence 調整與帳號 config 可維護性整理，讓下一輪 stable 驗證能在更低操作摩擦下進行。
+它的任務是根據這輪 production run 暴露出的真實 incident，優先收斂 operational correctness：市場資料 freshness、signal freshness、tactical state transition、monitor reliability 與 operator noise。這一版也同步吸收了必要的 scanner cadence 調整、帳號 config 可維護性整理，以及 startup first-run `5m` bar recovery，讓下一輪 stable 驗證能在更低操作摩擦下進行。
 
 ### 5.2 按嚴重度排序的修復清單
 
@@ -163,6 +164,7 @@
 | **P0** | **Tactical pending timeout / expired claim recycle closure** | 釐清 intent 在 BUY / SELL 後為何卡在 pending，讓 timeout 會導向 deterministic cancel / fail，而不是反覆 recycle | 不再出現長時間 `tactical retry aborted` 與 claim recycle 漂移 |
 | **P1** | **EquityMonitor transaction nesting** | 修正 monitor 與持久化之間的 transaction 邊界 | 長跑期間不再出現 `cannot start a transaction within a transaction` |
 | **P1** | **Telegram tactical gate throttling / dedupe** | tactical gate 類提示需有節流與去重 | 不再出現固定週期洗版式重複通知 |
+| **P1** | **Startup first-run `5m` bar recovery** | 啟動後若第一輪 scanner 只缺第一根 websocket `5m` closed bar，不得直接因 `bars_5m_unavailable` 失效；需保留 candidate、建立 intent，並以 `market_data.startup_5m_bar_pending` 進入 tactical retry | 第一輪 scanner 不再白跑；既有 intent 會在下一根 `5m` close 後自動續跑，而不是硬等下一輪 scanner cadence |
 | **P1** | **Operator diagnostics / incident bundle closure** | 將 freshness、signal date、intent state、close facts 聚合到可直接讀的 incident artifact，並補上 hub `initialized_at` / `uptime_seconds` / websocket closed bar counts | operator 不需手工拼多份 log 才知道一次 incident 的 root cause，也能直接判斷 `bars_5m_unavailable` 是本地聚合未 ready 還是 provider stale |
 | **P2** | **Account config tuning / ergonomics** | 降低 off-hours scanner wait time，並重整 account config 可讀性 | 淡時段 scanner cadence 改為 `3600s`，`config/e8_one_5k_challenge.yaml` 可直接區分高頻與低頻調參區 |
 | **P2** | **Startup scanner contract self-check hardening** | 補強 runtime bundle compatibility 提示，避免再出現 beta 啟動後才發現 manifest 不合 | contract 不合時能即時 fail fast 並留下明確 diagnostics |
@@ -178,6 +180,7 @@
 
 - 新 UTC 日不會再使用 stale signals 建立 live intents
 - 顯著 stale 的 REST fallback bars 不會再進入 tactical live path
+- 啟動後第一輪 scanner 不會再因第一根 `5m` bar 尚未形成而直接白跑；會建立 intent 並交由 tactical retry 等待第一根 websocket `5m` close
 - tactical pending path 可 deterministic 收斂，不再靠 recycle 漂移
 - EquityMonitor 可穩定跑過多小時 market-open 視窗
 - Telegram tactical gate 通知頻率被節流到 operator 可接受水位

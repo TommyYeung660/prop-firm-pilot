@@ -14,7 +14,7 @@ Versioning: [Semantic Versioning](https://semver.org/).
 **Post-v1.5.0_beta_2 Mainline Validation Window**
 
 > **Status**: `v1.5.0_beta_2` 已於 2026-03-17 合入 `main`，作為 `v1.5.0 stable` 前的 operational repair baseline
-> **Reason**: core pilot 已完成 scanner manifest/schema gate、versioned scanner metadata persistence、DecisionStore contract extension，以及 beta_2 這輪 live hardening、market-data incident diagnostics 與 account config tuning；下一步是用真實 market-open run 驗證 `v1.5.0_beta_2` 是否可作為 `v1.5.0 stable` 候選基線
+> **Reason**: core pilot 已完成 scanner manifest/schema gate、versioned scanner metadata persistence、DecisionStore contract extension，以及 beta_2 這輪 live hardening、startup `5m` bar recovery、market-data incident diagnostics 與 account config tuning；下一步是用真實 market-open run 驗證 `v1.5.0_beta_2` 是否可作為 `v1.5.0 stable` 候選基線
 
 ### Planned: v1.5.0 (stable) — Broader Decision / Risk Upgrade
 - 定義第一個「穩定版」基準：系統必須能穩定可靠地進出場，而不是只靠 hotfix 維持可用
@@ -39,11 +39,12 @@ Versioning: [Semantic Versioning](https://semver.org/).
 **Operational Hardening Repair Release**
 
 > **Status**: 已合入 `main`，作為 `v1.5.0 stable` 前的 operational repair baseline
-> **Reason**: `2026-03-16` 晚間到 `2026-03-17` 上午的 production run 暴露出 stale signal fallback、market-data degraded entry、tactical pending lifecycle、sqlite snapshot write safety 與 tactical alert noise 等 live correctness 缺口，需先收斂後才能進 stable gate
+> **Reason**: `2026-03-16` 晚間到 `2026-03-17` 上午的 production run 暴露出 stale signal fallback、market-data degraded entry、startup first-run `5m` bar gap、tactical pending lifecycle、sqlite snapshot write safety 與 tactical alert noise 等 live correctness 缺口，需先收斂後才能進 stable gate
 
 ### Fixed
 - `ScannerBridge` 現在在 live target date 缺失時 fail-closed，不再 fallback 到最新可用 signals，且 stale rejection 不會污染 pipeline cache
 - `EODHDFXWebSocketClient` 與 `MarketDataHub` 現在會把 WebSocket `keepalive ping timeout` / reconnect failure 映射成 entry-visible degraded state，scheduler 在 feed 不安全時直接 block 新 intents / 新開倉
+- 啟動後第一輪 scanner 若遇到 `quote fresh + websocket healthy + first 5m closed bar pending`，現在不再因 `bars_5m_unavailable` 直接白跑；scanner 會保留 candidate、建立 intent，並交由 tactical 層以 `market_data.startup_5m_bar_pending` 走 `WAIT / RETRY_PENDING`
 - tactical pending lifecycle 現在會把 `expires_at` 對齊完整 retry budget，避免 janitor 在 tactical retry 尚未跑完前提早回收 intent
 - `SQLiteDecisionStore.insert_equity_snapshot()` 現在與其他寫入共用 `_write_lock`，避免長跑中出現 nested transaction 錯誤
 - tactical Telegram alert 現在有 keyed throttling / dedupe，且 trade event payload 會帶出 scanner / feed / deadline diagnostics
@@ -54,6 +55,7 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - pilot ingestion gate 現在同時接受 `v1.5.0`、`v1.5.0_beta` 與 `v1.5.0_beta_2` scanner bundle，保留與既有 beta artifacts 的向後相容
 - `config/e8_one_5k_challenge.yaml` 現在把 off-hours scanner cadence 從 `7200s` 降到 `3600s`，降低 market-data block 後在淡時段等待下一輪 scanner 的時間
 - `config/e8_one_5k_challenge.yaml` 現在依「高頻常調參數 / 低頻基礎參數」重排，並為主要欄位補齊中文作用註解，讓日常調參與 incident 時的 config triage 更直接
+- scheduler 現在會對 startup `5m` warmup gap 記錄 `SCANNER_ADMITTED` 診斷事件，讓 operator 能區分「正常等待第一根 websocket `5m` close」與真正的 market-data hard block
 
 ### Validated
 - `uv run python -m pytest tests/data/test_market_data_hub.py tests/test_scheduler.py tests/test_config.py tests/test_tactical_integration.py -q` → `161 passed`
