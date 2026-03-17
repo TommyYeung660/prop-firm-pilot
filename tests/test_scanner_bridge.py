@@ -268,12 +268,14 @@ class TestCSVParsing:
         instruments = {s.instrument for s in signals}
         assert instruments == {"EURUSD", "GBPUSD", "USDJPY"}
 
-    def test_load_multiday_missing_target_date_falls_back(self, bridge: ScannerBridge) -> None:
-        """target_date not in CSV → falls back to latest date."""
-        signals, _ = bridge.load_signals_from_file(
+    def test_load_multiday_missing_target_date_rejects(self, bridge: ScannerBridge) -> None:
+        """target_date not in CSV → reject instead of falling back."""
+        signals, chosen_date = bridge.load_signals_from_file(
             FIXTURES_DIR / "signals_multiday.csv", target_date="2026-01-01"
         )
-        assert len(signals) == 3  # Falls back to 2026-02-16 (latest)
+        assert signals == []
+        assert chosen_date == ""
+        assert bridge.get_last_rejection_reason_code() == "scanner.bundle.target_date_missing"
 
     def test_load_empty_file(self, bridge: ScannerBridge, tmp_path: Path) -> None:
         """CSV with header only → empty list."""
@@ -755,36 +757,41 @@ class TestSignalFreshness:
         assert len(signals) == 1
         assert signals[0].instrument == "EURUSD"
 
-    def test_stale_signals_rejected(self, bridge: ScannerBridge) -> None:
-        """Signals older than max_signal_age_days should return empty list."""
+    def test_missing_target_date_signals_rejected(self, bridge: ScannerBridge) -> None:
+        """Missing target_date should hard block live ingestion."""
         signals, chosen_date = bridge.load_signals_from_file(
             FIXTURES_DIR / "signals_stale.csv",
             target_date="2026-03-03",
             max_signal_age_days=2,
         )
-        # 2026-02-20 is 11 days before 2026-03-03 → stale → rejected
         assert signals == []
         assert chosen_date == ""
-        assert bridge.get_last_rejection_reason_code() == "scanner.bundle.stale"
+        assert bridge.get_last_rejection_reason_code() == "scanner.bundle.target_date_missing"
 
-    def test_stale_signals_weekend_tolerance(self, bridge: ScannerBridge) -> None:
-        """Friday signals should be valid on Sunday (2-day tolerance)."""
-        signals, _ = bridge.load_signals_from_file(
+    def test_missing_target_date_rejects_even_with_weekend_tolerance(
+        self, bridge: ScannerBridge
+    ) -> None:
+        """Weekend tolerance should not revive missing target-date bundles."""
+        signals, chosen_date = bridge.load_signals_from_file(
             FIXTURES_DIR / "signals_stale.csv",
             target_date="2026-02-22",  # Sunday — 2 days after Feb 20 (Friday)
             max_signal_age_days=2,
         )
-        # 2026-02-20 → 2026-02-22 = 2 days ≤ max_signal_age_days=2 → accepted
-        assert len(signals) == 3
+        assert signals == []
+        assert chosen_date == ""
+        assert bridge.get_last_rejection_reason_code() == "scanner.bundle.target_date_missing"
 
-    def test_stale_signals_default_no_check(self, bridge: ScannerBridge) -> None:
-        """When max_signal_age_days=None (default), no freshness check."""
-        signals, _ = bridge.load_signals_from_file(
+    def test_missing_target_date_rejects_when_no_freshness_check(
+        self, bridge: ScannerBridge
+    ) -> None:
+        """Strict target-date matching should apply even when freshness check is disabled."""
+        signals, chosen_date = bridge.load_signals_from_file(
             FIXTURES_DIR / "signals_stale.csv",
             target_date="2026-12-31",  # Way in the future
         )
-        # Default behavior: fallback to latest date, no staleness rejection
-        assert len(signals) == 3
+        assert signals == []
+        assert chosen_date == ""
+        assert bridge.get_last_rejection_reason_code() == "scanner.bundle.target_date_missing"
 
 
 # ── Section 6: Pipeline Cache (v1.4.0) ─────────────────────────────────────
@@ -886,25 +893,21 @@ class TestPipelineCache:
         assert signals1[0].instrument == signals2[0].instrument
         assert signals1 is not signals2
 
-    def test_stale_cache_still_returned(self, tmp_path: Path) -> None:
-        """When signal_date < request_date (stale), cache still returns signals."""
-        # signals_multiday.csv has dates 2026-02-15 and 2026-02-16
-        # Requesting 2026-02-17 will fall back to latest (2026-02-16) — stale
+    def test_missing_target_date_pipeline_result_not_cached(self, tmp_path: Path) -> None:
+        """Rejected missing-target-date results should not be cached."""
         _seed_scanner_output_bundle(tmp_path, fixture_name="signals_multiday.csv")
 
         bridge = ScannerBridge(scanner_path=tmp_path)
 
         mock_result = MagicMock(returncode=0, stdout="", stderr="")
         with patch("subprocess.run", return_value=mock_result) as mock_run:
-            # First call: stale (request 02-17, signals are from 02-16)
             signals1 = bridge.run_pipeline(date="2026-02-17", interval="1d")
             assert mock_run.call_count == 1
-            assert len(signals1) == 3  # 02-16 signals
+            assert signals1 == []
 
-            # Second call: cache hit (stale signals still cached)
             signals2 = bridge.run_pipeline(date="2026-02-17", interval="1d")
-            assert mock_run.call_count == 1  # no re-run
-            assert len(signals2) == 3
+            assert mock_run.call_count == 2
+            assert signals2 == []
 
     def test_empty_pipeline_result_not_cached(self, tmp_path: Path) -> None:
         """Empty pipeline result should NOT be cached (no signals to cache)."""

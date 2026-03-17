@@ -177,6 +177,14 @@ class ScannerBridge:
     ) -> None:
         """Store pipeline result in cache."""
         is_stale = request_date is not None and signal_date != request_date
+        if is_stale:
+            logger.info(
+                "ScannerBridge: refusing to cache stale signals "
+                "(signal_date={} != request_date={})",
+                signal_date,
+                request_date,
+            )
+            return
         self._cache = _PipelineCache(
             request_date=request_date or "",
             interval=interval,
@@ -184,13 +192,6 @@ class ScannerBridge:
             signals=list(signals),  # defensive copy
             is_stale=is_stale,
         )
-        if is_stale:
-            logger.info(
-                "ScannerBridge: cached stale signals (signal_date={} != request_date={}) "
-                "— subsequent calls for same date will skip pipeline",
-                signal_date,
-                request_date,
-            )
 
     def invalidate_cache(self) -> None:
         """Clear the pipeline cache.  Called externally when a cache bust is needed."""
@@ -638,21 +639,28 @@ class ScannerBridge:
             logger.warning("ScannerBridge: no signals found in {}", path)
             return [], ""
 
-        # Pick the target date's signals, or fall back to latest date
+        # Pick the target date's signals, or fail closed when the live target date is missing.
         available_dates = sorted(all_signals.keys())
         if target_date and target_date in all_signals:
             chosen_date = target_date
         else:
-            chosen_date = available_dates[-1]  # latest date
             if target_date and target_date not in all_signals:
+                self._set_rejection_reason(
+                    "scanner.bundle.target_date_missing",
+                    (
+                        f"target_date {target_date} not found in signals bundle "
+                        f"(available: {available_dates[0]} to {available_dates[-1]})"
+                    ),
+                )
                 logger.warning(
-                    "ScannerBridge: target_date {} not found in signals (available: {} to {}). "
-                    "Falling back to latest date {}.",
+                    "ScannerBridge: target_date {} not found in signals (available: {} to {}), "
+                    "rejecting bundle for live ingestion.",
                     target_date,
                     available_dates[0],
                     available_dates[-1],
-                    chosen_date,
                 )
+                return [], ""
+            chosen_date = available_dates[-1]  # latest date
 
         # v1.3.0: Signal freshness guard — reject stale signals
         if max_signal_age_days is not None and target_date:
