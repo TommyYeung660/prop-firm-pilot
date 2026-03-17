@@ -270,8 +270,20 @@ class Scheduler:
         """Build the current operational metrics snapshot with feed status."""
         snapshot: dict[str, Any] = dict(self._metrics.get_summary())
         if self._market_data_ready and self._market_data_hub is not None:
-            snapshot["market_data"] = self._market_data_hub.feed_status()
+            snapshot["market_data"] = self._get_market_data_feed_status()
         return snapshot
+
+    def _get_market_data_feed_status(self) -> dict[str, Any]:
+        """Safely return the current market-data hub diagnostics payload."""
+        if not self._market_data_ready or self._market_data_hub is None:
+            return {}
+        getter = getattr(self._market_data_hub, "feed_status", None)
+        if not callable(getter):
+            return {}
+        status = getter()
+        if not isinstance(status, dict):
+            return {}
+        return status
 
     async def _initialize_market_data_hub(self) -> None:
         """Warm up and start the WebSocket-first market-data sidecar."""
@@ -551,6 +563,7 @@ class Scheduler:
                         if entry_readiness is not None and not getattr(
                             entry_readiness, "entry_safe", True
                         ):
+                            feed_status = self._get_market_data_feed_status()
                             self._log_trade_event(
                                 "SCANNER_SKIP",
                                 {
@@ -585,6 +598,18 @@ class Scheduler:
                                         entry_readiness,
                                         "bars_1h_source",
                                         "",
+                                    ),
+                                    "market_data_initialized_at": feed_status.get(
+                                        "initialized_at",
+                                        "",
+                                    ),
+                                    "market_data_uptime_seconds": feed_status.get(
+                                        "uptime_seconds",
+                                        0,
+                                    ),
+                                    "websocket_closed_bar_counts": feed_status.get(
+                                        "websocket_closed_bar_counts",
+                                        {},
                                     ),
                                 },
                             )

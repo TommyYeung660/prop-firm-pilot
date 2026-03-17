@@ -115,6 +115,7 @@ class MarketDataHub:
         self._rest_refresh_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._forced_stale_symbols: set[str] = set()
         self._metrics = operational_metrics
+        self._initialized_at = self._now_provider()
 
     async def warmup(self) -> None:
         """Backfill recent intraday bars into the warm cache for all symbols."""
@@ -216,8 +217,12 @@ class MarketDataHub:
 
     def feed_status(self) -> dict[str, Any]:
         """Expose current feed status and cache fallback state."""
+        now = self._now_provider()
         return {
+            "initialized_at": self._initialized_at.isoformat(),
+            "uptime_seconds": max(0, int((now - self._initialized_at).total_seconds())),
             "websocket": self._websocket_client.get_status(),
+            "websocket_closed_bar_counts": self._aggregator.get_closed_bar_counts(self._symbols),
             "forced_stale_symbols": sorted(self._forced_stale_symbols),
             "warm_cache_keys": sorted(f"{symbol}:{tf}" for symbol, tf in self._warm_cache.keys()),
         }

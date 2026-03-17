@@ -150,6 +150,17 @@ class FXTickAggregator:
             return []
         return bars[-limit:]
 
+    def get_closed_bar_counts(self, symbols: list[str] | None = None) -> dict[str, dict[str, int]]:
+        """Return closed websocket-derived bar counts by symbol and timeframe."""
+        target_symbols = sorted(symbols or self._latest_ticks.keys())
+        counts: dict[str, dict[str, int]] = {}
+        for symbol in target_symbols:
+            counts[symbol] = {
+                timeframe: len(self._closed_bars.get((symbol, timeframe), []))
+                for timeframe in ("1m", "5m", "1h")
+            }
+        return counts
+
     def _finalize_1m_bar(self, symbol: str) -> AggregatedBar:
         """Close the current 1m bar and roll it into higher timeframes."""
         current = self._open_1m_bars.pop(symbol)

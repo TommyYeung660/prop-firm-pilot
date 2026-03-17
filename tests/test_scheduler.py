@@ -323,6 +323,14 @@ class TestScannerLoop:
                 bars_1h_source="rest_fallback",
             )
         )
+        sched._market_data_hub.feed_status.return_value = {
+            "initialized_at": "2026-03-17T03:00:00+00:00",
+            "uptime_seconds": 42,
+            "websocket_closed_bar_counts": {
+                "EURUSD": {"1m": 6, "5m": 1, "1h": 0},
+                "USDCHF": {"1m": 0, "5m": 0, "1h": 0},
+            },
+        }
         mock_scanner.run_pipeline.return_value = [_make_mock_signal("EURUSD")]
 
         await _run_loop_once(sched, sched._scanner_loop())
@@ -338,6 +346,13 @@ class TestScannerLoop:
         assert skip_event["reason"] == "market_data_entry_block"
         assert skip_event["entry_block_reason"] == "market_data.quote_unavailable"
         assert skip_event["feed_state"] == "degraded"
+        assert skip_event["market_data_initialized_at"] == "2026-03-17T03:00:00+00:00"
+        assert skip_event["market_data_uptime_seconds"] == 42
+        assert skip_event["websocket_closed_bar_counts"]["EURUSD"] == {
+            "1m": 6,
+            "5m": 1,
+            "1h": 0,
+        }
 
     async def test_logs_scanner_bundle_rejection_reason_code(
         self,
@@ -5041,12 +5056,18 @@ def test_build_metrics_snapshot_includes_market_data_feed_status(
     sched._market_data_hub.feed_status.return_value = {
         "websocket": {"state": "degraded", "last_error": "ping timeout"},
         "forced_stale_symbols": ["EURUSD"],
+        "initialized_at": "2026-03-17T03:00:00+00:00",
+        "uptime_seconds": 42,
+        "websocket_closed_bar_counts": {"EURUSD": {"1m": 6, "5m": 1, "1h": 0}},
     }
 
     snapshot = sched._build_metrics_snapshot()
 
     assert snapshot["market_data"]["websocket"]["state"] == "degraded"
     assert snapshot["market_data"]["forced_stale_symbols"] == ["EURUSD"]
+    assert snapshot["market_data"]["initialized_at"] == "2026-03-17T03:00:00+00:00"
+    assert snapshot["market_data"]["uptime_seconds"] == 42
+    assert snapshot["market_data"]["websocket_closed_bar_counts"]["EURUSD"]["5m"] == 1
 
 
 async def test_fetch_tactical_data_uses_quote_timestamp(

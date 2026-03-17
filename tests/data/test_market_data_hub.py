@@ -216,6 +216,40 @@ async def test_market_data_hub_warmup_uses_rest_backfill() -> None:
     assert provider.calls
 
 
+def test_feed_status_reports_lifecycle_and_closed_bar_counts() -> None:
+    initialized_at = datetime(2026, 3, 17, 3, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 3, 17, 3, 6, 30, tzinfo=timezone.utc)
+    aggregator = FXTickAggregator()
+    ticks = [
+        _tick("EURUSD", 1.10, 1.11, datetime(2026, 3, 17, 3, 0, 5, tzinfo=timezone.utc)),
+        _tick("EURUSD", 1.1001, 1.1101, datetime(2026, 3, 17, 3, 1, 5, tzinfo=timezone.utc)),
+        _tick("EURUSD", 1.1002, 1.1102, datetime(2026, 3, 17, 3, 2, 5, tzinfo=timezone.utc)),
+        _tick("EURUSD", 1.1003, 1.1103, datetime(2026, 3, 17, 3, 3, 5, tzinfo=timezone.utc)),
+        _tick("EURUSD", 1.1004, 1.1104, datetime(2026, 3, 17, 3, 4, 5, tzinfo=timezone.utc)),
+        _tick("EURUSD", 1.1005, 1.1105, datetime(2026, 3, 17, 3, 5, 5, tzinfo=timezone.utc)),
+    ]
+    for tick in ticks:
+        aggregator.add_tick(tick)
+    aggregator.close_elapsed_bars(now=now)
+
+    client = EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD", "USDCHF"])
+    hub = MarketDataHub(
+        aggregator=aggregator,
+        websocket_client=client,
+        rest_provider=DummyProvider([]),
+        symbols=["EURUSD", "USDCHF"],
+        now_provider=lambda: now,
+    )
+    hub._initialized_at = initialized_at
+
+    status = hub.feed_status()
+
+    assert status["initialized_at"] == "2026-03-17T03:00:00+00:00"
+    assert status["uptime_seconds"] == 390
+    assert status["websocket_closed_bar_counts"]["EURUSD"] == {"1m": 6, "5m": 1, "1h": 0}
+    assert status["websocket_closed_bar_counts"]["USDCHF"] == {"1m": 0, "5m": 0, "1h": 0}
+
+
 @pytest.mark.asyncio
 async def test_market_data_hub_quote_fallback_refreshes_from_cached_tail() -> None:
     now = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
