@@ -79,6 +79,7 @@ from src.signal.scanner_bridge import ScannerBridge
 CONFIDENCE_MAP: dict[str, float] = {"high": 0.9, "medium": 0.6, "low": 0.3}
 TACTICAL_EXIT_LOG_HEARTBEAT = timedelta(minutes=15)
 TACTICAL_STALE_BAR_LOG_HEARTBEAT = timedelta(minutes=15)
+TACTICAL_ALERT_HEARTBEAT = timedelta(minutes=15)
 
 
 class Scheduler:
@@ -195,6 +196,7 @@ class Scheduler:
         self._last_tactical_exit_cycle_summary: str = ""
         self._last_tactical_exit_cycle_log_at: datetime | None = None
         self._last_tactical_stale_bar_warning: dict[tuple[str, str, str], tuple[str, datetime]] = {}
+        self._last_tactical_alert: dict[str, tuple[str, datetime]] = {}
 
         # v1.2.0: Event-driven re-scan when a position closes (frees a slot)
         self._rescan_event = asyncio.Event()
@@ -1248,6 +1250,8 @@ class Scheduler:
         retry_count: int = 0,
     ) -> None:
         """Log and alert tactical validation results."""
+        feed_status = self._market_data_hub.feed_status() if self._market_data_hub is not None else {}
+        websocket_status = feed_status.get("websocket", {}) if isinstance(feed_status, dict) else {}
         payload = tactical_result.to_log_dict()
         payload.update(
             {
@@ -1256,6 +1260,13 @@ class Scheduler:
                 "side": side,
                 "retry_count": retry_count,
                 "shadow_mode": self._config.tactical.shadow_mode,
+                "scanner_rejection_reason": self._get_scanner_rejection_reason_code(),
+                "feed_state": websocket_status.get("state", ""),
+                "ws_last_error": websocket_status.get("last_error", ""),
+                "quote_source": tactical_result.provenance.get("quote_source", ""),
+                "bars_5m_source": tactical_result.provenance.get("bars_5m_source", ""),
+                "bars_1h_source": tactical_result.provenance.get("bars_1h_source", ""),
+                "tactical_deadline_at": intent.expires_at.isoformat() if intent.expires_at else "",
             }
         )
         self._log_trade_event(
@@ -1278,15 +1289,25 @@ class Scheduler:
             )
             shadow = "(Shadow)" if self._config.tactical.shadow_mode else ""
             retry_suffix = f" [retry {retry_count}]" if retry_count > 0 else ""
-            await self._send_alert(
-                f"🔬 <b>Tactical Gate {shadow}</b>\n"
-                f"• {intent.symbol} {side}{retry_suffix}\n"
-                f"• Action: <b>{tactical_result.action}</b>\n"
-                f"• Hard: {hard_summary}\n"
-                f"• Soft: {soft_summary}"
-                f" ({tactical_result.soft_score}/{tactical_result.soft_required})\n"
-                f"• {tactical_result.detail}"
+            now = self._now_utc()
+            alert_summary = "|".join(
+                [
+                    tactical_result.action,
+                    tactical_result.resolution,
+                    tactical_result.summary_reason_code,
+                    tactical_result.detail,
+                ]
             )
+            if self._should_send_tactical_alert(intent.id, alert_summary, now):
+                await self._send_alert(
+                    f"🔬 <b>Tactical Gate {shadow}</b>\n"
+                    f"• {intent.symbol} {side}{retry_suffix}\n"
+                    f"• Action: <b>{tactical_result.action}</b>\n"
+                    f"• Hard: {hard_summary}\n"
+                    f"• Soft: {soft_summary}"
+                    f" ({tactical_result.soft_score}/{tactical_result.soft_required})\n"
+                    f"• {tactical_result.detail}"
+                )
 
     async def _retry_tactical_pending(
         self,
@@ -3739,6 +3760,24 @@ class Scheduler:
 
         if now - last[1] >= TACTICAL_STALE_BAR_LOG_HEARTBEAT:
             self._last_tactical_stale_bar_warning[warning_key] = (warning_summary, now)
+            return True
+
+        return False
+
+    def _should_send_tactical_alert(
+        self,
+        intent_id: str,
+        alert_summary: str,
+        now: datetime,
+    ) -> bool:
+        """Throttle repeated identical tactical alerts for the same intent."""
+        last = self._last_tactical_alert.get(intent_id)
+        if last is None or last[0] != alert_summary:
+            self._last_tactical_alert[intent_id] = (alert_summary, now)
+            return True
+
+        if now - last[1] >= TACTICAL_ALERT_HEARTBEAT:
+            self._last_tactical_alert[intent_id] = (alert_summary, now)
             return True
 
         return False

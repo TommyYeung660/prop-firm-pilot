@@ -4038,6 +4038,116 @@ async def test_tactical_wait_extends_expiry_to_cover_retry_budget(
     assert (final.expires_at - final.claim_ts).total_seconds() >= 3600
 
 
+async def test_tactical_wait_alerts_are_throttled_for_identical_retries(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Identical tactical WAIT alerts should not spam Telegram on every retry."""
+    from src.decision.tactical_validator import TacticalResult
+
+    mock_alert = AsyncMock()
+    mock_alert.send = AsyncMock(return_value=True)
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+        alert_service=mock_alert,
+    )
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+        expires_at=datetime(2026, 3, 17, 12, 0, tzinfo=timezone.utc),
+    )
+    result = TacticalResult(action="WAIT", detail="Need another 5min bar")
+
+    with patch.object(
+        sched,
+        "_now_utc",
+        side_effect=[
+            datetime(2026, 3, 17, 10, 0, tzinfo=timezone.utc),
+            datetime(2026, 3, 17, 10, 1, tzinfo=timezone.utc),
+        ],
+    ):
+        await sched._log_tactical_result(intent, "BUY", result, retry_count=0)
+        await sched._log_tactical_result(intent, "BUY", result, retry_count=1)
+
+    mock_alert.send.assert_awaited_once()
+
+
+async def test_tactical_result_event_includes_feed_and_signal_diagnostics(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+    tmp_path,
+):
+    """TACTICAL_RESULT should carry feed and scanner diagnostics for incident triage."""
+    from src.decision.tactical_validator import TacticalResult
+    from src.monitor.trade_journal import TradeJournal
+
+    journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+    mock_scanner.get_last_rejection_reason_code.return_value = "scanner.bundle.target_date_missing"
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+        trade_journal=journal,
+    )
+    sched._market_data_ready = True
+    sched._market_data_hub = MagicMock()
+    sched._market_data_hub.feed_status.return_value = {
+        "websocket": {
+            "state": "degraded",
+            "last_error": "keepalive ping timeout",
+        }
+    }
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+        expires_at=datetime(2026, 3, 17, 12, 0, tzinfo=timezone.utc),
+    )
+    result = TacticalResult(
+        action="WAIT",
+        detail="Need another 5min bar",
+        summary_reason_code="soft.wait.score_below_threshold",
+        provenance={
+            "data_source": "rest_fallback",
+            "quote_source": "rest_fallback",
+            "bars_5m_source": "rest_fallback",
+            "bars_1h_source": "warmup_cache",
+        },
+    )
+
+    await sched._log_tactical_result(intent, "BUY", result, retry_count=1)
+
+    lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+    events = [json.loads(line) for line in lines]
+    tactical_event = next(e for e in events if e["type"] == "TACTICAL_RESULT")
+    assert tactical_event["scanner_rejection_reason"] == "scanner.bundle.target_date_missing"
+    assert tactical_event["feed_state"] == "degraded"
+    assert tactical_event["ws_last_error"] == "keepalive ping timeout"
+    assert tactical_event["quote_source"] == "rest_fallback"
+    assert tactical_event["bars_5m_source"] == "rest_fallback"
+    assert tactical_event["bars_1h_source"] == "warmup_cache"
+    assert tactical_event["tactical_deadline_at"] == "2026-03-17T12:00:00+00:00"
+
+
 async def test_tactical_wait_degrades_to_ready_for_exec_on_retry_expiry(
     config: AppConfig,
     store: DecisionStore,
