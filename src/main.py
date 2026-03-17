@@ -73,6 +73,7 @@ class PropFirmPilot:
         self.scanner = ScannerBridge(
             scanner_path=config.scanner.project_path,
             topk=config.scanner.topk,
+            topk_short=config.scanner.topk_short,
             profile="fx",  # Explicitly use FX profile
             entry_timeframe=config.scheduler.entry_timeframe,
             benchmark=config.scanner.benchmark,
@@ -404,6 +405,7 @@ async def _run_scheduler(config: AppConfig) -> None:
     scanner = ScannerBridge(
         scanner_path=config.scanner.project_path,
         topk=config.scanner.topk,
+        topk_short=config.scanner.topk_short,
         profile="fx",
         entry_timeframe=config.scheduler.entry_timeframe,
         benchmark=config.scanner.benchmark,

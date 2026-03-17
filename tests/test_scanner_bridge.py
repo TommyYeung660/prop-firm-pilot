@@ -566,6 +566,25 @@ class TestScannerBridgeInit:
         assert "--topk" in cmd
         assert cmd[cmd.index("--topk") + 1] == "5"
 
+    def test_run_pipeline_includes_configured_topk_short(self, tmp_path: Path) -> None:
+        """Configured topk_short should be passed to qlib scanner CLI."""
+        _seed_scanner_output_bundle(tmp_path)
+
+        bridge = ScannerBridge(scanner_path=tmp_path, topk_short=1)
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "ok"
+        mock_result.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            signals = bridge.run_pipeline(date="2026-02-16")
+
+        assert len(signals) == 1
+        cmd = mock_run.call_args.args[0]
+        assert "--topk-short" in cmd
+        assert cmd[cmd.index("--topk-short") + 1] == "1"
+
     def test_run_pipeline_retries_without_benchmark_when_cli_rejects_argument(
         self, tmp_path: Path
     ) -> None:
@@ -595,7 +614,6 @@ class TestScannerBridgeInit:
         second_cmd = mock_run.call_args_list[1].args[0]
         assert "--benchmark" in first_cmd
         assert "--benchmark" not in second_cmd
-
 
     def test_run_pipeline_timeout(self, tmp_path: Path) -> None:
         """subprocess.TimeoutExpired → empty list."""

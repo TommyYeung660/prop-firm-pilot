@@ -138,6 +138,8 @@ def _make_mock_signal(
     score: float = 0.85,
     confidence: str = "high",
     market_date: str = "2026-02-16",
+    side: str | None = None,
+    schema_version: str = "fx_signal_v1",
 ) -> MagicMock:
     """Create a mock ScannerSignal."""
     signal = MagicMock()
@@ -148,9 +150,10 @@ def _make_mock_signal(
     signal.drop_distance = 0.05
     signal.topk_spread = 0.02
     signal.scanner_version = "v1.5.0_beta"
-    signal.schema_version = "fx_signal_v1"
+    signal.schema_version = schema_version
     signal.market_date = market_date
     signal.label_version = "cost_aware_directional_return_v1"
+    signal.side = side
     return signal
 
 
@@ -251,6 +254,79 @@ class TestScannerLoop:
         assert intent.scanner_schema_version == "fx_signal_v1"
         assert intent.scanner_market_date == Scheduler._today_str()
         assert intent.scanner_label_version == "cost_aware_directional_return_v1"
+
+    async def test_scanner_loop_creates_long_and_short_intents_with_side(
+        self,
+        scheduler: Scheduler,
+        mock_scanner: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("EURUSD", score=0.83, side="long", schema_version="fx_signal_v2"),
+            _make_mock_signal("USDCHF", score=0.14, side="short", schema_version="fx_signal_v2"),
+        ]
+
+        await _run_loop_once(scheduler, scheduler._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        assert len(intents) == 2
+        assert {intent.scanner_side for intent in intents} == {"long", "short"}
+
+    async def test_scanner_loop_sorts_v2_candidates_by_directional_quality(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        config.scanner.topk = 1
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("EURUSD", score=0.81, side="long", schema_version="fx_signal_v2"),
+            _make_mock_signal("USDCHF", score=0.12, side="short", schema_version="fx_signal_v2"),
+        ]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        assert len(intents) == 1
+        assert intents[0].symbol == "USDCHF"
+        assert intents[0].scanner_side == "short"
+
+    async def test_scanner_loop_duplicate_guard_is_side_aware_for_v2(
+        self,
+        scheduler: Scheduler,
+        mock_scanner: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        store.insert_intent(
+            TradeIntent(
+                trade_date=Scheduler._today_str(),
+                symbol="USDCHF",
+                source="scanner",
+                scanner_schema_version="fx_signal_v2",
+                scanner_side="short",
+            )
+        )
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("USDCHF", score=0.15, side="short", schema_version="fx_signal_v2"),
+            _make_mock_signal("USDCHF", score=0.84, side="long", schema_version="fx_signal_v2"),
+        ]
+
+        await _run_loop_once(scheduler, scheduler._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        assert len(intents) == 2
+        assert {intent.scanner_side for intent in intents} == {"short", "long"}
 
     async def test_logs_structured_cooldown_skip_event(
         self,
@@ -1214,6 +1290,92 @@ class TestProcessClaimedIntent:
         assert latest is not None
         assert latest.status == "timed_out"
         assert latest.suggested_side is None
+
+    async def test_short_candidate_buy_decision_is_cancelled_as_direction_mismatch(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        scheduler._config.tactical.enabled = False
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="USDCHF",
+            decision="BUY",
+            final_state={"risk_report": "countertrend buy"},
+            risk_report="countertrend buy",
+        )
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="USDCHF",
+            scanner_score=0.12,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="short",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        await scheduler._process_claimed_intent("llm-0", claimed)
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+        assert updated.execution_error == "direction_mismatch"
+
+    async def test_long_candidate_sell_decision_is_cancelled_as_direction_mismatch(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        scheduler._config.tactical.enabled = False
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD",
+            decision="SELL",
+            final_state={"risk_report": "countertrend sell"},
+            risk_report="countertrend sell",
+        )
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.88,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        await scheduler._process_claimed_intent("llm-0", claimed)
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+        assert updated.execution_error == "direction_mismatch"
+
+    def test_decision_cache_key_includes_scanner_side(self, scheduler: Scheduler) -> None:
+        intent_long = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="USDCHF",
+            scanner_score=0.12,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        intent_short = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="USDCHF",
+            scanner_score=0.12,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="short",
+        )
+
+        assert scheduler._decision_cache_key(intent_long) != scheduler._decision_cache_key(
+            intent_short
+        )
 
     async def test_pre_filter_logs_threshold_source_and_values(
         self,

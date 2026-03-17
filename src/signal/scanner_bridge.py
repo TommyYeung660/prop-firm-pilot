@@ -144,12 +144,14 @@ class ScannerBridge:
         self,
         scanner_path: str | Path,
         topk: int = 3,
+        topk_short: int = 0,
         profile: str = "fx",
         entry_timeframe: str = "4h",
         benchmark: str = "FX",
     ) -> None:
         self._scanner_path = Path(scanner_path).resolve()
         self._topk = topk
+        self._topk_short = topk_short
         self._profile = profile
         self._entry_timeframe = entry_timeframe
         self._benchmark = benchmark
@@ -269,10 +271,7 @@ class ScannerBridge:
                 candidates.append(signals_path.parents[1] / "metrics" / "metrics.json")
             if len(signals_path.parents) > 2:
                 candidates.append(
-                    signals_path.parents[2]
-                    / "scanner_outputs"
-                    / "metrics"
-                    / "metrics.json"
+                    signals_path.parents[2] / "scanner_outputs" / "metrics" / "metrics.json"
                 )
         return self._first_existing_path(candidates)
 
@@ -295,9 +294,7 @@ class ScannerBridge:
             metrics = self._read_json_file(metrics_path)
         return manifest, metrics
 
-    def _validation_status(
-        self, manifest: dict[str, Any], metrics: dict[str, Any]
-    ) -> str:
+    def _validation_status(self, manifest: dict[str, Any], metrics: dict[str, Any]) -> str:
         for payload in (manifest, metrics):
             validation = payload.get("validation", {})
             if isinstance(validation, dict):
@@ -444,6 +441,8 @@ class ScannerBridge:
             cmd.extend(["--tickers", ",".join(tickers)])
 
         cmd.extend(["--topk", str(self._topk)])
+        if self._topk_short > 0:
+            cmd.extend(["--topk-short", str(self._topk_short)])
         cmd.extend(["--interval", interval])
         cmd_without_benchmark = list(cmd)
         if "--benchmark" in cmd_without_benchmark:
@@ -608,9 +607,10 @@ class ScannerBridge:
                                 f"cadence mismatch for {inst}: {row_cadence} != {manifest_cadence}"
                             )
 
-                        row_date = row.get("market_date", "").strip() or row.get(
-                            "datetime", ""
-                        ).split(" ")[0]
+                        row_date = (
+                            row.get("market_date", "").strip()
+                            or row.get("datetime", "").split(" ")[0]
+                        )
                         if not row_date:
                             raise ValueError(f"missing market_date for {inst}")
 

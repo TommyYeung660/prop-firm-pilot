@@ -15,7 +15,7 @@ from src.config import (
     SchedulerConfig,
 )
 from src.decision.agent_bridge import AgentDecision
-from src.decision.decision_formatter import FormattedDecision
+from src.decision.decision_formatter import FormattedDecision, format_decision
 from src.decision.schemas import TradeIntent
 from src.decision_store.sqlite_store import DecisionStore
 from src.optimize.optimization_state import OptimizationState, Thresholds
@@ -199,3 +199,49 @@ class TestPrePostFiltering:
         assert updated.execution_error is not None
         assert "post-filter" in updated.execution_error
         mock_agents.decide.assert_called_once()
+
+    async def test_short_scanner_quality_uses_one_minus_score_in_prefilter(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+        mock_agents: MagicMock,
+    ) -> None:
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="USDCHF",
+            decision="SELL",
+            final_state={"test": True},
+            risk_report="test",
+        )
+        scheduler._optimization_state = OptimizationState(
+            global_thresholds=Thresholds(min_confidence="high", min_blended_confidence=0.8)
+        )
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="USDCHF",
+            scanner_score=0.12,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="short",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        await scheduler._process_claimed_intent("llm-0", claimed)
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "ready_for_exec"
+        mock_agents.decide.assert_called_once()
+
+
+def test_format_decision_uses_directional_quality_for_short() -> None:
+    formatted = format_decision(
+        symbol="USDCHF",
+        decision="SELL",
+        scanner_score=0.12,
+        scanner_confidence="high",
+        scanner_side="short",
+    )
+
+    assert formatted.confidence_score > 0.8

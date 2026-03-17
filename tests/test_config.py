@@ -26,6 +26,20 @@ def test_e8_one_5k_scanner_benchmark_from_config():
     assert config.scanner.benchmark == "FX"
 
 
+def test_scanner_config_topk_short_default():
+    """Side-aware short export should stay opt-in by default at the model level."""
+    config = ScannerConfig()
+    assert config.topk_short == 0
+
+
+def test_e8_one_5k_scanner_topk_short_from_config():
+    """e8_one_5k_challenge should explicitly activate one short-side candidate."""
+    from src.config import load_config
+
+    config = load_config("config/e8_one_5k_challenge.yaml")
+    assert config.scanner.topk_short == 1
+
+
 def test_scheduler_config_reeval_interval_default():
     """v1.2.0: Default reeval interval should be 2h (7200s)."""
     config = SchedulerConfig()

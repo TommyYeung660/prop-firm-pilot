@@ -83,6 +83,7 @@ class ScannerConfig(BaseModel):
 
     project_path: str = "../../qlib_market_scanner"
     topk: int = 3
+    topk_short: int = 0
     benchmark: str = "FX"
     max_signal_age_days: int = 2  # v1.3.0: reject signals older than N days
 

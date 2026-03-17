@@ -403,16 +403,23 @@ class Scheduler:
                         )
                     await asyncio.sleep(self._session_cadence.get_scanner_interval(self._now_utc()))
                     continue
-                # Per-symbol topk: pick the best signal per symbol, then take topk
-                best_per_symbol: dict[str, Any] = {}
+                # Side-aware scanner bundles may contain both long/short candidates
+                # for the same symbol, so v2 deduplication keys on (symbol, side).
+                best_per_symbol: dict[tuple[str, str | None], Any] = {}
                 for signal in signals:
-                    sym = signal.instrument
-                    if sym not in best_per_symbol or signal.score > best_per_symbol[sym].score:
-                        best_per_symbol[sym] = signal
-                candidates = sorted(best_per_symbol.values(), key=lambda s: s.score, reverse=True)
+                    dedup_key = self._signal_dedup_key(signal)
+                    existing = best_per_symbol.get(dedup_key)
+                    signal_quality = self._signal_quality_score(signal)
+                    if existing is None or signal_quality > self._signal_quality_score(existing):
+                        best_per_symbol[dedup_key] = signal
+                candidates = sorted(
+                    best_per_symbol.values(),
+                    key=self._signal_quality_score,
+                    reverse=True,
+                )
                 topk_signals = candidates[: self._config.scanner.topk]
                 logger.info(
-                    "Scanner loop: {} signals -> {} symbols -> {} candidates",
+                    "Scanner loop: {} signals -> {} candidate keys -> {} candidates",
                     len(signals),
                     len(best_per_symbol),
                     len(topk_signals),
@@ -443,17 +450,21 @@ class Scheduler:
                                 available_slots,
                             )
                             break
+                        scanner_side = self._signal_scanner_side(signal)
+                        scanner_direction_quality = self._signal_quality_score(signal)
                         # Idempotency: skip if an in-progress intent already exists
                         exists = await asyncio.to_thread(
                             self._store.intent_exists,
                             signal.instrument,
                             today,
                             "scanner",
+                            scanner_side,
                         )
                         if exists:
                             logger.info(
-                                "Scanner loop: in-progress intent exists for {}, skipping",
+                                "Scanner loop: in-progress intent exists for {} ({}), skipping",
                                 signal.instrument,
+                                scanner_side or "legacy",
                             )
                             continue
 
@@ -687,6 +698,7 @@ class Scheduler:
                             scanner_schema_version=getattr(signal, "schema_version", ""),
                             scanner_market_date=getattr(signal, "market_date", today),
                             scanner_label_version=getattr(signal, "label_version", ""),
+                            scanner_side=scanner_side,
                             source="scanner",
                             expires_at=self._now_utc() + timedelta(hours=4),
                         )
@@ -700,17 +712,21 @@ class Scheduler:
                                 "trade_date": intent.trade_date,
                                 "scanner_score": intent.scanner_score,
                                 "scanner_confidence": intent.scanner_confidence,
+                                "scanner_side": intent.scanner_side,
+                                "scanner_direction_quality": scanner_direction_quality,
                             },
                         )
                         logger.info(
-                            "Scanner loop: created intent for {} ({}/{})",
+                            "Scanner loop: created intent for {} ({}, {}/{})",
                             signal.instrument,
+                            scanner_side or "legacy",
                             created_count,
                             available_slots,
                         )
+                        side_label = f" [{scanner_side}]" if scanner_side else ""
                         await self._send_alert(
                             f"\U0001f50d <b>Intent Created</b>\n"
-                            f"\u2022 {signal.instrument} (score={signal.score:.2f}, "
+                            f"\u2022 {signal.instrument}{side_label} (score={signal.score:.2f}, "
                             f"conf={signal.confidence})"
                         )
 
@@ -835,6 +851,8 @@ class Scheduler:
             return
 
         # Build qlib_data from scanner fields
+        scanner_side = self._intent_scanner_side(intent)
+        scanner_direction_quality = self._scanner_quality_score(intent)
         qlib_data = {
             "score": intent.scanner_score,
             "signal_strength": intent.scanner_confidence,
@@ -842,6 +860,8 @@ class Scheduler:
             "score_gap": intent.scanner_score_gap,
             "drop_distance": intent.scanner_drop_distance,
             "topk_spread": intent.scanner_topk_spread,
+            "scanner_side": scanner_side,
+            "scanner_direction_quality": scanner_direction_quality,
         }
         historical_pnl_context = self._build_historical_pnl_context(intent.symbol)
         if historical_pnl_context:
@@ -855,7 +875,7 @@ class Scheduler:
             "threshold_min_confidence": thresholds.min_confidence,
             "threshold_min_blended_confidence": thresholds.min_blended_confidence,
         }
-        pre_blended = self._blend_confidence(intent.scanner_confidence, intent.scanner_score)
+        pre_blended = self._blend_confidence(intent.scanner_confidence, scanner_direction_quality)
         if not self._passes_threshold(intent.scanner_confidence, pre_blended, thresholds):
             cancelled = await self._cancel_intent_safe(
                 worker_id=worker_id,
@@ -921,12 +941,45 @@ class Scheduler:
                 **threshold_context,
             },
         )
+        if decision.is_actionable and not self._decision_matches_scanner_side(
+            scanner_side, decision.decision
+        ):
+            cancelled = await self._cancel_intent_safe(
+                worker_id=worker_id,
+                intent_id=intent.id,
+                reason="direction_mismatch",
+                context="scanner_direction_guard",
+            )
+            if cancelled:
+                self._log_trade_event(
+                    "INTENT_CANCELLED",
+                    {
+                        "intent_id": intent.id,
+                        "symbol": intent.symbol,
+                        "reason": "direction_mismatch",
+                        "scanner_side": scanner_side,
+                        "decision": decision.decision,
+                        **threshold_context,
+                    },
+                )
+                logger.warning(
+                    "LLM worker {}: intent {} cancelled due to direction mismatch "
+                    "(scanner_side={}, decision={})",
+                    worker_id,
+                    intent.id,
+                    scanner_side,
+                    decision.decision,
+                )
+            self._metrics.record_llm_result("cancel")
+            return
         if self._memory_journal is not None:
             try:
                 context = {
                     "intent_id": intent.id,
                     "scanner_score": intent.scanner_score,
                     "scanner_confidence": intent.scanner_confidence,
+                    "scanner_side": scanner_side,
+                    "scanner_direction_quality": scanner_direction_quality,
                     "score_gap": intent.scanner_score_gap,
                     "drop_distance": intent.scanner_drop_distance,
                     "topk_spread": intent.scanner_topk_spread,
@@ -1028,6 +1081,7 @@ class Scheduler:
                 decision=decision.decision,
                 scanner_score=intent.scanner_score,
                 scanner_confidence=intent.scanner_confidence,
+                scanner_side=scanner_side,
                 agent_state=decision.final_state,
             )
             if not self._passes_threshold(
@@ -1224,8 +1278,10 @@ class Scheduler:
 
     def _decision_cache_key(self, intent: TradeIntent) -> str:
         """Build a stable cache fingerprint from strategic inputs only."""
+        scanner_side = self._intent_scanner_side(intent) or ""
+        scanner_quality = self._scanner_quality_score(intent)
         return (
-            f"{intent.scanner_score:.6f}|{intent.scanner_confidence}|"
+            f"{scanner_quality:.6f}|{intent.scanner_confidence}|{scanner_side}|"
             f"{intent.scanner_score_gap:.6f}|{intent.scanner_drop_distance:.6f}|"
             f"{intent.scanner_topk_spread:.6f}|{self._latest_market_event_context}"
         )
@@ -3454,9 +3510,7 @@ class Scheduler:
                         await self._run_equity_check_once(reason="news_event")
                         lead = headlines[0]
                         await self._send_alert(
-                            f"📰 <b>News Trigger</b>\n"
-                            f"• {lead['title']}\n"
-                            f"• Triggering early scan"
+                            f"📰 <b>News Trigger</b>\n• {lead['title']}\n• Triggering early scan"
                         )
                 except asyncio.CancelledError:
                     logger.info("News event loop: cancelled")
@@ -3803,9 +3857,7 @@ class Scheduler:
             data.data_source = ""
 
     @staticmethod
-    def _format_tactical_exit_cycle_entry(
-        symbol: str, evaluation: TacticalExitEvaluation
-    ) -> str:
+    def _format_tactical_exit_cycle_entry(symbol: str, evaluation: TacticalExitEvaluation) -> str:
         """Format one tactical-exit result for operator-visible cycle logs."""
         decision = evaluation.decision
         summary = f"{symbol}:{decision.action}/{decision.state}/{decision.reason}"
@@ -3972,6 +4024,57 @@ class Scheduler:
         if instrument:
             return instrument.pip_size
         return 0.0001  # Default for major FX pairs
+
+    @staticmethod
+    def _normalize_scanner_side(side: Any) -> str | None:
+        """Normalize optional scanner side labels from mixed inputs."""
+        if not isinstance(side, str):
+            return None
+        normalized = side.strip().lower()
+        if normalized in {"long", "short"}:
+            return normalized
+        return None
+
+    def _signal_scanner_side(self, signal: Any) -> str | None:
+        """Return side for fx_signal_v2 scanner rows, else None."""
+        schema_version = str(getattr(signal, "schema_version", "") or "").strip()
+        if schema_version != "fx_signal_v2":
+            return None
+        return self._normalize_scanner_side(getattr(signal, "side", None))
+
+    def _intent_scanner_side(self, intent: TradeIntent) -> str | None:
+        """Return normalized persisted side for side-aware intents."""
+        if intent.scanner_schema_version != "fx_signal_v2":
+            return None
+        return self._normalize_scanner_side(intent.scanner_side)
+
+    def _signal_quality_score(self, signal: Any) -> float:
+        """Compute direction-aware quality for scanner ranking."""
+        score = float(getattr(signal, "score", 0.0) or 0.0)
+        if self._signal_scanner_side(signal) == "short":
+            return round(1.0 - score, 6)
+        return score
+
+    def _scanner_quality_score(self, intent: TradeIntent) -> float:
+        """Compute direction-aware quality for thresholding and cache keys."""
+        score = float(intent.scanner_score or 0.0)
+        if self._intent_scanner_side(intent) == "short":
+            return round(1.0 - score, 6)
+        return score
+
+    def _signal_dedup_key(self, signal: Any) -> tuple[str, str | None]:
+        """Deduplicate by symbol for legacy signals, or by symbol+side for v2."""
+        return (signal.instrument, self._signal_scanner_side(signal))
+
+    @classmethod
+    def _decision_matches_scanner_side(cls, scanner_side: str | None, decision: str) -> bool:
+        """Scanner direction is confirm/veto only; actionable reversals are invalid."""
+        normalized_side = cls._normalize_scanner_side(scanner_side)
+        if normalized_side == "long":
+            return decision in {"BUY", "HOLD"}
+        if normalized_side == "short":
+            return decision in {"SELL", "HOLD"}
+        return True
 
     @staticmethod
     def _confidence_score(confidence: str) -> float:

@@ -21,6 +21,7 @@ symbols:  # 本帳號啟用的交易標的；scanner、market data、execution�
 
 scanner:
   topk: 5  # 每輪 daily scanner 最多保留前 5 個分數最高的 symbol 候選
+  topk_short: 1  # 啟用 1 個 short-side scanner 候選，交由下游 TradingAgents / tactical entry 再把關
   benchmark: "FX"  # 傳給 qlib scanner 的市場/benchmark 標識；外匯組合使用 FX
 
 execution:
