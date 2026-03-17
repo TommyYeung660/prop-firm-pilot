@@ -1,12 +1,12 @@
 # PropFirmPilot v1.5.0 之後 — `v1.5.0` 到 `v1.5.9` 單一入口路線圖
 
-> **更新日期**: `2026-03-17`
+> **更新日期**: `2026-03-18`
 >
 > **文件角色**: `v1.5.0` 到 `v1.5.9` 的唯一入口 roadmap
 >
 > **適用範圍**: `prop-firm-pilot` 主線規劃，並直接納入 `qlib_market_scanner` / `qlib_rd_agent` / `TradingAgents` 的必要依賴
 >
-> **當前主線狀態**: `v1.5.0_preview` 已於 `2026-03-17` 在 `v1.5.0_beta_2` baseline 上落地 bounded capital utilization uplift preview；`v1.5.0_stable` 仍待 exposure / memory / validation acceptance closure
+> **當前主線狀態**: `v1.5.0_preview` 已於 `2026-03-17` 在 `v1.5.0_beta_2` baseline 上落地 bounded capital utilization uplift preview，並在 stable acceptance window 內完成 side-aware scanner live activation（`fx_signal_v2`、`topk_short = 1`、direction-aware gating）；`v1.5.0_stable` 仍待 exposure / memory / validation acceptance closure
 >
 > **閱讀原則**: 若你只想知道 `1.5.0` 到 `1.5.9` 應做什麼，先看這份；不需要先回頭讀複數文檔
 
@@ -42,6 +42,7 @@
 | **Close control plane** | canonical close schema、`CloseControlPlane`、`CloseReconciler` 已落地 | `v1.4.8` |
 | **Scanner contract gate** | `manifest/schema/version/validation` 檢查、required signal columns 驗證已落地 | `v1.5.0_beta` |
 | **Scanner metadata persistence** | `scanner_version`、`scanner_schema_version`、`scanner_market_date`、`scanner_label_version` 已能落盤 | `v1.5.0_beta` |
+| **Side-aware scanner live ingestion** | `fx_signal_v2`、`scanner_side` persistence、direction-aware ranking / threshold / veto、legacy daily-cycle parity guard 已落地 | `v1.5.0_preview` acceptance window |
 | **Version identity baseline** | `qlib_market_scanner` 的 scanner contract baseline 已凍結在 `1.5.0_beta` / `v1.5.0_beta`；`prop-firm-pilot` 主線則已 bump 到 `1.5.0_preview` / `v1.5.0_preview`，明確標記 bounded uplift preview lane | `v1.5.0_beta` → `v1.5.0_preview` |
 | **FX scanner release cadence decision** | upstream 已完成第一輪 FX cadence research，canonical cadence 凍結為 `1d` | `qlib_market_scanner v1.5.0_beta` |
 | **Runtime bundle family isolation** | runtime `outputs/*` 與 legacy `data/shared_export/*` 已分流，不再混讀 sidecars | `v1.5.0_beta` |
@@ -86,7 +87,7 @@
 | **Bounded capital utilization uplift** | preview implementation 已在本 repo 落地；`v1.5.0 stable` 尚需 multi-day validation、integrated acceptance，並與 exposure / memory / validation closure 一起驗收 |
 | **Portfolio / exposure guard v1** | base/quote currency exposure budget、同向集中暴露上限、低相關 setup budget |
 | **Trade-memory v1** | raw event / reflection / retrieval 三層分工、schema freeze、quality gate |
-| **Validation closure** | multi-day market-open validation、live-vs-research consistency review、P0/P1 tactical incident 收斂 |
+| **Validation closure** | multi-day market-open validation、live-vs-research consistency review、P0/P1 tactical incident 收斂，以及 side-aware mixed long/short live path acceptance |
 | **Stable acceptance gate** | 把 scanner contract、entry / exit control plane、memory、exposure guard 放到同一個 release gate 內驗收 |
 
 ### 2.4 明確延後到 `1.5.x`
@@ -208,11 +209,15 @@
 - `BoundedCapitalAllocator` 依 `default_risk_pct * max_positions` 的名目預算、當前 `open_positions` 與 `scanner_confidence`，計算 `effective_risk_pct`
 - `PositionSizer` 支援 risk override，execution path 會把 uplift 後的 `risk_pct` 傳進 sizing
 - `ExecutionEngine` 會把 `risk_pct` 與 capital allocation metadata 寫入 execution meta，保留 audit trail
+- live scanner path 已啟用 side-aware ingestion：`ScannerBridge` 支援 `fx_signal_v2`、`TradeIntent` / SQLite 持久化 `scanner_side`、scheduler 以 direction-aware quality 排序 mixed long/short bundles
+- `TradingAgents` 在 side-aware path 中只允許 confirm / veto scanner direction；反方向 actionable decision 會被取消為 `direction_mismatch`
+- legacy `run_daily_cycle()` 已與 scheduler 對齊 side-aware ranking 與 reverse-side hard veto，避免 non-scheduler path 留下舊邏輯缺口
 - 專案 version identity 已切到 `1.5.0_preview` / `v1.5.0_preview`，包裝版本為 `1.5.0rc0`
 
 這一版同時建立在已核對的 upstream 事實上：
 
 - `qlib_market_scanner` 已穩定提供 FX `1d` canonical cadence、`dsr_net_oos_daily_v1` selection metric、`label_version` / `research_cadences` metadata，以及 cadence scorecard / decision artifacts
+- `qlib_market_scanner` 已補上 `--topk-short` runtime activation，讓 preview live lane 可以顯式輸出 bounded short candidates
 - `qlib_market_scanner` 已完成 RD-Agent `candidate -> promoted -> report` factor gate
 - `qlib_rd_agent` 已完成 `discovered_factors.yaml`、`candidate_factors.yaml`、`factor_manifest.json` 與 `runs/<run_id>/...` archive upload contract
 
@@ -220,7 +225,7 @@
 
 - exposure guard v1 integrated acceptance
 - trade-memory v1 與 quality gate
-- multi-day market-open validation 與 integrated stable acceptance gate
+- multi-day market-open validation、side-aware mixed long/short acceptance 與 integrated stable acceptance gate
 
 ---
 
@@ -489,6 +494,7 @@
 - market data freshness semantics 已收斂
 - `v1.5.0_beta_2` 的 repair scope 已被明確定義
 - bounded capital utilization uplift preview 已在本 repo 落地
+- side-aware scanner live activation 已在 preview acceptance window 落地
 - `qlib_market_scanner` / `qlib_rd_agent` 的 upstream implementation 已核對為實作存在
 
 ### 11.2 還不能說「已完成」的
@@ -496,6 +502,7 @@
 - tactical entry 已達 production-grade reliability
 - tactical exit 已達 fully auditable stable closure
 - bounded capital utilization uplift 已完成 stable acceptance 與 multi-day validation
+- side-aware mixed long/short live path 已完成 multi-day stable acceptance 與 operator evidence 累積
 - trade-memory contract 已穩定
 - portfolio / exposure control 已達 stable v1
 - integrated validation gate 已成熟
@@ -505,7 +512,7 @@
 `1.5.x` 的角色不是大改世界觀，而是：
 
 - 讓 `v1.5.0 stable` 真正站穩
-- 先經過 `v1.5.0_beta_2` repair，再把 `v1.5.0_preview` 的 bounded uplift 納入 stable acceptance，之後補 memory 與 bounded research productization
+- 先經過 `v1.5.0_beta_2` repair，再把 `v1.5.0_preview` 的 bounded uplift 與 side-aware scanner live path 一起納入 stable acceptance，之後補 memory 與 bounded research productization
 - 累積足夠證據，決定 `1.6.0` 要往哪裡走
 
 ---
@@ -514,4 +521,4 @@
 
 如果只用一句話描述這份 roadmap：
 
-> `v1.5.0_beta_2` 先做 operational repair；`v1.5.0_preview` 先落地 bounded capital utilization uplift；`v1.5.0` 再完成第一個 stable acceptance gate；之後的 `1.5.1-1.5.9` 才沿著 correctness、validation、memory、capital efficiency 與 bounded follow-up 繼續推進。`
+> `v1.5.0_beta_2` 先做 operational repair；`v1.5.0_preview` 先落地 bounded capital utilization uplift 與 side-aware scanner live activation；`v1.5.0` 再完成第一個 stable acceptance gate；之後的 `1.5.1-1.5.9` 才沿著 correctness、validation、memory、capital efficiency 與 bounded follow-up 繼續推進。`

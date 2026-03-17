@@ -123,6 +123,67 @@ class PropFirmPilot:
         # ── State ───────────────────────────────────────────────────────
         self._matchtrader: MatchTraderClient | None = None
 
+    @staticmethod
+    def _normalize_scanner_side(side: Any) -> str | None:
+        """Normalize optional scanner side labels from mixed inputs."""
+        if not isinstance(side, str):
+            return None
+        normalized = side.strip().lower()
+        if normalized in {"long", "short"}:
+            return normalized
+        return None
+
+    def _signal_scanner_side(self, signal: Any) -> str | None:
+        """Return normalized side for side-aware scanner rows only."""
+        schema_version = str(getattr(signal, "schema_version", "") or "").strip()
+        if schema_version != "fx_signal_v2":
+            return None
+        return self._normalize_scanner_side(getattr(signal, "side", None))
+
+    def _signal_quality_score(self, signal: Any) -> float:
+        """Compute direction-aware scanner quality for mixed long/short ranking."""
+        score = float(getattr(signal, "score", 0.0) or 0.0)
+        if self._signal_scanner_side(signal) == "short":
+            return round(1.0 - score, 6)
+        return score
+
+    def _select_top_signals(self, signals: list[Any]) -> list[Any]:
+        """Select top signals for daily-cycle mode.
+
+        Legacy v1 bundles preserve the scanner's incoming order.
+        Side-aware v2 bundles are re-ranked by direction-aware quality so
+        long and short candidates compete on the same scale.
+        """
+        topk = self.config.scanner.topk
+        if topk <= 0:
+            return []
+
+        has_side_aware_signal = any(
+            self._signal_scanner_side(signal) is not None for signal in signals
+        )
+        if not has_side_aware_signal:
+            return signals[:topk]
+
+        ranked_signals = sorted(
+            signals,
+            key=lambda signal: (
+                -self._signal_quality_score(signal),
+                int(getattr(signal, "rank", 999999) or 999999),
+                str(getattr(signal, "instrument", "") or ""),
+            ),
+        )
+        return ranked_signals[:topk]
+
+    @classmethod
+    def _decision_matches_scanner_side(cls, scanner_side: str | None, decision: str) -> bool:
+        """Scanner direction is confirm/veto only; actionable reversals are invalid."""
+        normalized_side = cls._normalize_scanner_side(scanner_side)
+        if normalized_side == "long":
+            return decision in {"BUY", "HOLD"}
+        if normalized_side == "short":
+            return decision in {"SELL", "HOLD"}
+        return True
+
     async def run_daily_cycle(self, date_override: str | None = None) -> None:
         """Execute the full daily trading cycle.
 
@@ -176,7 +237,7 @@ class PropFirmPilot:
             logger.info("PropFirmPilot: received {} signals", len(signals))
 
             # Step 4: Run TradingAgents decisions on top signals
-            top_signals = signals[: self.config.scanner.topk]
+            top_signals = self._select_top_signals(signals)
             for signal in top_signals:
                 qlib_data = signal.to_qlib_data()
                 decision = self.agents.decide(
@@ -187,6 +248,16 @@ class PropFirmPilot:
 
                 if not decision.is_actionable:
                     logger.info("PropFirmPilot: {} → HOLD, skipping", signal.instrument)
+                    continue
+
+                scanner_side = self._signal_scanner_side(signal)
+                if not self._decision_matches_scanner_side(scanner_side, decision.decision):
+                    logger.warning(
+                        "PropFirmPilot: {} → {} rejected (scanner_side={})",
+                        signal.instrument,
+                        decision.decision,
+                        scanner_side,
+                    )
                     continue
 
                 # Type narrowing: is_actionable guarantees BUY or SELL

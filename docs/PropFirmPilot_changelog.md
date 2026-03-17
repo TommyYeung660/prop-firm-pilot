@@ -16,6 +16,23 @@ Versioning: [Semantic Versioning](https://semver.org/).
 > **Status**: `v1.5.0_preview` 已於 `2026-03-17` 成為當前主線 preview release，建立在 `v1.5.0_beta_2` operational repair baseline 之上
 > **Reason**: core pilot 已先完成 bounded capital utilization uplift preview implementation，並同步核對 `qlib_market_scanner` / `qlib_rd_agent` 的 upstream contract 已落地；下一步不是再做同一輪 feature 實作，而是把 preview uplift 與 exposure / memory / validation closure 一起驗收成 `v1.5.0 stable`
 
+### Implemented: Side-Aware Scanner Live Activation
+- side-aware FX scanner live path 現已在 preview acceptance window 落地；`config/e8_one_5k_challenge.yaml` 啟用 `scanner.topk_short = 1`，讓 live ingestion 可以同時接受 long 與 bounded short 候選
+- `ScannerBridge` 現在支援 `fx_signal_v2`，會把 `scanner_side` 與 `scanner_direction_quality` 帶進 TradingAgents context；`TradeIntent` / `DecisionStore` 也會持久化 `scanner_side`
+- scheduler 現在會以 `(symbol, side)` 去重，對 mixed long/short bundle 以 direction-aware quality 排序，並把 side-aware quality 套進 blended confidence、decision cache key 與 decision formatting
+- TradingAgents 對 scanner side 只剩 confirm / veto 權限；reverse actionable decision 會被取消為 `direction_mismatch`
+- legacy `PropFirmPilot.run_daily_cycle()` 現在也補齊同樣的 direction-aware ranking 與 reverse-side hard veto，不再只在 scheduler mode 正確
+
+### Cross-Repo Note
+- `qlib_market_scanner` 已補上 `--topk-short` runtime activation，signals export 會保留 `configured_topk_short`，作為 preview live activation 的上游契約
+- 本 repo 這輪工作不是重做 scanner alpha，而是把 upstream side-aware bundle 變成 live-safe ingestion contract
+
+### Validated
+- `uv run pytest tests/test_config.py tests/test_scanner_bridge.py tests/scheduler/test_llm_thresholds.py tests/test_scheduler.py -q` → `218 passed`
+- `uv run pytest tests/test_main_daily_cycle.py tests/test_main_logging.py -q` → `5 passed`
+- `uv run ruff check src/main.py tests/test_main_daily_cycle.py` → `All checks passed!`
+- `uv run ruff format --check src/main.py tests/test_main_daily_cycle.py` → `2 files already formatted`
+
 ### Planned: v1.5.0 (stable) — Stable Acceptance On Top Of Preview Uplift
 - 定義第一個「穩定版」基準：系統必須能穩定可靠地進出場，而不是只靠 hotfix 維持可用
 - 將 `v1.5.0_preview` 已落地的 bounded capital utilization uplift 納入 multi-day stable acceptance，而不是把 uplift 本身重新實作一次
@@ -33,6 +50,7 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ### Tracking
 - Roadmap: `docs/PropFirmPilot_v1.5.0_road_map.md`
 - Cross-repo note: `docs/PropFirmPilot_v1.5.0_Cross_Repo_Change_Note.md`
+- Implementation plan: `docs/plans/2026-03-17-v1.5.0-side-aware-live-activation.md`
 
 ---
 
