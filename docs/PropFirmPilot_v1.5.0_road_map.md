@@ -1,12 +1,12 @@
 # PropFirmPilot v1.5.0 之後 — `v1.5.0` 到 `v1.5.9` 單一入口路線圖
 
-> **更新日期**: `2026-03-16`
+> **更新日期**: `2026-03-17`
 >
 > **文件角色**: `v1.5.0` 到 `v1.5.9` 的唯一入口 roadmap
 >
 > **適用範圍**: `prop-firm-pilot` 主線規劃，並直接納入 `qlib_market_scanner` / `TradingAgents` 的必要依賴
 >
-> **當前主線狀態**: `v1.5.0_beta` 已合入 `main`
+> **當前主線狀態**: `v1.5.0_beta` 已合入 `main`，`v1.5.0_beta_2` 定義為 `v1.5.0_stable` 前的 operational repair gate
 >
 > **閱讀原則**: 若你只想知道 `1.5.0` 到 `1.5.9` 應做什麼，先看這份；不需要先回頭讀複數文檔
 
@@ -46,20 +46,37 @@
 | **FX scanner release cadence decision** | upstream 已完成第一輪 FX cadence research，canonical cadence 凍結為 `1d` | `qlib_market_scanner v1.5.0_beta` |
 | **Runtime bundle family isolation** | runtime `outputs/*` 與 legacy `data/shared_export/*` 已分流，不再混讀 sidecars | `v1.5.0_beta` |
 
-### 2.2 屬於 `v1.5.0 stable` 必須完成
+### 2.2 `v1.5.0_beta_2` 是 stable 前必經修復閘
+
+根據 `2026-03-16` 晚間到 `2026-03-17` 上午這輪 production run，`v1.5.0 stable` 前必須先經過 `v1.5.0_beta_2` 的 repair gate。
+
+`v1.5.0_beta_2` 的角色不是新增 feature，而是把這輪長時間運行暴露出的 P0 / P1 incident 收斂掉，避免系統在 market data、signal freshness、tactical state transition 與 operator observability 上繼續帶病進 stable。
+
+| 嚴重度 | `v1.5.0_beta_2` 必須完成的 repair |
+|---|---|
+| **P0** | market data freshness / websocket degradation guard：禁止把明顯 stale 的 REST bars 繼續送進 tactical / scanner live path |
+| **P0** | stale signal hard block：新 UTC 日若找不到 target date signals，不得 fallback 後繼續當成可交易日訊號 |
+| **P0** | tactical pending timeout / expired claim recycle closure：intent 必須 deterministic 地完成、取消或失敗，不可長時間 recycle 漂移 |
+| **P1** | EquityMonitor transaction nesting 修復：避免長跑中出現 `cannot start a transaction within a transaction` |
+| **P1** | Telegram tactical gate 限流 / 去重：降低 operator noise，不再出現高頻重複提示 |
+| **P1** | incident diagnostics closure：讓 operator 能在單一 incident bundle 內看懂 freshness、signal date、intent state、close facts |
+
+### 2.3 屬於 `v1.5.0 stable` 必須完成
 
 以下項目若未完成，`v1.5.0` 只能停留在 beta integration baseline，不能保守地稱為 stable：
 
 | 主題 | `v1.5.0 stable` 必須完成的 closure |
 |---|---|
+| **Operational repair closure** | `v1.5.0_beta_2` 所定義的 P0 / P1 repairs 必須先收斂，stable 不接受帶病升版 |
 | **Tactical entry integrity** | deterministic reason code、source provenance、score breakdown、state transition closure |
 | **Tactical exit audit closure** | trigger source、broker read-back、journal consistency、postmortem replayability |
+| **Bounded capital utilization uplift** | 把「資金使用率偏低」作為 stable 的 bounded optimization 處理，在不削弱 safety guard 前提下改善過度保守 gating |
 | **Portfolio / exposure guard v1** | base/quote currency exposure budget、同向集中暴露上限、低相關 setup budget |
 | **Trade-memory v1** | raw event / reflection / retrieval 三層分工、schema freeze、quality gate |
 | **Validation closure** | multi-day market-open validation、live-vs-research consistency review、P0/P1 tactical incident 收斂 |
 | **Stable acceptance gate** | 把 scanner contract、entry / exit control plane、memory、exposure guard 放到同一個 release gate 內驗收 |
 
-### 2.3 明確延後到 `1.5.x`
+### 2.4 明確延後到 `1.5.x`
 
 以下項目重要，但不應把它們混進 `v1.5.0 stable` 的最小 closure：
 
@@ -69,9 +86,9 @@
 | **TradingAgents intraday schema 大改** | 需要建立在 memory v1、entry / exit taxonomy、scanner metadata 穩定之後 |
 | **LLM layer ablation** | 屬於 `1.5.x` 的 validation accumulation，不是 `v1.5.0` 的 minimum gate |
 | **Memory ablation** | 需等 trade-memory contract 先凍結，再做可信比較 |
-| **更完整的 portfolio construction / capital allocation** | `v1.5.0` 只要求 exposure guard v1，不要求完整投組引擎 |
+| **更完整的 portfolio construction / capital allocation** | `v1.5.0 stable` 只做 bounded capital utilization uplift；完整 session / setup / currency / correlation-aware capital engine 仍延後 |
 
-### 2.4 明確不屬於 `1.5.x`
+### 2.5 明確不屬於 `1.5.x`
 
 以下內容不應在 `1.5.x` 被當成默認承諾：
 
@@ -114,62 +131,104 @@
 
 | 版本 | 角色 | 主軸 |
 |---|---|---|
-| `1.5.0` | 第一個 stable gate | entry / exit / memory / exposure / validation 的最低 stable closure |
+| `1.5.0_beta_2` | beta hardening repair gate | 只修這輪生產 incident：freshness、stale signals、tactical timeout、monitor / alert hardening |
+| `1.5.0` | 第一個 stable gate | entry / exit / memory / exposure / validation 的最低 stable closure，外加 bounded capital utilization uplift |
 | `1.5.1` | post-stable correctness sweep | 修正 first stable run 暴露的 correctness 與 taxonomy drift |
 | `1.5.2` | validation accumulation | 強化 live-vs-research consistency 與 multi-day acceptance evidence |
 | `1.5.3` | operator + risk hardening | 收斂 operator diagnostics、scheduler consistency、exposure guard v1 hardening |
 | `1.5.4` | memory foundation | trade-memory schema freeze、raw / reflection / retrieval 分層 |
 | `1.5.5` | memory quality gate | lesson quality gate、retrieval policy、memory observability |
-| `1.5.6` | capital efficiency v1 | setup budget、session budget、currency / correlation-aware allocation uplift |
+| `1.5.6` | capital efficiency v1 | 在 stable 的 bounded uplift 之上，完成 session / setup / currency / correlation-aware allocation |
 | `1.5.7` | bounded scanner follow-up | 不改 runtime default 的前提下，補 scanner horizon / timeframe metadata productization |
 | `1.5.8` | agent alignment | TradingAgents intraday-aware contract alignment，仍以 bounded change 為主 |
 | `1.5.9` | next-major preflight | 統整 `1.5.x` 證據，決定 `1.6.0` 的真正主題 |
 
 ---
 
-## 5. `v1.5.0` — Stable Gate Closure
+## 5. `v1.5.0_beta_2` — Operational Hardening Repair Release
 
 ### 5.1 版本定位
 
+`v1.5.0_beta_2` 是 `v1.5.0 stable` 前的修復閘，不是新 feature release。
+
+它的任務是根據這輪 production run 暴露出的真實 incident，優先收斂 operational correctness：市場資料 freshness、signal freshness、tactical state transition、monitor reliability 與 operator noise。只要這些問題沒有先修掉，就不應直接把 `v1.5.0_beta` 宣稱為 stable 候選。
+
+### 5.2 按嚴重度排序的修復清單
+
+| 嚴重度 | 修復主題 | 修復要求 | 驗收標準 |
+|---|---|---|---|
+| **P0** | **Market data freshness / websocket degradation guard** | 當 websocket 斷線或 handshake timeout 時，live path 不得繼續使用顯著 stale 的 REST 1m/5m/1h bars 參與 tactical 判斷 | 長時間斷線時系統會 deterministic 地 block / degrade，而不是靜默使用數小時前資料 |
+| **P0** | **Stale signal hard block on new UTC day** | 若 target date signals 不存在，scanner 可記錄 incident，但不得 fallback 後直接建立可交易 intents | 新 UTC 日不存在 fresh signal 時，系統明確停在 non-tradable state |
+| **P0** | **Tactical pending timeout / expired claim recycle closure** | 釐清 intent 在 BUY / SELL 後為何卡在 pending，讓 timeout 會導向 deterministic cancel / fail，而不是反覆 recycle | 不再出現長時間 `tactical retry aborted` 與 claim recycle 漂移 |
+| **P1** | **EquityMonitor transaction nesting** | 修正 monitor 與持久化之間的 transaction 邊界 | 長跑期間不再出現 `cannot start a transaction within a transaction` |
+| **P1** | **Telegram tactical gate throttling / dedupe** | tactical gate 類提示需有節流與去重 | 不再出現固定週期洗版式重複通知 |
+| **P1** | **Operator diagnostics / incident bundle closure** | 將 freshness、signal date、intent state、close facts 聚合到可直接讀的 incident artifact | operator 不需手工拼多份 log 才知道一次 incident 的 root cause |
+| **P2** | **Startup scanner contract self-check hardening** | 補強 runtime bundle compatibility 提示，避免再出現 beta 啟動後才發現 manifest 不合 | contract 不合時能即時 fail fast 並留下明確 diagnostics |
+
+### 5.3 明確不納入 `v1.5.0_beta_2`
+
+- 不處理「資金使用率偏低」本身，這是優化不是 repair
+- 不做完整 capital efficiency / portfolio optimizer
+- 不做 scanner cadence promotion
+- 不做大規模 TradingAgents schema / prompt 重構
+
+### 5.4 完成條件
+
+- 新 UTC 日不會再使用 stale signals 建立 live intents
+- 顯著 stale 的 REST fallback bars 不會再進入 tactical live path
+- tactical pending path 可 deterministic 收斂，不再靠 recycle 漂移
+- EquityMonitor 可穩定跑過多小時 market-open 視窗
+- Telegram tactical gate 通知頻率被節流到 operator 可接受水位
+
+---
+
+## 6. `v1.5.0` — Stable Gate Closure
+
+### 6.1 版本定位
+
 `v1.5.0` 是第一個 stable milestone，不是新 feature 大包。
 
-它的任務是把 `v1.5.0_beta` 已經吸收進主線的 scanner contract、version identity 與 `1d` cadence baseline，升級成可以被保守驗收的 stable trading system gate。
+它的任務是把 `v1.5.0_beta` 已經吸收進主線的 scanner contract、version identity 與 `1d` cadence baseline，經過 `v1.5.0_beta_2` repair gate 後，升級成可以被保守驗收的 stable trading system gate。
 
-### 5.2 本 repo 主責
+### 6.2 本 repo 主責
 
 - 完成 tactical entry production-grade closure
 - 完成 tactical exit audit / read-back / postmortem closure
+- 上線 bounded capital utilization uplift，改善過度保守 gating 造成的低資金使用率
 - 上線 exposure guard v1
 - 上線 trade-memory v1 與 quality gate v1
 - 完成 multi-day stable acceptance gate
 
-### 5.3 Cross-repo 依賴
+### 6.3 Cross-repo 依賴
 
 | Repo | `v1.5.0` 需要它完成什麼 |
 |---|---|
-| `qlib_market_scanner` | 維持 `1d` canonical cadence、runtime bundle contract 穩定、metadata 不漂移 |
+| `qlib_market_scanner` | 維持 `1d` canonical cadence、runtime bundle contract 穩定、metadata 不漂移，並支援 bounded capital utilization uplift 所需的穩定 score metadata |
 | `TradingAgents` | 暫不要求大改，但其 risk output / lesson consumption 至少不能破壞 stable contract |
 
-### 5.4 這版明確不做什麼
+### 6.4 這版明確不做什麼
 
 - 不把 runtime scanner 預設升到 `1h`
 - 不做大規模 TradingAgents prompt / tool 架構重寫
 - 不做完整 portfolio optimizer
+- 不把資金使用率優化擴張成完整 capital engine 重寫
 - 不宣稱已證明長期盈利
 
-### 5.5 完成條件
+### 6.5 完成條件
 
+- `v1.5.0_beta_2` 所定義的 P0 / P1 repair 已先收斂
 - entry verdict 有完整 deterministic reason taxonomy
 - exit action 有完整 broker read-back 與 canonical close facts
+- bounded capital utilization uplift 已落地，且未削弱 safety-critical guard
 - exposure guard v1 在 live path 可用
 - trade-memory schema 與 quality gate 已落地
 - 多日 market-open validation 無重複 P0/P1 tactical correctness incident
 
 ---
 
-## 6. `v1.5.1` 到 `v1.5.3` — Stability / Validation Accumulation Wave
+## 7. `v1.5.1` 到 `v1.5.3` — Stability / Validation Accumulation Wave
 
-### 6.1 `v1.5.1` — Post-Stable Correctness Sweep
+### 7.1 `v1.5.1` — Post-Stable Correctness Sweep
 
 **定位**
 第一個 stable 後修正版，只修 first stable run 暴露出的 correctness 與 schema drift。
@@ -190,7 +249,7 @@
 **完成條件**
 - `v1.5.0` 首輪實盤暴露的 correctness incidents 全部被歸零或有明確緩解
 
-### 6.2 `v1.5.2` — Validation Accumulation Release
+### 7.2 `v1.5.2` — Validation Accumulation Release
 
 **定位**
 把 stable 後的 multi-day evidence 累積成正式 acceptance 資產。
@@ -211,7 +270,7 @@
 **完成條件**
 - 可以對同一段 sample 回答 research 假設與 live 事實是否一致
 
-### 6.3 `v1.5.3` — Operator And Risk Hardening
+### 7.3 `v1.5.3` — Operator And Risk Hardening
 
 **定位**
 把 stable 之後仍偏手工排查的操作面與 exposure guard v1 做硬化。
@@ -233,9 +292,9 @@
 
 ---
 
-## 7. `v1.5.4` 到 `v1.5.6` — Memory / Capital Efficiency Wave
+## 8. `v1.5.4` 到 `v1.5.6` — Memory / Capital Efficiency Wave
 
-### 7.1 `v1.5.4` — Trade-Memory Foundation
+### 8.1 `v1.5.4` — Trade-Memory Foundation
 
 **定位**
 建立 stable trade-memory contract，而不是只累積更多文字或 debug payload。
@@ -255,7 +314,7 @@
 **完成條件**
 - 記憶相關欄位第一次形成 stable schema，而不是各模塊各自擴張
 
-### 7.2 `v1.5.5` — Memory Quality Gate
+### 8.2 `v1.5.5` — Memory Quality Gate
 
 **定位**
 在 memory foundation 之上，阻止低品質事件直接進長期記憶。
@@ -274,10 +333,10 @@
 **完成條件**
 - 記憶系統先證明自己不會持續累積垃圾，再談效果提升
 
-### 7.3 `v1.5.6` — Capital Efficiency v1
+### 8.3 `v1.5.6` — Capital Efficiency v1
 
 **定位**
-將系統從單筆保守風控，提升到初步的資金效率控制。
+建立在 `v1.5.0 stable` 已完成的 bounded capital utilization uplift 之上，進一步把系統從單筆保守風控，提升到完整的 capital efficiency v1。
 
 **本 repo 主責**
 - 建立 session / setup / currency / correlation-aware budget v1
@@ -297,9 +356,9 @@
 
 ---
 
-## 8. `v1.5.7` 到 `v1.5.9` — Bounded Research Productization / Next-Major Prep Wave
+## 9. `v1.5.7` 到 `v1.5.9` — Bounded Research Productization / Next-Major Prep Wave
 
-### 8.1 `v1.5.7` — Bounded Scanner Follow-Up
+### 9.1 `v1.5.7` — Bounded Scanner Follow-Up
 
 **定位**
 只在不改變 `1d` runtime default 的前提下，補 scanner follow-up research 的 product boundary。
@@ -317,7 +376,7 @@
 **完成條件**
 - downstream 已能理解更細的 scanner metadata，但 stable default 不變
 
-### 8.2 `v1.5.8` — TradingAgents Alignment
+### 9.2 `v1.5.8` — TradingAgents Alignment
 
 **定位**
 在 memory v1、capital efficiency v1、scanner metadata 更清楚之後，再做 bounded 的 agent alignment。
@@ -337,7 +396,7 @@
 **完成條件**
 - agent alignment 變成 bounded、可驗證的 contract work，而不是任意 prompt 演化
 
-### 8.3 `v1.5.9` — `1.6.0` Preflight
+### 9.3 `v1.5.9` — `1.6.0` Preflight
 
 **定位**
 整理整個 `1.5.x` 的證據與缺口，決定 `1.6.0` 的真正主題。
@@ -362,11 +421,12 @@
 
 ---
 
-## 9. Cross-Repo 責任邊界
+## 10. Cross-Repo 責任邊界
 
 | 主題 | `prop-firm-pilot` 主責 | `qlib_market_scanner` 依賴 | `TradingAgents` 依賴 |
 |---|---|---|---|
-| **Stable gate** | entry / exit / exposure / memory / validation closure | 穩定輸出 `1d` scanner contract | 不破壞既有 stable contract |
+| **Beta_2 repair gate** | freshness / stale signal / tactical timeout / monitor hardening | runtime bundle contract 與 signal-date metadata 需可被可靠驗證 | 不可讓 decision state transition 破壞 deterministic failure handling |
+| **Stable gate** | entry / exit / exposure / memory / validation closure，加上 bounded capital utilization uplift | 穩定輸出 `1d` scanner contract 與 score metadata | 不破壞既有 stable contract |
 | **Memory** | schema、quality gate、pipeline | 提供穩定 scanner metadata | lesson consumption / retrieval policy 配合 |
 | **Capital efficiency** | exposure budget、allocation discipline | 提供可分群的穩定 metadata | risk output 要能承載 portfolio context |
 | **Follow-up research productization** | bounded ingestion / metadata support | bounded metadata extension，不改 default cadence | bounded context alignment |
@@ -374,36 +434,38 @@
 
 ---
 
-## 10. `v1.5.0 stable` 的最終判定
+## 11. `v1.5.0 stable` 的最終判定
 
-### 10.1 可以說「已做了」的
+### 11.1 可以說「已做了」的
 
 - scanner contract freeze 已進主線
 - `1d` canonical FX cadence 已凍結
 - runtime bundle contract 已可被 pilot 可靠 ingest
 - close control plane 已建立
 - market data freshness semantics 已收斂
+- `v1.5.0_beta_2` 的 repair scope 已被明確定義
 
-### 10.2 還不能說「已完成」的
+### 11.2 還不能說「已完成」的
 
 - tactical entry 已達 production-grade reliability
 - tactical exit 已達 fully auditable stable closure
+- bounded capital utilization uplift 已穩定落地
 - trade-memory contract 已穩定
 - portfolio / exposure control 已達 stable v1
 - integrated validation gate 已成熟
 
-### 10.3 對 `1.5.x` 的正確期待
+### 11.3 對 `1.5.x` 的正確期待
 
 `1.5.x` 的角色不是大改世界觀，而是：
 
 - 讓 `v1.5.0 stable` 真正站穩
-- 把 memory / capital efficiency / bounded research productization 補齊
+- 先經過 `v1.5.0_beta_2` repair，再把 bounded capital utilization、memory 與 bounded research productization 補齊
 - 累積足夠證據，決定 `1.6.0` 要往哪裡走
 
 ---
 
-## 11. 一句話版結論
+## 12. 一句話版結論
 
 如果只用一句話描述這份 roadmap：
 
-> `v1.5.0` 是第一個 stable gate closure；`1.5.1-1.5.3` 收斂 correctness 與 validation；`1.5.4-1.5.6` 建立 memory 與 capital efficiency；`1.5.7-1.5.9` 只做 bounded follow-up 與 `1.6.0` preflight，不重開大賭注。`
+> `v1.5.0_beta_2` 先做 operational repair；`v1.5.0` 完成第一個 stable gate 並補 bounded capital utilization uplift；`1.5.1-1.5.3` 收斂 correctness 與 validation；`1.5.4-1.5.6` 建立 memory 與完整 capital efficiency；`1.5.7-1.5.9` 只做 bounded follow-up 與 `1.6.0` preflight，不重開大賭注。`
