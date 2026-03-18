@@ -31,6 +31,14 @@ class OperationalMetrics:
         self._llm_success: int = 0
         self._llm_cancel: int = 0
         self._llm_error: int = 0
+        self._entry_scanner_candidates: int = 0
+        self._entry_intents_created: int = 0
+        self._entry_llm_vetoes: int = 0
+        self._entry_llm_cancels: int = 0
+        self._entry_tactical_waits: int = 0
+        self._entry_tactical_expires: int = 0
+        self._entry_no_trade_count: int = 0
+        self._entry_no_trade_reasons: dict[str, int] = {}
         self._tactical_pass: int = 0
         self._tactical_block: int = 0
         self._tactical_wait_count: int = 0
@@ -68,6 +76,30 @@ class OperationalMetrics:
             self._llm_error += 1
         else:
             logger.warning("OperationalMetrics: unknown LLM result '{}'", result)
+
+    def record_entry_funnel_event(self, event: str) -> None:
+        """Record raw entry-funnel evidence events."""
+        if event == "scanner_candidate":
+            self._entry_scanner_candidates += 1
+        elif event == "intent_created":
+            self._entry_intents_created += 1
+        elif event == "llm_cancel":
+            self._entry_llm_cancels += 1
+        elif event == "tactical_wait":
+            self._entry_tactical_waits += 1
+        elif event == "tactical_expire":
+            self._entry_tactical_expires += 1
+        else:
+            logger.warning("OperationalMetrics: unknown entry funnel event '{}'", event)
+
+    def record_llm_veto(self) -> None:
+        """Record a veto outcome emitted by the decision layer."""
+        self._entry_llm_vetoes += 1
+
+    def record_no_trade(self, reason: str) -> None:
+        """Record a no-trade terminal bucket and reason."""
+        self._entry_no_trade_count += 1
+        self._entry_no_trade_reasons[reason] = self._entry_no_trade_reasons.get(reason, 0) + 1
 
     def record_tactical_result(
         self,
@@ -194,11 +226,34 @@ class OperationalMetrics:
             "market_data_rest_rows_fetched": self._market_data_rest_rows_fetched,
         }
 
+    def snapshot(self) -> dict[str, object]:
+        """Return extended metrics with funnel/churn evidence."""
+        summary: dict[str, object] = dict(self.get_summary())
+        summary["entry_funnel"] = {
+            "scanner_candidates": self._entry_scanner_candidates,
+            "intents_created": self._entry_intents_created,
+            "llm_vetoes": self._entry_llm_vetoes,
+            "llm_cancels": self._entry_llm_cancels,
+            "tactical_waits": self._entry_tactical_waits,
+            "tactical_expires": self._entry_tactical_expires,
+            "no_trade_count": self._entry_no_trade_count,
+            "no_trade_reasons": dict(self._entry_no_trade_reasons),
+        }
+        return summary
+
     def reset(self) -> None:
         """Reset all counters (call at day boundary)."""
         self._llm_success = 0
         self._llm_cancel = 0
         self._llm_error = 0
+        self._entry_scanner_candidates = 0
+        self._entry_intents_created = 0
+        self._entry_llm_vetoes = 0
+        self._entry_llm_cancels = 0
+        self._entry_tactical_waits = 0
+        self._entry_tactical_expires = 0
+        self._entry_no_trade_count = 0
+        self._entry_no_trade_reasons.clear()
         self._tactical_pass = 0
         self._tactical_block = 0
         self._tactical_wait_count = 0
