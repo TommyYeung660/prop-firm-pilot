@@ -207,3 +207,29 @@ def test_config_loads_websocket_primary_market_data_block():
     assert config.websocket.enabled is True
     assert config.websocket.use_as_primary_market_data is True
     assert "EURUSD" in config.websocket.symbols
+
+
+def test_e8_one_5k_first_batch_jpy_crosses_are_enabled_everywhere():
+    """JPY first batch must stay aligned across symbols, websocket, and instruments."""
+    from src.config import load_config
+
+    config = load_config("config/e8_one_5k_challenge.yaml")
+    expected_symbols = [
+        "EURUSD",
+        "GBPUSD",
+        "USDJPY",
+        "AUDUSD",
+        "NZDUSD",
+        "USDCAD",
+        "USDCHF",
+        "EURJPY",
+        "AUDJPY",
+        "CADJPY",
+    ]
+
+    assert config.symbols == expected_symbols
+    assert config.websocket.symbols == expected_symbols
+    assert list(config.instruments.keys()) == expected_symbols
+    assert config.instruments["EURJPY"].pip_size == 0.01
+    assert config.instruments["AUDJPY"].pip_size == 0.01
+    assert config.instruments["CADJPY"].pip_size == 0.01

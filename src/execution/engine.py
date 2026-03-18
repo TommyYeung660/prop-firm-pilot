@@ -37,6 +37,10 @@ from src.execution.capital_allocator import (
 )
 from src.execution.instrument_registry import InstrumentRegistry
 from src.execution.matchtrader_client import MatchTraderClient
+from src.execution.pip_value_resolver import (
+    quote_to_reference_price,
+    resolve_usd_pip_value_for_symbol,
+)
 from src.execution.position_sizer import PositionSizer
 from src.monitor.alert_service import AlertService
 from src.monitor.trade_journal import TradeJournal
@@ -201,11 +205,13 @@ class ExecutionEngine:
 
         # Step 3: Build TradePlan
         try:
+            pip_value_override = await self._resolve_live_pip_value_override(symbol)
             trade_plan, allocation = self._build_trade_plan(
                 intent,
                 side,
                 account_snapshot.equity,
                 account_snapshot.open_positions,
+                pip_value_override=pip_value_override,
             )
         except Exception as e:
             logger.error("ExecutionEngine: failed to build trade plan for {}: {}", intent_id, e)
@@ -451,6 +457,7 @@ class ExecutionEngine:
         side: Literal["BUY", "SELL"],
         account_equity: float,
         open_positions: int,
+        pip_value_override: float | None = None,
     ) -> tuple[TradePlan, CapitalAllocationDecision]:
         """Build a TradePlan from intent fields and position sizing.
 
@@ -477,13 +484,13 @@ class ExecutionEngine:
             open_positions=open_positions,
             scanner_confidence=intent.scanner_confidence,
         )
-        volume = self._sizer.calculate_volume(
-            symbol,
-            account_equity,
-            sl_pips,
-            risk_pct_override=allocation.effective_risk_pct,
-        )
-        risk_amount = self._sizer.calculate_risk_amount(symbol, volume, sl_pips)
+        size_kwargs: dict[str, float] = {"risk_pct_override": allocation.effective_risk_pct}
+        risk_kwargs: dict[str, float] = {}
+        if pip_value_override is not None:
+            size_kwargs["pip_value_override"] = pip_value_override
+            risk_kwargs["pip_value_override"] = pip_value_override
+        volume = self._sizer.calculate_volume(symbol, account_equity, sl_pips, **size_kwargs)
+        risk_amount = self._sizer.calculate_risk_amount(symbol, volume, sl_pips, **risk_kwargs)
 
         logger.debug(
             "ExecutionEngine: trade plan for {} — {} {:.2f} lots, "
@@ -508,6 +515,47 @@ class ExecutionEngine:
             ),
             allocation,
         )
+
+    async def _resolve_live_pip_value_override(self, symbol: str) -> float | None:
+        """Resolve live USD pip values for JPY-quoted pairs."""
+        instrument = self._config.instruments.get(symbol)
+        if instrument is None or not symbol.endswith("JPY"):
+            return None
+
+        try:
+            if symbol == "USDJPY":
+                quote = await self._matchtrader.get_quote(self._resolve_broker_symbol(symbol))
+                symbol_price = quote_to_reference_price(quote.bid, quote.ask)
+                resolved = resolve_usd_pip_value_for_symbol(
+                    symbol,
+                    static_pip_value=instrument.pip_value,
+                    symbol_price=symbol_price,
+                )
+            else:
+                usd_jpy_symbol = self._resolve_broker_symbol("USDJPY")
+                quote = await self._matchtrader.get_quote(usd_jpy_symbol)
+                usd_jpy_price = quote_to_reference_price(quote.bid, quote.ask)
+                resolved = resolve_usd_pip_value_for_symbol(
+                    symbol,
+                    static_pip_value=instrument.pip_value,
+                    usd_jpy_price=usd_jpy_price,
+                )
+        except Exception as e:
+            logger.warning(
+                "ExecutionEngine: pip-value override unavailable for {}: {}. "
+                "Using static pip value {}",
+                symbol,
+                e,
+                instrument.pip_value,
+            )
+            return instrument.pip_value
+
+        logger.debug(
+            "ExecutionEngine: resolved pip value for {} -> ${:.4f}/pip/lot",
+            symbol,
+            resolved,
+        )
+        return resolved
 
     async def _get_account_snapshot(self) -> AccountSnapshot:
         """Fetch current account state from MatchTrader for compliance checks.

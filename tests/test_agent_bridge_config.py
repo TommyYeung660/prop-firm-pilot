@@ -50,6 +50,13 @@ class TestBuildAgentConfig:
         assert tv["get_insider_sentiment"] == "local"
         assert tv["get_insider_transactions"] == "local"
 
+    def test_fx_pairs_include_first_batch_jpy_crosses(self) -> None:
+        """Agent config must expose the first-batch JPY crosses to TradingAgents."""
+        config = build_agent_config()
+        assert "EURJPY" in config["fx_pairs"]
+        assert "AUDJPY" in config["fx_pairs"]
+        assert "CADJPY" in config["fx_pairs"]
+
 
 # ── AgentBridge config passthrough tests ───────────────────────────────────
 

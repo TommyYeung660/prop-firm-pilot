@@ -43,6 +43,10 @@ from src.decision.agent_bridge import AgentBridge
 from src.decision.fx_analyst_config import build_agent_config
 from src.execution.matchtrader_client import MatchTraderClient
 from src.execution.order_manager import OrderManager, TradeSignal
+from src.execution.pip_value_resolver import (
+    quote_to_reference_price,
+    resolve_usd_pip_value_for_symbol,
+)
 from src.execution.position_sizer import PositionSizer
 from src.monitor.alert_service import AlertService
 from src.monitor.equity_monitor import EquityMonitor
@@ -333,16 +337,26 @@ class PropFirmPilot:
         default_sl_pips = 50.0
         default_tp_pips = 100.0
 
+        pip_value_override = await self._resolve_live_pip_value_override(client, symbol)
+
         # Calculate volume via PositionSizer
+        size_kwargs: dict[str, float] = {}
+        risk_kwargs: dict[str, float] = {}
+        if pip_value_override is not None:
+            size_kwargs["pip_value_override"] = pip_value_override
+            risk_kwargs["pip_value_override"] = pip_value_override
+
         volume = self.sizer.calculate_volume(
             symbol=symbol,
             account_equity=balance_info.equity,
             stop_loss_pips=default_sl_pips,
+            **size_kwargs,
         )
         risk_amount = self.sizer.calculate_risk_amount(
             symbol=symbol,
             volume=volume,
             stop_loss_pips=default_sl_pips,
+            **risk_kwargs,
         )
 
         # Build TradePlan
@@ -434,6 +448,43 @@ class PropFirmPilot:
             await self.alert_service.system_error(
                 f"Trade failed: {side} {symbol} — {order.message}"
             )
+
+    async def _resolve_live_pip_value_override(
+        self,
+        client: MatchTraderClient,
+        symbol: str,
+    ) -> float | None:
+        """Resolve live USD pip values for JPY-quoted pairs in legacy mode."""
+        instrument = self.config.instruments.get(symbol)
+        if instrument is None or not symbol.endswith("JPY"):
+            return None
+
+        try:
+            if symbol == "USDJPY":
+                quote = await client.get_quote(symbol)
+                symbol_price = quote_to_reference_price(quote.bid, quote.ask)
+                return resolve_usd_pip_value_for_symbol(
+                    symbol,
+                    static_pip_value=instrument.pip_value,
+                    symbol_price=symbol_price,
+                )
+
+            usd_jpy_quote = await client.get_quote("USDJPY")
+            usd_jpy_price = quote_to_reference_price(usd_jpy_quote.bid, usd_jpy_quote.ask)
+            return resolve_usd_pip_value_for_symbol(
+                symbol,
+                static_pip_value=instrument.pip_value,
+                usd_jpy_price=usd_jpy_price,
+            )
+        except Exception as e:
+            logger.warning(
+                "PropFirmPilot: pip-value override unavailable for {}: {}. "
+                "Using static pip value {}",
+                symbol,
+                e,
+                instrument.pip_value,
+            )
+            return instrument.pip_value
 
     async def run_monitor_only(self) -> None:
         """Monitor-only mode — watch existing positions without opening new ones."""

@@ -538,6 +538,43 @@ class TestPositionSizing:
             risk_pct_override=0.01,
         )
 
+    async def test_jpy_cross_uses_live_usdjpy_pip_value_override(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_sizer: MagicMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """JPY crosses should resolve a live pip-value override before sizing."""
+        from src.execution.matchtrader_client import QuoteInfo
+
+        engine._config.instruments["EURJPY"] = InstrumentConfig(pip_value=6.67, pip_size=0.01)
+        mock_matchtrader.get_quote.side_effect = [
+            QuoteInfo(symbol="USDJPY", bid=149.9, ask=150.1),
+            QuoteInfo(symbol="EURJPY", bid=160.0, ask=160.02),
+        ]
+        mock_matchtrader.open_position.return_value = MagicMock(
+            success=True,
+            position_id="pos_jpy_1",
+            message="OK",
+            raw_response={"openPrice": "160.010"},
+        )
+        mock_matchtrader.modify_position = AsyncMock(
+            return_value=MagicMock(success=True, position_id="pos_jpy_1", message="OK")
+        )
+
+        _make_ready_intent(store, symbol="EURJPY", side="BUY", sl_pips=40.0, tp_pips=80.0)
+        await engine.execute_ready_intents()
+
+        volume_call = mock_sizer.calculate_volume.call_args
+        assert volume_call.args == ("EURJPY", 50000.0, 40.0)
+        assert volume_call.kwargs["risk_pct_override"] == 0.02
+        assert volume_call.kwargs["pip_value_override"] == pytest.approx(6.6667, abs=0.0001)
+
+        risk_call = mock_sizer.calculate_risk_amount.call_args
+        assert risk_call.args == ("EURJPY", 0.10, 40.0)
+        assert risk_call.kwargs["pip_value_override"] == pytest.approx(6.6667, abs=0.0001)
+
 
 # ── Account Snapshot Tests ──────────────────────────────────────────────────
 

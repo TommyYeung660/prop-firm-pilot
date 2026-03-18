@@ -73,6 +73,24 @@ FX_PAIR_CONTEXT: dict[str, dict[str, Any]] = {
         "avg_daily_range_pips": 65,
         "session_bias": "Sydney + London",
     },
+    "EURJPY": {
+        "description": "Euro vs Japanese Yen — rate differential and risk-on cross",
+        "key_drivers": ["ECB/BOJ policy gap", "European risk sentiment", "carry demand"],
+        "avg_daily_range_pips": 95,
+        "session_bias": "London + Tokyo handoff",
+    },
+    "AUDJPY": {
+        "description": "Australian Dollar vs Japanese Yen — high-beta carry cross",
+        "key_drivers": ["RBA stance", "China growth proxies", "global risk appetite"],
+        "avg_daily_range_pips": 105,
+        "session_bias": "Sydney + Tokyo",
+    },
+    "CADJPY": {
+        "description": "Canadian Dollar vs Japanese Yen — oil-linked cyclical cross",
+        "key_drivers": ["BoC policy", "crude oil", "broad risk sentiment"],
+        "avg_daily_range_pips": 85,
+        "session_bias": "NY + Tokyo",
+    },
     "XAUUSD": {
         "description": "Gold vs US Dollar — safe haven / inflation hedge",
         "key_drivers": ["Real yields", "USD strength", "geopolitics", "inflation"],

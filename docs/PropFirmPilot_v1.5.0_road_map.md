@@ -6,7 +6,7 @@
 >
 > **適用範圍**: `prop-firm-pilot` 主線規劃，並直接納入 `qlib_market_scanner` / `qlib_rd_agent` / `TradingAgents` 的必要依賴
 >
-> **當前主線狀態**: `v1.5.0_preview` 已於 `2026-03-17` 在 `v1.5.0_beta_2` baseline 上落地 bounded capital utilization uplift preview；`2026-03-18` 已再吸收一輪 preview incident remediation（Best Day semantics、compliance admission、market-data routing、scanner success contract、Telegram fallback），並在 stable acceptance window 內完成 side-aware scanner live activation（`fx_signal_v2`、`topk_short = 1`、direction-aware gating）；`v1.5.0_stable` 仍待 open-book worst-case natural-SL drawdown guard、exposure / memory / validation acceptance closure
+> **當前主線狀態**: `v1.5.0_preview` 已於 `2026-03-17` 在 `v1.5.0_beta_2` baseline 上落地 bounded capital utilization uplift preview；`2026-03-18` 已再吸收一輪 preview incident remediation（Best Day semantics、compliance admission、market-data routing、scanner success contract、Telegram fallback），並在 stable acceptance window 內完成 side-aware scanner live activation（`fx_signal_v2`、`topk_short = 1`、direction-aware gating）與 first-batch JPY cross rollout（`EURJPY`、`AUDJPY`、`CADJPY` + dynamic JPY pip-value live sizing）；`v1.5.0_stable` 仍待 open-book worst-case natural-SL drawdown guard、exposure / memory / validation acceptance closure
 >
 > **閱讀原則**: 若你只想知道 `1.5.0` 到 `1.5.9` 應做什麼，先看這份；不需要先回頭讀複數文檔
 
@@ -47,6 +47,8 @@
 | **Scanner success contract** | success 已收緊為 process + artifact + ingestion + `target_date` matched | `v1.5.0_preview` remediation |
 | **Alert resilience baseline** | Telegram retry accounting、failure metrics、`ALERT_FALLBACK` secondary sink 已落地 | `v1.5.0_preview` remediation |
 | **Side-aware scanner live ingestion** | `fx_signal_v2`、`scanner_side` persistence、direction-aware ranking / threshold / veto、legacy daily-cycle parity guard 已落地 | `v1.5.0_preview` acceptance window |
+| **JPY first-batch universe rollout** | runtime/scanner 已擴到 10-pair first batch，新增 `EURJPY`、`AUDJPY`、`CADJPY`；`GBPJPY`、`NZDJPY`、`CHFJPY` 仍 deferred | `2026-03-18` rollout |
+| **Dynamic JPY pip-value sizing** | `USDJPY` 與 `*JPY` quote pairs live sizing 改由 `USDJPY` quote 解析 USD pip value，不再只依賴靜態 YAML pip value | `2026-03-18` rollout |
 | **Version identity baseline** | `qlib_market_scanner` 的 scanner contract baseline 已凍結在 `1.5.0_beta` / `v1.5.0_beta`；`prop-firm-pilot` 主線則已 bump 到 `1.5.0_preview` / `v1.5.0_preview`，明確標記 bounded uplift preview lane | `v1.5.0_beta` → `v1.5.0_preview` |
 | **FX scanner release cadence decision** | upstream 已完成第一輪 FX cadence research，canonical cadence 凍結為 `1d` | `qlib_market_scanner v1.5.0_beta` |
 | **Runtime bundle family isolation** | runtime `outputs/*` 與 legacy `data/shared_export/*` 已分流，不再混讀 sidecars | `v1.5.0_beta` |
@@ -55,7 +57,7 @@
 
 | Repo | 已核對落地的實作 | 目前意義 |
 |---|---|---|
-| `qlib_market_scanner` | `FX_TICKERS` 已是 7 pairs，`get_profile_selection_metric("fx") == "dsr_net_oos_daily_v1"` | FX scanner baseline 與 selection metric 已定型，不需重開 universe / metric 討論 |
+| `qlib_market_scanner` | `FX_TICKERS` 已擴到 10-pair first batch（原 7 pairs + `EURJPY/AUDJPY/CADJPY`），`get_profile_selection_metric("fx") == "dsr_net_oos_daily_v1"` | FX scanner baseline 與 selection metric 已定型；JPY cross rollout 採 staged enablement，不需重開 universe / metric 討論 |
 | `qlib_market_scanner` | `PipelineConfig.label_version` 與 `research_cadences` 已落地 | downstream 可依賴穩定的 label / cadence metadata |
 | `qlib_market_scanner` | `experiment_fx_alpha_matrix.py` 已有 cadence matrix runner 與 scorecard / decision artifacts 輸出 | preview / stable 不需再重做 upstream cadence research plumbing |
 | `qlib_market_scanner` | `rdagent_factors.py` 已有 `candidate -> promoted -> report` factor gate | RD-Agent factor ingestion 已有明確 promotion boundary |

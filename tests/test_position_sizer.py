@@ -187,6 +187,17 @@ class TestCalculateVolume:
             )
             assert volume == 0.50
 
+    def test_pip_value_override_changes_volume(self, sizer: PositionSizer) -> None:
+        """Live pip-value overrides should replace the static instrument pip value."""
+        with patch("src.execution.position_sizer.random.uniform", return_value=0.0):
+            volume = sizer.calculate_volume(
+                "EURUSD",
+                10000.0,
+                20.0,
+                pip_value_override=5.0,
+            )
+            assert volume == 1.00
+
 
 # ── calculate_risk_amount ──────────────────────────────────────────────────────
 
@@ -231,6 +242,11 @@ class TestCalculateRiskAmount:
         """Zero stop loss means zero risk."""
         risk = sizer.calculate_risk_amount("EURUSD", 1.0, 0.0)
         assert risk == 0.0
+
+    def test_pip_value_override_changes_risk_amount(self, sizer: PositionSizer) -> None:
+        """Risk calculation should use the live override when provided."""
+        risk = sizer.calculate_risk_amount("EURUSD", 1.0, 50.0, pip_value_override=5.0)
+        assert risk == 250.0
 
 
 # ── max_volume_for_risk ───────────────────────────────────────────────────────
@@ -279,6 +295,11 @@ class TestMaxVolumeForRisk:
         """XAUUSD has max_lot=20.0."""
         volume = sizer.max_volume_for_risk("XAUUSD", 50000.0, 1.0)
         assert volume == 20.0
+
+    def test_pip_value_override_changes_max_volume_for_risk(self, sizer: PositionSizer) -> None:
+        """Risk-budget volume should support the same live pip-value override path."""
+        volume = sizer.max_volume_for_risk("EURUSD", 500.0, 50.0, pip_value_override=5.0)
+        assert volume == 2.0
 
 
 # ── estimate_pip_distance ───────────────────────────────────────────────────────

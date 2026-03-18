@@ -53,6 +53,21 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - TradingAgents 對 scanner side 只剩 confirm / veto 權限；reverse actionable decision 會被取消為 `direction_mismatch`
 - legacy `PropFirmPilot.run_daily_cycle()` 現在也補齊同樣的 direction-aware ranking 與 reverse-side hard veto，不再只在 scheduler mode 正確
 
+### Implemented: First-Batch JPY Cross Universe Expansion
+- `prop-firm-pilot` runtime universe 現在從 7 pairs 擴到 first-batch 10 pairs：`EURUSD / GBPUSD / USDJPY / AUDUSD / NZDUSD / USDCAD / USDCHF / EURJPY / AUDJPY / CADJPY`
+- `config/e8_one_5k_challenge.yaml`、websocket subscription 與 instrument table 已同步擴到這 10 個 symbols，避免 runtime universe / market-data subscription / sizing spec 出現分裂
+- `TradingAgents` FX context 已新增 `EURJPY`、`AUDJPY`、`CADJPY` 的 pair description、macro driver、日均波幅與 session bias，避免新 pair 在 agent prompt 中退回 generic fallback
+- JPY-quoted pairs 的 live sizing 現在不再只依賴靜態 `pip_value`；`ExecutionEngine` 與 legacy `PropFirmPilot` path 都會以 live `USDJPY` quote 解析 USD pip value，讓 `USDJPY / EURJPY / AUDJPY / CADJPY` sizing 與 risk audit 對齊 USD account 真實 pip economics
+- rollout 目前只啟用 first batch：`EURJPY`、`AUDJPY`、`CADJPY`；`GBPJPY`、`NZDJPY`、`CHFJPY` 仍維持 deferred，待 spread / volatility / tactical calibration 完成後再評估
+
+### Cross-Repo Note
+- `qlib_market_scanner` 的 FX baseline / cost table 現在同步擴到 first-batch 10-pair universe，`EURJPY / AUDJPY / CADJPY` 不再落回 generic spread / pip-value defaults
+- 這輪 rollout 同時修正 scanner repo 對 `NZDUSD / USDCAD / USDCHF` 的 cost-table缺口，避免當前 live universe 仍部分吃 default transaction-cost assumptions
+
+### Validated
+- `uv run pytest tests/unit/test_config.py tests/unit/test_dynamic_costs.py -q`（`qlib_market_scanner`）→ `21 passed`
+- `uv run pytest tests/test_config.py tests/test_agent_bridge_config.py tests/test_pip_value_resolver.py tests/test_position_sizer.py tests/test_engine.py tests/test_main_daily_cycle.py tests/test_switchover.py -q`（`prop-firm-pilot`）→ `153 passed`
+
 ### Cross-Repo Note
 - `qlib_market_scanner` 已補上 `--topk-short` runtime activation，signals export 會保留 `configured_topk_short`，作為 preview live activation 的上游契約
 - 本 repo 這輪工作不是重做 scanner alpha，而是把 upstream side-aware bundle 變成 live-safe ingestion contract

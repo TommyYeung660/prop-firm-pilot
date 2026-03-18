@@ -37,6 +37,7 @@ class PositionSizer:
         account_equity: float,
         stop_loss_pips: float,
         risk_pct_override: float | None = None,
+        pip_value_override: float | None = None,
     ) -> float:
         """Calculate optimal lot size for a trade.
 
@@ -53,6 +54,7 @@ class PositionSizer:
             stop_loss_pips: Stop loss distance in pips.
             risk_pct_override: Explicit risk percentage override for bounded
                 capital allocation. Uses config default when omitted.
+            pip_value_override: Live pip value override for quote-sensitive pairs.
 
         Returns:
             Volume in lots (rounded to 0.01 precision).
@@ -73,7 +75,7 @@ class PositionSizer:
             else self._config.default_risk_pct
         )
         risk_amount = account_equity * resolved_risk_pct
-        pip_value = inst.pip_value
+        pip_value = pip_value_override if pip_value_override is not None else inst.pip_value
         volume = risk_amount / (stop_loss_pips * pip_value)
 
         # Apply random offset for anti-duplicate-strategy
@@ -106,6 +108,7 @@ class PositionSizer:
         symbol: str,
         volume: float,
         stop_loss_pips: float,
+        pip_value_override: float | None = None,
     ) -> float:
         """Calculate dollar risk for a given volume and stop loss.
 
@@ -115,6 +118,7 @@ class PositionSizer:
             symbol: FX pair.
             volume: Position size in lots.
             stop_loss_pips: Stop loss distance in pips.
+            pip_value_override: Live pip value override for quote-sensitive pairs.
 
         Returns:
             Risk amount in USD.
@@ -124,7 +128,8 @@ class PositionSizer:
             logger.warning("PositionSizer: unknown instrument '{}', estimating risk", symbol)
             return volume * stop_loss_pips * 10.0  # Assume $10/pip as default
 
-        risk = volume * stop_loss_pips * inst.pip_value
+        pip_value = pip_value_override if pip_value_override is not None else inst.pip_value
+        risk = volume * stop_loss_pips * pip_value
         return round(risk, 2)
 
     def max_volume_for_risk(
@@ -132,6 +137,7 @@ class PositionSizer:
         symbol: str,
         max_risk: float,
         stop_loss_pips: float,
+        pip_value_override: float | None = None,
     ) -> float:
         """Calculate maximum volume that stays within a dollar risk budget.
 
@@ -139,6 +145,7 @@ class PositionSizer:
             symbol: FX pair.
             max_risk: Maximum dollars at risk.
             stop_loss_pips: Stop loss distance in pips.
+            pip_value_override: Live pip value override for quote-sensitive pairs.
 
         Returns:
             Maximum volume in lots (rounded to 0.01).
@@ -147,7 +154,8 @@ class PositionSizer:
         if inst is None or stop_loss_pips <= 0:
             return 0.01
 
-        volume = max_risk / (stop_loss_pips * inst.pip_value)
+        pip_value = pip_value_override if pip_value_override is not None else inst.pip_value
+        volume = max_risk / (stop_loss_pips * pip_value)
         volume = max(inst.min_lot, min(inst.max_lot, volume))
         return round(volume, 2)
 
