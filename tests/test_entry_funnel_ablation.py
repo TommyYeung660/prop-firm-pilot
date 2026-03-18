@@ -148,7 +148,8 @@ def test_analyze_entry_funnel_ablation_recommends_llm_downgrade_when_b_not_bette
     assert result["recommendation"] == "downgrade_llm_to_confirm_veto"
 
 
-def test_analyze_entry_funnel_ablation_recommends_no_trade_shadow_mode_when_all_modes_fail() -> None:
+def test_analyze_entry_funnel_ablation_recommends_no_trade_shadow_mode_when_all_modes_fail(
+) -> None:
     snapshots = [
         {
             "entry_funnel_mode": "scanner_tactical",
