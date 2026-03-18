@@ -126,6 +126,7 @@
 | **`1h` / hybrid scanner promotion** | `1d` canonical cadence 才剛凍結，stable 版本先收斂 contract 與 validation，不應立刻翻轉 runtime 預設 |
 | **TradingAgents intraday schema 大改** | 需要建立在 memory v1、entry / exit taxonomy、scanner metadata 穩定之後 |
 | **LLM layer ablation** | 屬於 `1.5.x` 的 validation accumulation，不是 `v1.5.0` 的 minimum gate |
+| **Entry funnel ablation / reality check** | 用來驗證 `scanner / LLM / tactical / no-trade` 的增量價值，屬於 `v1.5.x` validation accumulation；`tactical-only` 只屬實驗，不是 `v1.5.0 stable` 預設架構 |
 | **Memory ablation** | 需等 trade-memory contract 先凍結，再做可信比較 |
 | **更完整的 portfolio construction / capital allocation** | `v1.5.0 stable` 只做 bounded capital utilization uplift；完整 session / setup / currency / correlation-aware capital engine 仍延後 |
 

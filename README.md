@@ -13,6 +13,11 @@
 - `FX baseline`: `EURUSD`, `GBPUSD`, `USDJPY`, `AUDUSD`, `NZDUSD`, `USDCAD`, `USDCHF`
 - `research cadences`: `1d`, `1h`, `4h+1h`, `1d+1h`
 
+補充定位:
+
+- `entry funnel ablation / reality check` 屬於 `v1.5.x` validation accumulation，不是 `v1.5.0 stable` 的 minimum gate。
+- 現行 bounded live default 仍以 `scanner -> LLM -> tactical` 為主線；`tactical-only` 只屬實驗模式，不是新的預設架構。
+
 ## v1.5.0 Scanner Contract
 
 PropFirmPilot 在 live ingest 前預期 scanner bundle 至少包含以下 artifact：
