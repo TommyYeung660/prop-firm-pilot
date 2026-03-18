@@ -1235,6 +1235,74 @@ class TestLLMWorkerLoop:
         assert "scanner_side" in updated.execution_error
         mock_agents.decide.assert_not_called()
 
+    async def test_scanner_tactical_mode_ignores_llm_pre_filter(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """scanner_tactical should not be cancelled by LLM pre-filter thresholds."""
+        scheduler._config.scheduler.entry_funnel_mode = "scanner_tactical"
+        scheduler._config.tactical.enabled = False
+        scheduler._config.scheduler.llm_threshold_override.enabled = True
+        scheduler._config.scheduler.llm_threshold_override.min_confidence = "high"
+        scheduler._config.scheduler.llm_threshold_override.min_blended_confidence = 0.95
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.20,
+            scanner_confidence="low",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "ready_for_exec"
+        assert updated.suggested_side == "BUY"
+        assert updated.execution_error != "LLM pre-filter: low confidence"
+        mock_agents.decide.assert_not_called()
+
+    async def test_scanner_tactical_mode_ignores_llm_post_filter(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """scanner_tactical should not be cancelled by LLM post-filter thresholds."""
+        scheduler._config.scheduler.entry_funnel_mode = "scanner_tactical"
+        scheduler._config.tactical.enabled = False
+        scheduler._config.scheduler.llm_threshold_override.enabled = True
+        scheduler._config.scheduler.llm_threshold_override.min_confidence = "low"
+        scheduler._config.scheduler.llm_threshold_override.min_blended_confidence = 0.9
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.95,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        with patch("src.scheduler.scheduler.format_decision") as mock_format:
+            mock_format.return_value = MagicMock(
+                confidence_score=0.1,
+                suggested_sl_pips=25.0,
+                suggested_tp_pips=50.0,
+            )
+            await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "ready_for_exec"
+        assert updated.suggested_side == "BUY"
+        assert updated.execution_error != "LLM post-filter: low confidence"
+        mock_agents.decide.assert_not_called()
+
     async def test_scanner_llm_tactical_mode_keeps_current_path(
         self,
         scheduler: Scheduler,
@@ -1288,6 +1356,34 @@ class TestLLMWorkerLoop:
         assert updated is not None
         assert updated.status == "cancelled"
         assert mark_ready.call_count == 0
+
+    async def test_no_trade_mode_skips_llm_decide(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """no_trade should not call AgentBridge.decide at all."""
+        scheduler._config.scheduler.entry_funnel_mode = "no_trade"
+        scheduler._config.tactical.enabled = False
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+        assert updated.execution_error is not None
+        assert "no_trade mode" in updated.execution_error
+        mock_agents.decide.assert_not_called()
 
     async def test_tactical_only_mode_rejects_scanner_intents(
         self,

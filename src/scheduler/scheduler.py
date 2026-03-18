@@ -892,59 +892,14 @@ class Scheduler:
             )
             return
 
-        # Block mock-based decisions from executing real trades
-        if self._uses_llm() and self._agents.using_mock:
-            logger.critical(
-                "LLM worker {}: BLOCKING intent {} — AgentBridge is using MockTradingGraph. "
-                "Real TradingAgents must be loaded for live trading.",
-                worker_id,
-                intent.id,
-            )
-            await self._cancel_intent_safe(
-                worker_id=worker_id,
-                intent_id=intent.id,
-                reason="Mock LLM fallback active — refusing to trade with random decisions",
-                context="mock_llm_guard",
-            )
-            await self._send_alert(
-                f"🚫 <b>Trade BLOCKED</b>\n"
-                f"• Intent: {intent.symbol}\n"
-                f"• Reason: Mock LLM fallback active — TradingAgents import failed"
-            )
-            return
-
-        # Build qlib_data from scanner fields
         scanner_side = self._intent_scanner_side(intent)
         scanner_direction_quality = self._scanner_quality_score(intent)
-        qlib_data = {
-            "score": intent.scanner_score,
-            "signal_strength": intent.scanner_confidence,
-            "confidence": intent.scanner_confidence,
-            "score_gap": intent.scanner_score_gap,
-            "drop_distance": intent.scanner_drop_distance,
-            "topk_spread": intent.scanner_topk_spread,
-            "scanner_side": scanner_side,
-            "scanner_direction_quality": scanner_direction_quality,
-        }
-        historical_pnl_context = self._build_historical_pnl_context(intent.symbol)
-        if historical_pnl_context:
-            qlib_data["historical_pnl_context"] = historical_pnl_context
-        if self._latest_market_event_context:
-            qlib_data["market_event_context"] = self._latest_market_event_context
-
-        thresholds, threshold_source = self._get_effective_thresholds(intent.symbol)
-        threshold_context = {
-            "threshold_source": threshold_source,
-            "threshold_min_confidence": thresholds.min_confidence,
-            "threshold_min_blended_confidence": thresholds.min_blended_confidence,
-        }
-        pre_blended = self._blend_confidence(intent.scanner_confidence, scanner_direction_quality)
-        if not self._passes_threshold(intent.scanner_confidence, pre_blended, thresholds):
+        if mode == "no_trade":
             cancelled = await self._cancel_intent_safe(
                 worker_id=worker_id,
                 intent_id=intent.id,
-                reason="LLM pre-filter: low confidence",
-                context="llm_pre_filter",
+                reason="no_trade mode: execution disabled (evidence only)",
+                context="entry_funnel_mode_no_trade",
             )
             if cancelled:
                 self._log_trade_event(
@@ -952,22 +907,22 @@ class Scheduler:
                     {
                         "intent_id": intent.id,
                         "symbol": intent.symbol,
-                        "reason": "LLM pre-filter: low confidence",
-                        **threshold_context,
+                        "reason": "no_trade mode: execution disabled (evidence only)",
+                        "scanner_side": scanner_side,
                     },
                 )
                 logger.info(
-                    "LLM worker {}: intent {} pre-filtered (conf={}, blended={:.2f})",
+                    "LLM worker {}: intent {} cancelled by no_trade mode",
                     worker_id,
                     intent.id,
-                    intent.scanner_confidence,
-                    pre_blended,
                 )
-                self._low_confidence_cooldown.record_low_confidence(intent.symbol, self._now_utc())
-                self._metrics.record_llm_result("cancel")
             return
 
-        decision_event_type = "LLM_DECISION"
+        use_llm = self._uses_llm()
+        threshold_context: dict[str, Any] = {}
+        thresholds: Thresholds | None = None
+        decision_event_type = "SCANNER_TACTICAL_DECISION"
+
         if mode == "scanner_tactical":
             routed_decision = self._scanner_side_to_decision(scanner_side)
             if routed_decision is None:
@@ -985,7 +940,6 @@ class Scheduler:
                             "symbol": intent.symbol,
                             "reason": "scanner_tactical requires scanner_side=long|short",
                             "scanner_side": scanner_side,
-                            **threshold_context,
                         },
                     )
                     logger.warning(
@@ -995,7 +949,6 @@ class Scheduler:
                         intent.id,
                         scanner_side,
                     )
-                self._metrics.record_llm_result("cancel")
                 return
             decision = AgentDecision(
                 symbol=intent.symbol,
@@ -1003,8 +956,82 @@ class Scheduler:
                 final_state={"entry_funnel_mode": mode, "decision_source": "scanner_side"},
                 risk_report=f"scanner_tactical:{scanner_side}",
             )
-            decision_event_type = "SCANNER_TACTICAL_DECISION"
         else:
+            # Block mock-based decisions from executing real trades
+            if use_llm and self._agents.using_mock:
+                logger.critical(
+                    "LLM worker {}: BLOCKING intent {} — AgentBridge is using MockTradingGraph. "
+                    "Real TradingAgents must be loaded for live trading.",
+                    worker_id,
+                    intent.id,
+                )
+                await self._cancel_intent_safe(
+                    worker_id=worker_id,
+                    intent_id=intent.id,
+                    reason="Mock LLM fallback active — refusing to trade with random decisions",
+                    context="mock_llm_guard",
+                )
+                await self._send_alert(
+                    f"🚫 <b>Trade BLOCKED</b>\n"
+                    f"• Intent: {intent.symbol}\n"
+                    f"• Reason: Mock LLM fallback active — TradingAgents import failed"
+                )
+                return
+
+            qlib_data = {
+                "score": intent.scanner_score,
+                "signal_strength": intent.scanner_confidence,
+                "confidence": intent.scanner_confidence,
+                "score_gap": intent.scanner_score_gap,
+                "drop_distance": intent.scanner_drop_distance,
+                "topk_spread": intent.scanner_topk_spread,
+                "scanner_side": scanner_side,
+                "scanner_direction_quality": scanner_direction_quality,
+            }
+            historical_pnl_context = self._build_historical_pnl_context(intent.symbol)
+            if historical_pnl_context:
+                qlib_data["historical_pnl_context"] = historical_pnl_context
+            if self._latest_market_event_context:
+                qlib_data["market_event_context"] = self._latest_market_event_context
+
+            thresholds, threshold_source = self._get_effective_thresholds(intent.symbol)
+            threshold_context = {
+                "threshold_source": threshold_source,
+                "threshold_min_confidence": thresholds.min_confidence,
+                "threshold_min_blended_confidence": thresholds.min_blended_confidence,
+            }
+            pre_blended = self._blend_confidence(intent.scanner_confidence, scanner_direction_quality)
+            if not self._passes_threshold(intent.scanner_confidence, pre_blended, thresholds):
+                cancelled = await self._cancel_intent_safe(
+                    worker_id=worker_id,
+                    intent_id=intent.id,
+                    reason="LLM pre-filter: low confidence",
+                    context="llm_pre_filter",
+                )
+                if cancelled:
+                    self._log_trade_event(
+                        "INTENT_CANCELLED",
+                        {
+                            "intent_id": intent.id,
+                            "symbol": intent.symbol,
+                            "reason": "LLM pre-filter: low confidence",
+                            **threshold_context,
+                        },
+                    )
+                    logger.info(
+                        "LLM worker {}: intent {} pre-filtered (conf={}, blended={:.2f})",
+                        worker_id,
+                        intent.id,
+                        intent.scanner_confidence,
+                        pre_blended,
+                    )
+                    self._low_confidence_cooldown.record_low_confidence(
+                        intent.symbol, self._now_utc()
+                    )
+                    self._metrics.record_llm_result("cancel")
+                return
+
+            decision_event_type = "LLM_DECISION"
             cache_key = self._decision_cache_key(intent)
             cached_decision = self._decision_cache.get_cached(intent.symbol, cache_key)
             if cached_decision is not None:
@@ -1071,7 +1098,8 @@ class Scheduler:
                     scanner_side,
                     decision.decision,
                 )
-            self._metrics.record_llm_result("cancel")
+            if use_llm:
+                self._metrics.record_llm_result("cancel")
             return
         if self._memory_journal is not None:
             try:
@@ -1104,7 +1132,8 @@ class Scheduler:
                 )
 
         if decision.is_actionable:
-            self._metrics.record_llm_result("success")
+            if use_llm:
+                self._metrics.record_llm_result("success")
             if self._should_pause_new_entries():
                 await self._cancel_intent_safe(
                     worker_id=worker_id,
@@ -1185,10 +1214,14 @@ class Scheduler:
                 scanner_side=scanner_side,
                 agent_state=decision.final_state,
             )
-            if not self._passes_threshold(
-                intent.scanner_confidence,
-                formatted.confidence_score,
-                thresholds,
+            if (
+                use_llm
+                and thresholds is not None
+                and not self._passes_threshold(
+                    intent.scanner_confidence,
+                    formatted.confidence_score,
+                    thresholds,
+                )
             ):
                 cancelled = await self._cancel_intent_safe(
                     worker_id=worker_id,
@@ -1317,28 +1350,6 @@ class Scheduler:
                                     "detail": tactical_result.detail,
                                 },
                             )
-                if mode == "no_trade":
-                    cancelled = await self._cancel_intent_safe(
-                        worker_id=worker_id,
-                        intent_id=intent.id,
-                        reason="no_trade mode: execution disabled (evidence only)",
-                        context="entry_funnel_mode_no_trade",
-                    )
-                    if cancelled:
-                        self._log_trade_event(
-                            "INTENT_CANCELLED",
-                            {
-                                "intent_id": intent.id,
-                                "symbol": intent.symbol,
-                                "reason": "no_trade mode: execution disabled (evidence only)",
-                            },
-                        )
-                        logger.info(
-                            "LLM worker {}: intent {} cancelled by no_trade mode",
-                            worker_id,
-                            intent.id,
-                        )
-                    return
                 await asyncio.to_thread(self._store.mark_ready_for_exec, intent.id)
                 logger.info(
                     "LLM worker {}: intent {} → {} (ready for execution)",
@@ -1360,7 +1371,8 @@ class Scheduler:
                     return
                 raise
         else:
-            self._metrics.record_llm_result("cancel")
+            if use_llm:
+                self._metrics.record_llm_result("cancel")
             cancelled = await self._cancel_intent_safe(
                 worker_id=worker_id,
                 intent_id=intent.id,
@@ -4240,7 +4252,7 @@ class Scheduler:
 
     def _uses_llm(self) -> bool:
         """Return whether current entry funnel requires LLM strategic decisions."""
-        return self._entry_funnel_mode() in {"scanner_llm_tactical", "no_trade"}
+        return self._entry_funnel_mode() == "scanner_llm_tactical"
 
     @classmethod
     def _scanner_side_to_decision(cls, scanner_side: str | None) -> str | None:
