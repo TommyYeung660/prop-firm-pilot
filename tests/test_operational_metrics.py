@@ -148,6 +148,44 @@ class TestOperationalMetrics:
         assert summary["telegram_poll_probe_polls"] == 1
         assert summary["telegram_poll_circuit_recoveries"] == 1
 
+    def test_operational_metrics_records_entry_funnel_counts(self) -> None:
+        m = OperationalMetrics()
+        m.record_entry_funnel_event("scanner_candidate")
+        m.record_entry_funnel_event("intent_created")
+
+        snapshot = m.snapshot()
+        assert snapshot["entry_funnel"]["scanner_candidates"] == 1
+        assert snapshot["entry_funnel"]["intents_created"] == 1
+
+    def test_entry_funnel_records_llm_veto_and_cancel_buckets(self) -> None:
+        m = OperationalMetrics()
+        m.record_llm_veto()
+        m.record_entry_funnel_event("llm_cancel")
+
+        snapshot = m.snapshot()
+        assert snapshot["entry_funnel"]["llm_vetoes"] == 1
+        assert snapshot["entry_funnel"]["llm_cancels"] == 1
+
+    def test_entry_funnel_records_tactical_wait_and_expire_buckets(self) -> None:
+        m = OperationalMetrics()
+        m.record_entry_funnel_event("tactical_wait")
+        m.record_entry_funnel_event("tactical_expire")
+
+        snapshot = m.snapshot()
+        assert snapshot["entry_funnel"]["tactical_waits"] == 1
+        assert snapshot["entry_funnel"]["tactical_expires"] == 1
+
+    def test_no_trade_bucket_records_total_and_reason(self) -> None:
+        m = OperationalMetrics()
+        m.record_no_trade("llm_veto")
+        m.record_no_trade("tactical_expire")
+        m.record_no_trade("tactical_expire")
+
+        snapshot = m.snapshot()
+        assert snapshot["entry_funnel"]["no_trade_count"] == 3
+        assert snapshot["entry_funnel"]["no_trade_reasons"]["llm_veto"] == 1
+        assert snapshot["entry_funnel"]["no_trade_reasons"]["tactical_expire"] == 2
+
     def test_reset_clears_all(self):
         m = OperationalMetrics()
         m.record_llm_result("success")
