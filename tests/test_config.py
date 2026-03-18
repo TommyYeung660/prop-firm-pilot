@@ -12,6 +12,20 @@ def test_scheduler_config_llm_worker_count_default():
     assert config.llm_worker_count == 2
 
 
+def test_scheduler_config_entry_funnel_mode_default() -> None:
+    config = SchedulerConfig()
+    assert config.entry_funnel_mode == "scanner_llm_tactical"
+
+
+def test_scheduler_config_allows_ablation_modes() -> None:
+    config = SchedulerConfig(
+        entry_funnel_mode="scanner_tactical",
+        ablation_shadow_modes=["scanner_llm_tactical", "no_trade"],
+    )
+    assert config.entry_funnel_mode == "scanner_tactical"
+    assert config.ablation_shadow_modes == ["scanner_llm_tactical", "no_trade"]
+
+
 def test_scanner_config_benchmark_default():
     """P1.5: Scanner benchmark should default to broad FX benchmark, not a symbol-specific value."""
     config = ScannerConfig()
