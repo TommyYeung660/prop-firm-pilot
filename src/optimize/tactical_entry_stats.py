@@ -22,9 +22,29 @@ def _safe_rate(numerator: int, denominator: int) -> float:
     return round(numerator / denominator, 4)
 
 
+def _safe_count(value: Any, default: int = 0) -> int:
+    """Normalize snapshot counters to non-negative integers."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return max(value, 0)
+    return default
+
+
+def _latest_metrics_snapshot(journal: TradeJournal, date_str: str) -> dict[str, Any]:
+    """Return the latest METRICS_SNAPSHOT event for the date if present."""
+    events = journal.get_events("METRICS_SNAPSHOT", date_str=date_str)
+    if not events:
+        return {}
+    ordered_events = sorted(events, key=lambda event: str(event.get("timestamp", "")))
+    latest = ordered_events[-1]
+    return latest if isinstance(latest, dict) else {}
+
+
 def build_daily_entry_calibration_snapshot(
     journal: TradeJournal,
     date_str: str,
+    metrics_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate daily tactical entry verdicts by symbol, session, and regime."""
     events = journal.get_events("TACTICAL_RESULT", date_str=date_str)
@@ -120,9 +140,40 @@ def build_daily_entry_calibration_snapshot(
             }
         )
 
+    metrics_snapshot = metrics_snapshot or _latest_metrics_snapshot(journal, date_str)
+    entry_funnel = metrics_snapshot.get("entry_funnel", {})
+    if not isinstance(entry_funnel, dict):
+        entry_funnel = {}
+
+    scanner_candidates = _safe_count(entry_funnel.get("scanner_candidates"))
+    intents_created = _safe_count(
+        entry_funnel.get("intents_created"),
+        default=len(journal.get_events("INTENT_CREATED", date_str=date_str)),
+    )
+    llm_vetoes = _safe_count(entry_funnel.get("llm_vetoes"))
+    llm_cancels = _safe_count(entry_funnel.get("llm_cancels"))
+    tactical_waits = _safe_count(entry_funnel.get("tactical_waits"))
+    tactical_expires = _safe_count(entry_funnel.get("tactical_expires"))
+    no_trade_count = _safe_count(entry_funnel.get("no_trade_count"))
+    no_trade_reasons = entry_funnel.get("no_trade_reasons", {})
+    if not isinstance(no_trade_reasons, dict):
+        no_trade_reasons = {}
+    opened_count = len(journal.get_events("TRADE_OPENED", date_str=date_str))
+
     return {
         "date": date_str,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "entry_funnel_mode": str(metrics_snapshot.get("entry_funnel_mode", "unknown")),
+        "scanner_candidates": scanner_candidates,
+        "intents_created": intents_created,
+        "opened_count": opened_count,
+        "llm_vetoes": llm_vetoes,
+        "llm_cancels": llm_cancels,
+        "tactical_waits": tactical_waits,
+        "tactical_expires": tactical_expires,
+        "no_trade_count": no_trade_count,
+        "no_trade_reasons": no_trade_reasons,
+        "llm_veto_rate": _safe_rate(llm_vetoes, scanner_candidates),
         "group_count": len(groups),
         "total_verdicts": len(events),
         "groups": groups,

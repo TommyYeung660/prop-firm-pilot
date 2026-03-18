@@ -274,7 +274,8 @@ class Scheduler:
 
     def _build_metrics_snapshot(self) -> dict[str, Any]:
         """Build the current operational metrics snapshot with feed status."""
-        snapshot: dict[str, Any] = dict(self._metrics.get_summary())
+        snapshot: dict[str, Any] = dict(self._metrics.snapshot())
+        snapshot["entry_funnel_mode"] = self._entry_funnel_mode()
         if self._market_data_ready and self._market_data_hub is not None:
             snapshot["market_data"] = self._get_market_data_feed_status()
         return snapshot
@@ -3758,11 +3759,13 @@ class Scheduler:
             logger.info("Daily summary sent for {}", date_str)
 
             # v1.3.9: Emit operational metrics snapshot (P3.11 + P3.12)
-            self._log_trade_event("METRICS_SNAPSHOT", self._build_metrics_snapshot())
+            metrics_snapshot = self._build_metrics_snapshot()
+            self._log_trade_event("METRICS_SNAPSHOT", metrics_snapshot)
             if self._trade_journal is not None:
                 calibration_snapshot = build_daily_entry_calibration_snapshot(
                     self._trade_journal,
                     date_str,
+                    metrics_snapshot=metrics_snapshot,
                 )
                 self._log_trade_event(
                     "TACTICAL_ENTRY_CALIBRATION_SNAPSHOT",

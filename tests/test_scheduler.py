@@ -2998,6 +2998,23 @@ class TestDailySummaryLoop:
             alert_service=mock_alert,
             trade_journal=journal,
         )
+        sched._config.scheduler.entry_funnel_mode = "scanner_tactical"
+        for _ in range(3):
+            sched._metrics.record_entry_funnel_event("scanner_candidate")
+        for _ in range(2):
+            sched._metrics.record_entry_funnel_event("intent_created")
+        sched._metrics.record_llm_veto()
+        sched._metrics.record_entry_funnel_event("llm_cancel")
+        sched._metrics.record_entry_funnel_event("tactical_wait")
+        sched._metrics.record_entry_funnel_event("tactical_expire")
+        journal.log_event(
+            "TRADE_OPENED",
+            {
+                "timestamp": "2026-02-16T10:00:00+00:00",
+                "symbol": "EURUSD",
+                "intent_id": "intent-opened",
+            },
+        )
 
         mock_matchtrader.get_balance.return_value = MagicMock(
             balance=50000.0,
@@ -3019,6 +3036,7 @@ class TestDailySummaryLoop:
         assert snapshot["intents_created"] == 2
         assert snapshot["opened_count"] == 1
         assert snapshot["llm_vetoes"] == 1
+        assert snapshot["llm_cancels"] == 1
         assert snapshot["tactical_waits"] == 1
         assert snapshot["tactical_expires"] == 1
         assert snapshot["llm_veto_rate"] == 0.3333
