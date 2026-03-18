@@ -426,9 +426,9 @@ class Scheduler:
                         )
                     await asyncio.sleep(self._session_cadence.get_scanner_interval(self._now_utc()))
                     continue
-                # Side-aware scanner bundles may contain both long/short candidates
-                # for the same symbol, so v2 deduplication keys on (symbol, side).
-                best_per_symbol: dict[tuple[str, str | None], Any] = {}
+                # Side-aware bundles may contain both long/short rows for one symbol,
+                # but live admission must keep only the best side per symbol.
+                best_per_symbol: dict[str, Any] = {}
                 for signal in signals:
                     dedup_key = self._signal_dedup_key(signal)
                     existing = best_per_symbol.get(dedup_key)
@@ -482,11 +482,10 @@ class Scheduler:
                             signal.instrument,
                             today,
                             "scanner",
-                            scanner_side,
                         )
                         if exists:
                             logger.info(
-                                "Scanner loop: in-progress intent exists for {} ({}), skipping",
+                                "Scanner loop: in-progress intent exists for {} (side={} blocked)",
                                 signal.instrument,
                                 scanner_side or "legacy",
                             )
@@ -4178,9 +4177,9 @@ class Scheduler:
             return round(1.0 - score, 6)
         return score
 
-    def _signal_dedup_key(self, signal: Any) -> tuple[str, str | None]:
-        """Deduplicate by symbol for legacy signals, or by symbol+side for v2."""
-        return (signal.instrument, self._signal_scanner_side(signal))
+    def _signal_dedup_key(self, signal: Any) -> str:
+        """Deduplicate live scanner admission by symbol only."""
+        return str(getattr(signal, "instrument", "") or "")
 
     @classmethod
     def _decision_matches_scanner_side(cls, scanner_side: str | None, decision: str) -> bool:

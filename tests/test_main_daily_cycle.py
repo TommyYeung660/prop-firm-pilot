@@ -133,6 +133,31 @@ async def test_run_daily_cycle_skips_short_signal_when_agent_reverses_to_buy(
     pilot._execute_trade.assert_not_awaited()
 
 
+async def test_run_daily_cycle_keeps_only_best_side_per_symbol(
+    config: AppConfig,
+    matchtrader_client: AsyncMock,
+) -> None:
+    """Legacy mode should not trade both directions for the same symbol."""
+    config.scanner.topk = 2
+    pilot = _build_pilot(config)
+    pilot.scanner.run_pipeline.return_value = [
+        _make_signal(instrument="USDCAD", score=0.62, rank=1, side="long"),
+        _make_signal(instrument="USDCAD", score=0.62, rank=2, side="short"),
+    ]
+    pilot.agents.decide.return_value = AgentDecision(
+        symbol="USDCAD",
+        decision="BUY",
+        final_state={"summary": "best side only"},
+    )
+
+    with patch("src.main.MatchTraderClient", return_value=matchtrader_client):
+        await pilot.run_daily_cycle(date_override="2026-03-17")
+
+    pilot.agents.decide.assert_called_once()
+    assert pilot.agents.decide.call_args.kwargs["symbol"] == "USDCAD"
+    pilot._execute_trade.assert_awaited_once()
+
+
 async def test_run_daily_cycle_skips_long_signal_when_agent_reverses_to_sell(
     config: AppConfig,
     matchtrader_client: AsyncMock,

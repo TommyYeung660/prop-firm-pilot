@@ -361,7 +361,26 @@ class TestScannerLoop:
         assert intents[0].symbol == "USDCHF"
         assert intents[0].scanner_side == "short"
 
-    async def test_scanner_loop_duplicate_guard_is_side_aware_for_v2(
+    async def test_scanner_loop_keeps_only_best_side_per_symbol_for_v2(
+        self,
+        scheduler: Scheduler,
+        mock_scanner: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """A side-aware bundle must not create both long and short intents for one symbol."""
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("USDCAD", score=0.62, side="long", schema_version="fx_signal_v2"),
+            _make_mock_signal("USDCAD", score=0.62, side="short", schema_version="fx_signal_v2"),
+        ]
+
+        await _run_loop_once(scheduler, scheduler._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        assert len(intents) == 1
+        assert intents[0].symbol == "USDCAD"
+        assert intents[0].scanner_side == "long"
+
+    async def test_scanner_loop_duplicate_guard_blocks_opposite_side_when_symbol_pending(
         self,
         scheduler: Scheduler,
         mock_scanner: MagicMock,
@@ -384,8 +403,8 @@ class TestScannerLoop:
         await _run_loop_once(scheduler, scheduler._scanner_loop())
 
         intents = store.get_intents_by_date(Scheduler._today_str())
-        assert len(intents) == 2
-        assert {intent.scanner_side for intent in intents} == {"short", "long"}
+        assert len(intents) == 1
+        assert intents[0].scanner_side == "short"
 
     async def test_logs_structured_cooldown_skip_event(
         self,

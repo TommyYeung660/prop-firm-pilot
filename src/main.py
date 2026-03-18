@@ -169,8 +169,9 @@ class PropFirmPilot:
         """Select top signals for daily-cycle mode.
 
         Legacy v1 bundles preserve the scanner's incoming order.
-        Side-aware v2 bundles are re-ranked by direction-aware quality so
-        long and short candidates compete on the same scale.
+        Side-aware v2 bundles keep only the best side per symbol, then
+        re-rank by direction-aware quality so long and short candidates
+        compete on the same scale.
         """
         topk = self.config.scanner.topk
         if topk <= 0:
@@ -182,8 +183,19 @@ class PropFirmPilot:
         if not has_side_aware_signal:
             return signals[:topk]
 
+        best_per_symbol: dict[str, Any] = {}
+        for candidate in signals:
+            symbol = str(getattr(candidate, "instrument", "") or "")
+            existing = best_per_symbol.get(symbol)
+            candidate_quality = self._signal_quality_score(candidate)
+            existing_quality = None
+            if existing is not None:
+                existing_quality = self._signal_quality_score(existing)
+            if existing is None or candidate_quality > existing_quality:
+                best_per_symbol[symbol] = candidate
+
         ranked_signals = sorted(
-            signals,
+            best_per_symbol.values(),
             key=lambda signal: (
                 -self._signal_quality_score(signal),
                 int(getattr(signal, "rank", 999999) or 999999),
