@@ -3014,6 +3014,14 @@ class TestDailySummaryLoop:
         snapshot = next(e for e in events if e["type"] == "TACTICAL_ENTRY_CALIBRATION_SNAPSHOT")
         assert snapshot["date"] == "2026-02-16"
         assert snapshot["groups"][0]["symbol"] == "EURUSD"
+        assert snapshot["entry_funnel_mode"] == "scanner_tactical"
+        assert snapshot["scanner_candidates"] == 3
+        assert snapshot["intents_created"] == 2
+        assert snapshot["opened_count"] == 1
+        assert snapshot["llm_vetoes"] == 1
+        assert snapshot["tactical_waits"] == 1
+        assert snapshot["tactical_expires"] == 1
+        assert snapshot["llm_veto_rate"] == 0.3333
 
 
 # ── Mock LLM Blocking Tests ──────────────────────────────────────────────────────
@@ -5868,6 +5876,8 @@ def test_build_metrics_snapshot_includes_market_data_feed_status(
         engine=mock_engine,
         matchtrader=mock_matchtrader,
     )
+    sched._config.scheduler.entry_funnel_mode = "scanner_tactical"
+    sched._metrics.record_entry_funnel_event("scanner_candidate")
     sched._market_data_ready = True
     sched._market_data_hub = MagicMock()
     sched._market_data_hub.feed_status.return_value = {
@@ -5880,6 +5890,8 @@ def test_build_metrics_snapshot_includes_market_data_feed_status(
 
     snapshot = sched._build_metrics_snapshot()
 
+    assert snapshot["entry_funnel_mode"] == "scanner_tactical"
+    assert snapshot["entry_funnel"]["scanner_candidates"] == 1
     assert snapshot["market_data"]["websocket"]["state"] == "degraded"
     assert snapshot["market_data"]["forced_stale_symbols"] == ["EURUSD"]
     assert snapshot["market_data"]["initialized_at"] == "2026-03-17T03:00:00+00:00"

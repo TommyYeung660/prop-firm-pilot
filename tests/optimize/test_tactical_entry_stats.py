@@ -87,3 +87,56 @@ def test_build_daily_entry_calibration_snapshot_aggregates_failed_hard_gate_code
     assert group["failed_hard_gate_counts"]["spread.fail.ratio_too_wide"] == 2
     assert group["failed_hard_gate_counts"]["atr.fail.insufficient_1h_data"] == 1
     assert group["top_failed_hard_gates"][0]["reason_code"] == "spread.fail.ratio_too_wide"
+
+
+def test_build_daily_entry_calibration_snapshot_includes_entry_funnel_fields(
+    tmp_path: Path,
+) -> None:
+    journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+    journal.log_event(
+        "METRICS_SNAPSHOT",
+        {
+            "timestamp": "2026-03-14T22:00:00+00:00",
+            "entry_funnel_mode": "scanner_llm_tactical",
+            "entry_funnel": {
+                "scanner_candidates": 5,
+                "intents_created": 4,
+                "llm_vetoes": 1,
+                "llm_cancels": 1,
+                "tactical_waits": 2,
+                "tactical_expires": 1,
+                "no_trade_count": 2,
+                "no_trade_reasons": {"llm_veto": 1, "tactical_expire": 1},
+            },
+        },
+    )
+    journal.log_event(
+        "TRADE_OPENED",
+        {
+            "timestamp": "2026-03-14T09:15:00+00:00",
+            "symbol": "EURUSD",
+            "intent_id": "i-1",
+        },
+    )
+    journal.log_event(
+        "TRADE_OPENED",
+        {
+            "timestamp": "2026-03-14T12:30:00+00:00",
+            "symbol": "USDJPY",
+            "intent_id": "i-2",
+        },
+    )
+
+    snapshot = build_daily_entry_calibration_snapshot(journal, "2026-03-14")
+
+    assert snapshot["entry_funnel_mode"] == "scanner_llm_tactical"
+    assert snapshot["scanner_candidates"] == 5
+    assert snapshot["intents_created"] == 4
+    assert snapshot["opened_count"] == 2
+    assert snapshot["llm_vetoes"] == 1
+    assert snapshot["llm_cancels"] == 1
+    assert snapshot["tactical_waits"] == 2
+    assert snapshot["tactical_expires"] == 1
+    assert snapshot["no_trade_count"] == 2
+    assert snapshot["no_trade_reasons"]["llm_veto"] == 1
+    assert snapshot["llm_veto_rate"] == 0.2
