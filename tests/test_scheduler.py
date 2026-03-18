@@ -1180,6 +1180,143 @@ class TestLLMWorkerLoop:
         assert len(sleep_calls) == 1
         mock_agents.decide.assert_not_called()
 
+    async def test_scanner_tactical_mode_skips_llm_worker(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """scanner_tactical should bypass LLM and derive side from scanner signal."""
+        scheduler._config.scheduler.entry_funnel_mode = "scanner_tactical"
+        scheduler._config.tactical.enabled = False
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "ready_for_exec"
+        assert updated.suggested_side == "BUY"
+        mock_agents.decide.assert_not_called()
+
+    async def test_scanner_tactical_mode_cancels_when_scanner_side_missing(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """scanner_tactical should cancel safely when side is absent/invalid."""
+        scheduler._config.scheduler.entry_funnel_mode = "scanner_tactical"
+        scheduler._config.tactical.enabled = False
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side=None,
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+        assert updated.execution_error is not None
+        assert "scanner_side" in updated.execution_error
+        mock_agents.decide.assert_not_called()
+
+    async def test_scanner_llm_tactical_mode_keeps_current_path(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """scanner_llm_tactical should keep existing LLM decision flow."""
+        scheduler._config.scheduler.entry_funnel_mode = "scanner_llm_tactical"
+        scheduler._config.tactical.enabled = False
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "ready_for_exec"
+        mock_agents.decide.assert_called_once()
+
+    async def test_no_trade_mode_never_marks_ready_for_exec(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+    ) -> None:
+        """no_trade should keep evidence but never transition to ready_for_exec."""
+        scheduler._config.scheduler.entry_funnel_mode = "no_trade"
+        scheduler._config.tactical.enabled = False
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        with patch.object(
+            store, "mark_ready_for_exec", wraps=store.mark_ready_for_exec
+        ) as mark_ready:
+            await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+        assert mark_ready.call_count == 0
+
+    async def test_tactical_only_mode_rejects_scanner_intents(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """tactical_only should be conservatively gated until tactical source exists."""
+        scheduler._config.scheduler.entry_funnel_mode = "tactical_only"
+        scheduler._config.tactical.enabled = False
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+        assert updated.execution_error is not None
+        assert "tactical_only" in updated.execution_error
+        mock_agents.decide.assert_not_called()
+
 
 # ── Process Claimed Intent Tests ────────────────────────────────────────────
 
