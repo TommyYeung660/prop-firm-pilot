@@ -13,10 +13,10 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 **Post-v1.5.0_preview Stable Acceptance Window**
 
-> **Status**: `v1.5.0_preview` 已於 `2026-03-17` 成為當前主線 preview release；`2026-03-18` 已再完成一輪 preview incident remediation，作為 stable acceptance 前的 correctness hardening baseline
-> **Reason**: core pilot 雖已完成 bounded capital utilization uplift preview implementation，但 `prod_logs_20260318_v1.5.0_preview` 暴露出 Best Day semantics、compliance admission、market-data routing、scanner success contract 與 Telegram alert resilience 的 P0/P1 correctness 缺口；stable 前必須先吸收這輪 remediation，而不是只驗收 uplift 本身
+> **Status**: `v1.5.0_preview` 已於 `2026-03-18` 對齊目前 `main` 的最新 preview 實作基線：bounded capital utilization uplift、preview incident remediation、side-aware scanner live activation，以及 first-batch JPY cross rollout（`EURJPY`、`AUDJPY`、`CADJPY` + dynamic JPY pip-value live sizing）
+> **Reason**: 當前主線的 `v1.5.0_preview` 已不再只是 uplift preview lane；它同時承載了 `prod_logs_20260318_v1.5.0_preview` 暴露出的 correctness remediation，以及 side-aware / JPY cross 兩輪 live-path productization。stable acceptance 必須建立在這個整合後的 preview baseline 上，而不是只驗收其中單一子項
 
-### In Progress: v1.5.0_preview Incident Remediation
+### Implemented: v1.5.0_preview Incident Remediation Baseline
 
 #### Fixed
 - `PropFirmGuard` 的 `Best Day Rule` 新單 gate 現在只看 actual `daily_pnl`，不再把 hypothetical TP potential profit 當成當日已發生 PnL，因此 `0` 交易 / `0` 當日 PnL 不會再被錯誤阻擋
@@ -80,10 +80,11 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ### Planned: v1.5.0 (stable) — Stable Acceptance On Top Of Preview Uplift
 - 定義第一個「穩定版」基準：系統必須能穩定可靠地進出場，而不是只靠 hotfix 維持可用
-- 將 `v1.5.0_preview` 已落地的 bounded capital utilization uplift 與 `2026-03-18` preview incident remediation 一起納入 multi-day stable acceptance，而不是把 uplift 本身重新實作一次
+- 將 `v1.5.0_preview` 已落地的 bounded capital utilization uplift、`2026-03-18` preview incident remediation、side-aware scanner live activation 與 first-batch JPY cross rollout 一起納入 multi-day stable acceptance，而不是把這些 preview 子項拆開重做
 - tactical entry 與 tactical exit 需達到 production-grade reliability，包含 data provenance、execution integrity、close verification 與 postmortem replayability
 - 把 `v1.5.0_beta` 已吸收的 scanner contract、cadence decision 與 entry / exit control plane 升級為 stable release gate，而不是再做一次大重寫
 - 不重新開啟 `qlib_market_scanner` 的 FX release cadence 選型；`v1.5.0 stable` 直接沿用已凍結的 `1d` canonical cadence
+- 以目前 first-batch 10-pair runtime universe 作為 stable 驗收 baseline；`GBPJPY`、`NZDJPY`、`CHFJPY` 仍明確維持 deferred，不在本輪 stable 內被誤寫成已啟用
 - 重新設計 `TradingAgents` 與 intraday FX 場景的耦合方式，使其能消化更高頻率的 scanner / market context 與交易記憶
 - 建立穩定可靠的交易記憶體系，將 trade journal、reflection、lesson memory、execution outcome 串成可持續改善的 learning loop
 - 將多元化倉位與資金效率正式納入風控與配置層，而不是只做單筆交易最小風險化

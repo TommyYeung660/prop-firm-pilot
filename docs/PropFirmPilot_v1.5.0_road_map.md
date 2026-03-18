@@ -6,7 +6,7 @@
 >
 > **適用範圍**: `prop-firm-pilot` 主線規劃，並直接納入 `qlib_market_scanner` / `qlib_rd_agent` / `TradingAgents` 的必要依賴
 >
-> **當前主線狀態**: `v1.5.0_preview` 已於 `2026-03-17` 在 `v1.5.0_beta_2` baseline 上落地 bounded capital utilization uplift preview；`2026-03-18` 已再吸收一輪 preview incident remediation（Best Day semantics、compliance admission、market-data routing、scanner success contract、Telegram fallback），並在 stable acceptance window 內完成 side-aware scanner live activation（`fx_signal_v2`、`topk_short = 1`、direction-aware gating）與 first-batch JPY cross rollout（`EURJPY`、`AUDJPY`、`CADJPY` + dynamic JPY pip-value live sizing）；`v1.5.0_stable` 仍待 open-book worst-case natural-SL drawdown guard、exposure / memory / validation acceptance closure
+> **當前主線狀態**: `v1.5.0_preview` 已於 `2026-03-18` 對齊目前 `main` 的最新 preview 主線基線：bounded capital utilization uplift preview、preview incident remediation（Best Day semantics、compliance admission、market-data routing、scanner success contract、Telegram fallback）、side-aware scanner live activation（`fx_signal_v2`、`topk_short = 1`、direction-aware gating），以及 first-batch JPY cross rollout（`EURJPY`、`AUDJPY`、`CADJPY` + dynamic JPY pip-value live sizing）；`v1.5.0_stable` 仍待 open-book worst-case natural-SL drawdown guard、exposure / memory / validation acceptance closure
 >
 > **閱讀原則**: 若你只想知道 `1.5.0` 到 `1.5.9` 應做什麼，先看這份；不需要先回頭讀複數文檔
 
@@ -227,24 +227,42 @@
 - `bars_5m_unavailable` 類 incident 可直接看出 market-data hub uptime 與 websocket closed bar accumulation 狀態
 - `config/e8_one_5k_challenge.yaml` 已可按高頻調參 / 低頻基礎兩種操作場景直接維護，且淡時段 scanner cadence 降為 `3600s`
 
-### 5.5 `v1.5.0_preview` — Bounded Capital Utilization Preview
+### 5.5 `v1.5.0_preview` — Current Mainline Preview Baseline
 
-`v1.5.0_preview` 建立在 `v1.5.0_beta_2` 的 operational repair baseline 上，任務是把 bounded capital utilization uplift 先做成可驗證的 preview implementation，而不是直接把整個 stable gate 宣稱完成。
+`v1.5.0_preview` 建立在 `v1.5.0_beta_2` 的 operational repair baseline 上，但到目前 `main` 為止，它已不再只是單一 uplift preview lane。最新 preview baseline 是四個已整合子項的集合：
+
+- bounded capital utilization uplift preview
+- `2026-03-18` preview incident remediation baseline
+- side-aware scanner live activation
+- first-batch JPY cross rollout with dynamic JPY pip-value live sizing
+
+它的角色是把這四個已落地主題先收斂成同一個可驗證的 preview mainline，再交由 `v1.5.0 stable` 做 integrated acceptance，而不是直接把整個 stable gate 宣稱完成。
 
 這一版在本 repo 已落地：
 
 - `BoundedCapitalAllocator` 依 `default_risk_pct * max_positions` 的名目預算、當前 `open_positions` 與 `scanner_confidence`，計算 `effective_risk_pct`
 - `PositionSizer` 支援 risk override，execution path 會把 uplift 後的 `risk_pct` 傳進 sizing
 - `ExecutionEngine` 會把 `risk_pct` 與 capital allocation metadata 寫入 execution meta，保留 audit trail
+- `PropFirmGuard` / execution-side Best Day gate 已對齊 actual `daily_pnl` semantics，no-trade / zero-PnL 情境不再被 hypothetical TP potential profit 錯擋
+- deterministic compliance headroom 已前移到 candidate / intent creation，必定被拒的 setup 不再白跑 tactical / execution
+- market-data live path 已改為 `broker quote-first + API bars-first + websocket auxiliary`；websocket degraded 不再單獨 hard-block 全系統
+- `ScannerBridge.run_pipeline()` success contract 已收緊為 process + artifact + ingestion + `target_date` matched
+- Telegram alert path 已補上 retry accounting、failure metrics 與 `ALERT_FALLBACK` secondary sink
 - live scanner path 已啟用 side-aware ingestion：`ScannerBridge` 支援 `fx_signal_v2`、`TradeIntent` / SQLite 持久化 `scanner_side`、scheduler 以 direction-aware quality 排序 mixed long/short bundles
 - `TradingAgents` 在 side-aware path 中只允許 confirm / veto scanner direction；反方向 actionable decision 會被取消為 `direction_mismatch`
 - legacy `run_daily_cycle()` 已與 scheduler 對齊 side-aware ranking 與 reverse-side hard veto，避免 non-scheduler path 留下舊邏輯缺口
+- runtime universe 已從 7 pairs 擴到 first-batch 10 pairs：`EURUSD / GBPUSD / USDJPY / AUDUSD / NZDUSD / USDCAD / USDCHF / EURJPY / AUDJPY / CADJPY`
+- `config/e8_one_5k_challenge.yaml`、websocket subscription 與 instrument table 已與這 10-pair first batch 對齊
+- `TradingAgents` FX pair context 已新增 `EURJPY`、`AUDJPY`、`CADJPY` 的 description / macro drivers / ADR / session bias
+- JPY-quoted pairs 現在會在 live sizing 中以 `USDJPY` quote 解析 USD pip value，覆蓋 `USDJPY / EURJPY / AUDJPY / CADJPY`，避免只依賴靜態 YAML pip value
+- first-batch rollout 目前明確只包含 `EURJPY`、`AUDJPY`、`CADJPY`；`GBPJPY`、`NZDJPY`、`CHFJPY` 仍 deferred，不屬於當前 preview baseline
 - 專案 version identity 已切到 `1.5.0_preview` / `v1.5.0_preview`，包裝版本為 `1.5.0rc0`
 
 這一版同時建立在已核對的 upstream 事實上：
 
 - `qlib_market_scanner` 已穩定提供 FX `1d` canonical cadence、`dsr_net_oos_daily_v1` selection metric、`label_version` / `research_cadences` metadata，以及 cadence scorecard / decision artifacts
 - `qlib_market_scanner` 已補上 `--topk-short` runtime activation，讓 preview live lane 可以顯式輸出 bounded short candidates
+- `qlib_market_scanner` 的 FX baseline / cost table 已擴到 first-batch 10-pair universe，`EURJPY / AUDJPY / CADJPY` 不再回落 generic spread / pip-value defaults
 - `qlib_market_scanner` 已完成 RD-Agent `candidate -> promoted -> report` factor gate
 - `qlib_rd_agent` 已完成 `discovered_factors.yaml`、`candidate_factors.yaml`、`factor_manifest.json` 與 `runs/<run_id>/...` archive upload contract
 
@@ -262,6 +280,7 @@
 - market-data 仍維持 `broker quote-first + API bars-first + websocket auxiliary`
 - scanner success 仍要求 `target_date` 真正落盤
 - Telegram alerting 在 primary channel 失效時仍保有 retry accounting 與 journal fallback
+- first-batch JPY cross rollout 仍維持 staged scope，不把 `GBPJPY`、`NZDJPY`、`CHFJPY` 誤升級成已啟用 universe
 
 ---
 
