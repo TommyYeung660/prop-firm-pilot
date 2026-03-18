@@ -447,6 +447,25 @@ class Scheduler:
                     len(best_per_symbol),
                     len(topk_signals),
                 )
+                if self._entry_funnel_mode() == "tactical_only":
+                    reason_code = "tactical_only_mode_requires_tactical_signal_source"
+                    logger.warning(
+                        "Scanner loop: tactical_only mode is gated — scanner admissions skipped"
+                    )
+                    self._log_trade_event(
+                        "SCANNER_BUNDLE_REJECTED",
+                        {
+                            "trade_date": today,
+                            "reason_code": reason_code,
+                        },
+                    )
+                    await self._send_alert(
+                        f"\u26a0\ufe0f <b>Scanner Bundle Rejected</b>\n"
+                        f"\u2022 Date: {today}\n"
+                        f"\u2022 Reason: {reason_code}"
+                    )
+                    await asyncio.sleep(self._session_cadence.get_scanner_interval(self._now_utc()))
+                    continue
 
                 # ── Capacity check: avoid creating intents beyond max_positions ──
                 max_pos = self._config.execution.max_positions
@@ -858,8 +877,23 @@ class Scheduler:
 
     async def _process_claimed_intent(self, worker_id: str, intent: TradeIntent) -> None:
         """Evaluate a claimed intent via LLM agents and update the store."""
+        mode = self._entry_funnel_mode()
+        if mode == "tactical_only":
+            await self._cancel_intent_safe(
+                worker_id=worker_id,
+                intent_id=intent.id,
+                reason="tactical_only mode is gated until tactical signal source is available",
+                context="entry_funnel_mode_gate",
+            )
+            logger.warning(
+                "LLM worker {}: cancelled intent {} — tactical_only mode is gated",
+                worker_id,
+                intent.id,
+            )
+            return
+
         # Block mock-based decisions from executing real trades
-        if self._agents.using_mock:
+        if self._uses_llm() and self._agents.using_mock:
             logger.critical(
                 "LLM worker {}: BLOCKING intent {} — AgentBridge is using MockTradingGraph. "
                 "Real TradingAgents must be loaded for live trading.",
@@ -933,35 +967,73 @@ class Scheduler:
                 self._metrics.record_llm_result("cancel")
             return
 
-        cache_key = self._decision_cache_key(intent)
-        cached_decision = self._decision_cache.get_cached(intent.symbol, cache_key)
-        if cached_decision is not None:
-            decision = self._hydrate_cached_decision(intent.symbol, cached_decision)
-            self._log_trade_event(
-                "LLM_DECISION_CACHE_HIT",
-                {
-                    "intent_id": intent.id,
-                    "symbol": intent.symbol,
-                    "cache_key": cache_key,
-                    "decision": decision.decision,
-                    **threshold_context,
-                },
-            )
-        else:
-            decision = await asyncio.to_thread(
-                self._agents.decide,
+        decision_event_type = "LLM_DECISION"
+        if mode == "scanner_tactical":
+            routed_decision = self._scanner_side_to_decision(scanner_side)
+            if routed_decision is None:
+                cancelled = await self._cancel_intent_safe(
+                    worker_id=worker_id,
+                    intent_id=intent.id,
+                    reason="scanner_tactical requires scanner_side=long|short",
+                    context="entry_funnel_mode_guard",
+                )
+                if cancelled:
+                    self._log_trade_event(
+                        "INTENT_CANCELLED",
+                        {
+                            "intent_id": intent.id,
+                            "symbol": intent.symbol,
+                            "reason": "scanner_tactical requires scanner_side=long|short",
+                            "scanner_side": scanner_side,
+                            **threshold_context,
+                        },
+                    )
+                    logger.warning(
+                        "LLM worker {}: intent {} cancelled in scanner_tactical mode "
+                        "(scanner_side={})",
+                        worker_id,
+                        intent.id,
+                        scanner_side,
+                    )
+                self._metrics.record_llm_result("cancel")
+                return
+            decision = AgentDecision(
                 symbol=intent.symbol,
-                trade_date=intent.trade_date,
-                qlib_data=qlib_data,
-                intent_id=intent.id,
+                decision=routed_decision,
+                final_state={"entry_funnel_mode": mode, "decision_source": "scanner_side"},
+                risk_report=f"scanner_tactical:{scanner_side}",
             )
-            self._decision_cache.store(
-                intent.symbol,
-                cache_key,
-                self._serialize_decision_for_cache(decision),
-            )
+            decision_event_type = "SCANNER_TACTICAL_DECISION"
+        else:
+            cache_key = self._decision_cache_key(intent)
+            cached_decision = self._decision_cache.get_cached(intent.symbol, cache_key)
+            if cached_decision is not None:
+                decision = self._hydrate_cached_decision(intent.symbol, cached_decision)
+                self._log_trade_event(
+                    "LLM_DECISION_CACHE_HIT",
+                    {
+                        "intent_id": intent.id,
+                        "symbol": intent.symbol,
+                        "cache_key": cache_key,
+                        "decision": decision.decision,
+                        **threshold_context,
+                    },
+                )
+            else:
+                decision = await asyncio.to_thread(
+                    self._agents.decide,
+                    symbol=intent.symbol,
+                    trade_date=intent.trade_date,
+                    qlib_data=qlib_data,
+                    intent_id=intent.id,
+                )
+                self._decision_cache.store(
+                    intent.symbol,
+                    cache_key,
+                    self._serialize_decision_for_cache(decision),
+                )
         self._log_trade_event(
-            "LLM_DECISION",
+            decision_event_type,
             {
                 "intent_id": intent.id,
                 "symbol": intent.symbol,
@@ -1245,6 +1317,28 @@ class Scheduler:
                                     "detail": tactical_result.detail,
                                 },
                             )
+                if mode == "no_trade":
+                    cancelled = await self._cancel_intent_safe(
+                        worker_id=worker_id,
+                        intent_id=intent.id,
+                        reason="no_trade mode: execution disabled (evidence only)",
+                        context="entry_funnel_mode_no_trade",
+                    )
+                    if cancelled:
+                        self._log_trade_event(
+                            "INTENT_CANCELLED",
+                            {
+                                "intent_id": intent.id,
+                                "symbol": intent.symbol,
+                                "reason": "no_trade mode: execution disabled (evidence only)",
+                            },
+                        )
+                        logger.info(
+                            "LLM worker {}: intent {} cancelled by no_trade mode",
+                            worker_id,
+                            intent.id,
+                        )
+                    return
                 await asyncio.to_thread(self._store.mark_ready_for_exec, intent.id)
                 logger.info(
                     "LLM worker {}: intent {} → {} (ready for execution)",
@@ -4139,6 +4233,24 @@ class Scheduler:
         if instrument:
             return instrument.pip_size
         return 0.0001  # Default for major FX pairs
+
+    def _entry_funnel_mode(self) -> str:
+        """Return active entry-funnel runtime mode."""
+        return self._config.scheduler.entry_funnel_mode
+
+    def _uses_llm(self) -> bool:
+        """Return whether current entry funnel requires LLM strategic decisions."""
+        return self._entry_funnel_mode() in {"scanner_llm_tactical", "no_trade"}
+
+    @classmethod
+    def _scanner_side_to_decision(cls, scanner_side: str | None) -> str | None:
+        """Map scanner side to actionable decision for scanner_tactical mode."""
+        normalized_side = cls._normalize_scanner_side(scanner_side)
+        if normalized_side == "long":
+            return "BUY"
+        if normalized_side == "short":
+            return "SELL"
+        return None
 
     @staticmethod
     def _normalize_scanner_side(side: Any) -> str | None:
