@@ -1001,7 +1001,10 @@ class Scheduler:
                 "threshold_min_confidence": thresholds.min_confidence,
                 "threshold_min_blended_confidence": thresholds.min_blended_confidence,
             }
-            pre_blended = self._blend_confidence(intent.scanner_confidence, scanner_direction_quality)
+            pre_blended = self._blend_confidence(
+                intent.scanner_confidence,
+                scanner_direction_quality,
+            )
             if not self._passes_threshold(intent.scanner_confidence, pre_blended, thresholds):
                 cancelled = await self._cancel_intent_safe(
                     worker_id=worker_id,
