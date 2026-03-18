@@ -52,6 +52,7 @@ def build_daily_entry_calibration_snapshot(
                 "rest_fallback_count": 0,
                 "mixed_source_count": 0,
                 "reason_counts": defaultdict(int),
+                "failed_hard_gate_counts": defaultdict(int),
             },
         )
 
@@ -78,14 +79,28 @@ def build_daily_entry_calibration_snapshot(
         if reason_code:
             group["reason_counts"][reason_code] += 1
 
+        failed_hard_gate_codes = event.get("failed_hard_gate_reason_codes", [])
+        if isinstance(failed_hard_gate_codes, list):
+            for code in failed_hard_gate_codes:
+                if isinstance(code, str) and code:
+                    group["failed_hard_gate_counts"][code] += 1
+
     groups: list[dict[str, Any]] = []
     for _, group in sorted(grouped.items()):
         total = int(group["total_verdicts"])
         reason_counts = dict(group.pop("reason_counts"))
+        failed_hard_gate_counts = dict(group.pop("failed_hard_gate_counts"))
         top_reason_codes = [
             {"reason_code": reason_code, "count": count}
             for reason_code, count in sorted(
                 reason_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:5]
+        ]
+        top_failed_hard_gates = [
+            {"reason_code": reason_code, "count": count}
+            for reason_code, count in sorted(
+                failed_hard_gate_counts.items(),
                 key=lambda item: (-item[1], item[0]),
             )[:5]
         ]
@@ -100,6 +115,8 @@ def build_daily_entry_calibration_snapshot(
                 "rest_fallback_ratio": _safe_rate(group["rest_fallback_count"], total),
                 "mixed_source_ratio": _safe_rate(group["mixed_source_count"], total),
                 "top_reason_codes": top_reason_codes,
+                "failed_hard_gate_counts": failed_hard_gate_counts,
+                "top_failed_hard_gates": top_failed_hard_gates,
             }
         )
 

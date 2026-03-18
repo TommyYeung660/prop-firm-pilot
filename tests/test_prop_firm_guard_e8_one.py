@@ -126,20 +126,19 @@ class TestE8OneDrawdownRules:
 
 class TestE8OneBestDayRule:
     def test_best_day_passes(self, e8_one_guard):
-        # Limit is 180. Safe limit is 180 * 0.85 = 153.
-        account = _snapshot(daily_pnl=100.0)
-        trade = _trade(
-            risk=20.0, tp_pips=50.0
-        )  # profit = 50 * 10 * 0.25 = 125. 100+125 = 225 > 153!
-        # wait, let's lower the tp_pips
-        trade = _trade(risk=10.0, tp_pips=10.0)  # profit = 10 * 10 * 0.25 = 25. 100+25 = 125 < 153
+        # Limit is 180. Safe limit is 180 * 0.90 = 162.
+        # Best Day gating must only use actual daily PnL.
+        account = _snapshot(daily_pnl=0.0, open_positions=0)
+        trade = _trade(risk=10.0, tp_pips=100.0)  # potential profit = 250, must be ignored
         result = e8_one_guard.check_best_day_rule(trade, account)
         assert result.passed is True
 
     def test_best_day_rejects(self, e8_one_guard):
-        account = _snapshot(daily_pnl=140.0)
-        # Even a small trade puts it over 153
-        trade = _trade(risk=10.0, tp_pips=10.0)  # profit = 25. 140+25 = 165 > 153
+        account = _snapshot(daily_pnl=162.0)
+        trade = _trade(risk=10.0, tp_pips=10.0)
         result = e8_one_guard.check_best_day_rule(trade, account)
         assert result.passed is False
         assert result.rule_name == "BEST_DAY_RULE"
+        assert "Current daily PnL" in result.reason
+        assert "potential_profit" not in result.details
+        assert "projected_daily_pnl" not in result.details

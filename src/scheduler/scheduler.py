@@ -35,6 +35,7 @@ from loguru import logger
 
 from src.compliance.best_day_tracker import BestDayTracker
 from src.compliance.hwm_tracker import HighWaterMarkTracker
+from src.compliance.prop_firm_guard import AccountSnapshot, PropFirmGuard
 from src.config import AppConfig
 from src.data.fx_data_fetcher import EodhdProvider
 from src.data.fx_tick_aggregator import FXTickAggregator
@@ -127,6 +128,11 @@ class Scheduler:
         self._best_day_tracker = best_day_tracker or BestDayTracker(
             best_day_limit=config.compliance.best_day_limit,
             stop_ratio=config.compliance.best_day_stop,
+        )
+        self._admission_guard = PropFirmGuard(
+            config=config.compliance,
+            execution_config=config.execution,
+            instruments=config.instruments,
         )
 
         # Internal subsystems
@@ -286,7 +292,7 @@ class Scheduler:
         return status
 
     async def _initialize_market_data_hub(self) -> None:
-        """Warm up and start the WebSocket-first market-data sidecar."""
+        """Warm up and start the hybrid market-data sidecar."""
         self._market_data_ready = False
         if not self._config.websocket.enabled:
             return
@@ -316,11 +322,28 @@ class Scheduler:
             symbols=symbols,
             quote_ttl_seconds=self._config.websocket.quote_ttl_seconds,
             operational_metrics=self._metrics,
+            broker_quote_provider=self._market_data_broker_quote_provider,
         )
         self._volatility_monitor.set_market_data_hub(self._market_data_hub)
         await self._market_data_hub.warmup()
         self._market_data_task = asyncio.create_task(self._websocket_client.run())
         self._market_data_ready = True
+
+    async def _market_data_broker_quote_provider(self, symbol: str) -> Any | None:
+        """Resolve broker quote for market-data hub primary quote path."""
+        broker_symbol = symbol
+        if self._registry is not None:
+            broker_symbol = self._registry.to_broker(symbol)
+        try:
+            return await self._matchtrader.get_quote(broker_symbol)
+        except Exception as e:
+            logger.debug(
+                "Scheduler: broker quote provider failed for {} (broker_symbol={}): {}",
+                symbol,
+                broker_symbol,
+                e,
+            )
+            return None
 
     async def recover_stale_claims(self) -> int:
         """Recover stale claimed intents from a previous crashed session.
@@ -433,6 +456,7 @@ class Scheduler:
                         max_pos,
                     )
                 else:
+                    admission_snapshot = await self._build_scanner_admission_snapshot(today)
                     created_count = 0
                     for signal in topk_signals:
                         if created_count >= available_slots:
@@ -470,6 +494,12 @@ class Scheduler:
                                 "Scanner loop: {} already has active position, skipping intent",
                                 signal.instrument,
                             )
+                            continue
+
+                        if self._should_skip_for_compliance_headroom(
+                            symbol=signal.instrument,
+                            snapshot=admission_snapshot,
+                        ):
                             continue
 
                         # C3 fix: Skip symbols with recent compliance rejection (cooldown)
@@ -3880,6 +3910,92 @@ class Scheduler:
         per_attempt_seconds = retry_cfg.interval_seconds + max(retry_cfg.jitter_seconds, 0)
         total_retry_seconds = retry_cfg.max_retries * per_attempt_seconds
         return self._now_utc() + timedelta(seconds=total_retry_seconds)
+
+    async def _build_scanner_admission_snapshot(self, trade_date: str) -> AccountSnapshot | None:
+        """Build account snapshot for scanner-level compliance headroom checks.
+
+        This is a best-effort optimization path. On failures we return None and
+        let downstream execution-time compliance remain the final safety gate.
+        """
+        try:
+            balance_info = await self._matchtrader.get_balance()
+            open_positions = await self._matchtrader.get_open_positions()
+            today_intents = await asyncio.to_thread(self._store.get_intents_by_date, trade_date)
+        except Exception as e:
+            logger.warning(
+                "Scanner loop: compliance headroom snapshot unavailable (fail-open): {}",
+                e,
+            )
+            return None
+
+        realized_pnl = sum(
+            (intent.realized_pnl or 0.0) for intent in today_intents if intent.status == "closed"
+        )
+        unrealized_pnl = sum(
+            self._coerce_numeric(getattr(position, "profit", 0.0), fallback=0.0)
+            for position in open_positions
+        )
+        initial_balance = self._config.account.initial_balance
+        balance = self._coerce_numeric(
+            getattr(balance_info, "balance", 0.0),
+            fallback=initial_balance + realized_pnl,
+        )
+        equity = self._coerce_numeric(
+            getattr(balance_info, "equity", 0.0),
+            fallback=balance + unrealized_pnl,
+        )
+        margin = self._coerce_numeric(getattr(balance_info, "margin", 0.0), fallback=0.0)
+        free_margin = self._coerce_numeric(getattr(balance_info, "free_margin", 0.0), fallback=0.0)
+
+        return AccountSnapshot(
+            balance=balance,
+            equity=equity,
+            margin=margin,
+            free_margin=free_margin,
+            day_start_balance=balance - realized_pnl,
+            initial_balance=initial_balance,
+            open_positions=len(open_positions),
+            daily_pnl=realized_pnl + unrealized_pnl,
+            total_pnl=balance - initial_balance,
+            equity_high_water_mark=self._hwm_tracker.high_water_mark if self._hwm_tracker else None,
+        )
+
+    def _should_skip_for_compliance_headroom(
+        self,
+        symbol: str,
+        snapshot: AccountSnapshot | None,
+    ) -> bool:
+        """Return True when scanner candidate should be skipped by compliance headroom."""
+        if snapshot is None:
+            return False
+        try:
+            result = self._admission_guard.check_admission_headroom(snapshot)
+        except Exception as e:
+            logger.warning(
+                "Scanner loop: compliance headroom check failed for {} (fail-open): {}",
+                symbol,
+                e,
+            )
+            return False
+        if result.passed:
+            return False
+
+        self._log_trade_event(
+            "SCANNER_SKIP",
+            {
+                "symbol": symbol,
+                "reason": "compliance_headroom",
+                "rule_name": result.rule_name,
+                "rule_reason": result.reason,
+                "rule_details": result.details,
+            },
+        )
+        logger.warning(
+            "Scanner loop: {} skipped by compliance headroom ({})",
+            symbol,
+            result.rule_name,
+        )
+        return True
 
     def _should_pause_new_entries(self) -> bool:
         """Return True when Best Day protection says we should avoid new entries."""

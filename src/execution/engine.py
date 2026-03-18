@@ -540,14 +540,14 @@ class ExecutionEngine:
         )
 
     def _get_best_day_entry_block_reason(self, snapshot: AccountSnapshot) -> str | None:
-        """Return rejection reason when Best Day protection says no new entries."""
+        """Return rejection reason when actual daily PnL says no new entries."""
         safe_limit = self._config.compliance.best_day_limit * self._config.compliance.best_day_stop
         pause_threshold = safe_limit * 0.90
         if snapshot.daily_pnl < pause_threshold:
             return None
         return (
             "Best Day entry gate active: "
-            f"daily PnL ${snapshot.daily_pnl:.2f} >= pause threshold ${pause_threshold:.2f} "
+            f"actual daily PnL ${snapshot.daily_pnl:.2f} >= pause threshold ${pause_threshold:.2f} "
             f"(safe limit ${safe_limit:.2f})"
         )
 

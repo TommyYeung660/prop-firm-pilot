@@ -11,6 +11,7 @@ Tests cover:
 - TelegramBotHandler command parsing and dispatching
 """
 
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -724,7 +725,7 @@ class TestAlertServiceCircuitBreaker:
     """Test circuit breaker pattern in AlertService.send()."""
 
     def _make_alert(self) -> AlertService:
-        return AlertService(bot_token="fake:token", chat_id="123456")
+        return AlertService(bot_token="fake:token", chat_id="123456", max_retries=0)
 
     async def test_circuit_opens_after_n_failures(self) -> None:
         """Circuit opens after _CIRCUIT_OPEN_THRESHOLD consecutive failures."""
@@ -865,6 +866,88 @@ class TestAlertServiceCircuitBreaker:
         assert result is False
         assert alert._consecutive_failures == 0
         assert alert._circuit_open is False
+
+
+class TestAlertServiceResilience:
+    """Test retry accounting and alternate sink behavior for AlertService.send()."""
+
+    async def test_send_retries_before_success_and_records_retry_metrics(self) -> None:
+        metrics = OperationalMetrics()
+        alert = AlertService(
+            bot_token="fake:token",
+            chat_id="123456",
+            operational_metrics=metrics,
+            max_retries=2,
+            retry_backoff_seconds=0.0,
+        )
+        mock_response = MagicMock(status_code=200)
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            side_effect=[
+                httpx.ConnectTimeout("timeout-1"),
+                httpx.ConnectTimeout("timeout-2"),
+                mock_response,
+            ]
+        )
+        alert._http_client = mock_client
+
+        result = await alert.send("retry-me")
+
+        assert result is True
+        assert mock_client.post.await_count == 3
+        summary = metrics.get_summary()
+        assert summary["telegram_retries"] == 2
+        assert summary["telegram_failures"] == 0
+        assert alert._consecutive_failures == 0
+        alert._http_client = None
+
+    async def test_send_uses_alternate_sink_after_primary_retries_exhausted(self) -> None:
+        metrics = OperationalMetrics()
+        alternate_sink = AsyncMock(return_value=True)
+        alert = AlertService(
+            bot_token="fake:token",
+            chat_id="123456",
+            operational_metrics=metrics,
+            alternate_sink=alternate_sink,
+            max_retries=1,
+            retry_backoff_seconds=0.0,
+        )
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectTimeout("timeout"))
+        alert._http_client = mock_client
+
+        result = await alert.send("primary-down")
+
+        assert result is True
+        assert mock_client.post.await_count == 2
+        alternate_sink.assert_awaited_once_with("primary-down", "primary_send_failed")
+        summary = metrics.get_summary()
+        assert summary["telegram_retries"] == 1
+        assert summary["telegram_failures"] == 1
+        assert alert._consecutive_failures == 1
+        alert._http_client = None
+
+    async def test_circuit_open_routes_alerts_to_alternate_sink_without_http(self) -> None:
+        alternate_sink = AsyncMock(return_value=True)
+        alert = AlertService(
+            bot_token="fake:token",
+            chat_id="123456",
+            alternate_sink=alternate_sink,
+            max_retries=0,
+        )
+        alert._circuit_open = True
+        alert._circuit_opened_at = time.monotonic()
+        alert._CIRCUIT_RETRY_INTERVAL = 300.0
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock()
+        alert._http_client = mock_client
+
+        result = await alert.send("circuit-open")
+
+        assert result is True
+        mock_client.post.assert_not_awaited()
+        alternate_sink.assert_awaited_once_with("circuit-open", "circuit_open")
+        alert._http_client = None
 
 
 # ── Circuit Breaker Tests (TelegramBotHandler) ──────────────────────────────

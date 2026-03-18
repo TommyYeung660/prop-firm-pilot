@@ -17,12 +17,16 @@ Usage:
     await alerts.trade_opened("EURUSD.", "BUY", 0.10, 1.08500, equity=5050.0)
 """
 
+import asyncio
+import inspect
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
 from loguru import logger
+
+from src.monitor.operational_metrics import OperationalMetrics
 
 
 class AlertService:
@@ -49,6 +53,10 @@ class AlertService:
         daily_loss_pct: float = 0.0,
         max_drawdown_pct: float = 0.0,
         on_send_failure: Callable[[], None] | None = None,
+        operational_metrics: OperationalMetrics | None = None,
+        alternate_sink: Callable[[str, str], bool | None | Awaitable[bool | None]] | None = None,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 0.0,
     ) -> None:
         self._bot_token = bot_token
         self._chat_id = chat_id
@@ -60,6 +68,10 @@ class AlertService:
         self._http_client: httpx.AsyncClient | None = None
         self._enabled = bool(bot_token and chat_id)
         self._on_send_failure = on_send_failure
+        self._metrics = operational_metrics
+        self._alternate_sink = alternate_sink
+        self._max_retries = max(0, max_retries)
+        self._retry_backoff_seconds = max(0.0, retry_backoff_seconds)
 
         # ── Circuit Breaker State ──────────────────────────────────────
         self._consecutive_failures: int = 0
@@ -122,7 +134,7 @@ class AlertService:
                     "AlertService: circuit open, skipping send ({:.0f}s until probe)",
                     self._CIRCUIT_RETRY_INTERVAL - elapsed,
                 )
-                return False
+                return await self._send_alternate_sink(message, failure_reason="circuit_open")
             # Retry interval elapsed — allow one probe request
             logger.info(
                 "AlertService: circuit open for {:.0f}s, attempting probe request",
@@ -136,18 +148,39 @@ class AlertService:
             "parse_mode": "HTML",
         }
 
+        for attempt in range(self._max_retries + 1):
+            if attempt > 0:
+                if self._metrics is not None:
+                    self._metrics.record_api_retry("telegram")
+                logger.warning(
+                    "AlertService: retrying Telegram send ({}/{})",
+                    attempt,
+                    self._max_retries,
+                )
+                if self._retry_backoff_seconds > 0:
+                    await asyncio.sleep(self._retry_backoff_seconds * attempt)
+
+            if await self._send_primary_once(url=url, payload=payload):
+                self._reset_circuit()
+                return True
+
+        self._record_failure()
+        return await self._send_alternate_sink(message, failure_reason="primary_send_failed")
+
+    # ── Circuit Breaker Helpers ─────────────────────────────────────────
+
+    async def _send_primary_once(self, *, url: str, payload: dict[str, Any]) -> bool:
+        """Send one primary Telegram request without applying retry/circuit policy."""
         try:
             client = await self._get_client()
             response = await client.post(url, json=payload)
             if response.status_code == 200:
-                self._reset_circuit()
                 return True
             logger.error(
                 "AlertService: Telegram API error {}: {}",
                 response.status_code,
                 response.text[:200],
             )
-            self._record_failure()
             return False
         except httpx.HTTPError as e:
             logger.error(
@@ -155,14 +188,38 @@ class AlertService:
                 type(e).__name__,
                 e or "no details",
             )
-            self._record_failure()
             return False
 
-    # ── Circuit Breaker Helpers ─────────────────────────────────────────
+    async def _send_alternate_sink(self, message: str, *, failure_reason: str) -> bool:
+        """Route alert to the configured secondary sink when Telegram is unavailable."""
+        if self._alternate_sink is None:
+            return False
+        try:
+            result = self._alternate_sink(message, failure_reason)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as e:
+            logger.error(
+                "AlertService: alternate sink failed for reason {}: {}",
+                failure_reason,
+                e,
+            )
+            return False
+
+        delivered = result is not False
+        log_fn = logger.warning if delivered else logger.error
+        log_fn(
+            "AlertService: alternate sink {} for reason {}",
+            "accepted alert" if delivered else "rejected alert",
+            failure_reason,
+        )
+        return delivered
 
     def _record_failure(self) -> None:
         """Increment failure counter and open circuit if threshold reached."""
         self._consecutive_failures += 1
+        if self._metrics is not None:
+            self._metrics.record_telegram_failure()
         if self._on_send_failure:
             self._on_send_failure()
         if not self._circuit_open and self._consecutive_failures >= self._CIRCUIT_OPEN_THRESHOLD:

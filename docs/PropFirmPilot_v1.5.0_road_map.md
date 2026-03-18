@@ -1,12 +1,12 @@
 # PropFirmPilot v1.5.0 之後 — `v1.5.0` 到 `v1.5.9` 單一入口路線圖
 
-> **更新日期**: `2026-03-17`
+> **更新日期**: `2026-03-18`
 >
 > **文件角色**: `v1.5.0` 到 `v1.5.9` 的唯一入口 roadmap
 >
 > **適用範圍**: `prop-firm-pilot` 主線規劃，並直接納入 `qlib_market_scanner` / `qlib_rd_agent` / `TradingAgents` 的必要依賴
 >
-> **當前主線狀態**: `v1.5.0_preview` 已於 `2026-03-17` 在 `v1.5.0_beta_2` baseline 上落地 bounded capital utilization uplift preview；`v1.5.0_stable` 仍待 exposure / memory / validation acceptance closure
+> **當前主線狀態**: `v1.5.0_preview` 已於 `2026-03-17` 在 `v1.5.0_beta_2` baseline 上落地 bounded capital utilization uplift preview；`2026-03-18` 已再吸收一輪 preview incident remediation（Best Day semantics、compliance admission、market-data routing、scanner success contract、Telegram fallback）；`v1.5.0_stable` 仍待 open-book worst-case natural-SL drawdown guard、exposure / memory / validation acceptance closure
 >
 > **閱讀原則**: 若你只想知道 `1.5.0` 到 `1.5.9` 應做什麼，先看這份；不需要先回頭讀複數文檔
 
@@ -37,11 +37,15 @@
 
 | 類別 | 已完成內容 | 來源版本 / 狀態 |
 |---|---|---|
-| **Market data baseline** | WebSocket-first、REST fallback、warm-cache、degraded handling 已落地 | `v1.4.x` 系列 |
+| **Market data baseline** | `broker quote-first + API bars-first + websocket auxiliary` hybrid routing、warm-cache、degraded summary 已落地 | `v1.5.0_preview` remediation |
 | **Freshness semantics** | effective close time freshness、stale tactical warning throttling 已落地 | `v1.4.9` |
 | **Close control plane** | canonical close schema、`CloseControlPlane`、`CloseReconciler` 已落地 | `v1.4.8` |
 | **Scanner contract gate** | `manifest/schema/version/validation` 檢查、required signal columns 驗證已落地 | `v1.5.0_beta` |
 | **Scanner metadata persistence** | `scanner_version`、`scanner_schema_version`、`scanner_market_date`、`scanner_label_version` 已能落盤 | `v1.5.0_beta` |
+| **Best Day semantics** | 新單 gate 已改為 actual `daily_pnl` only，不再把 hypothetical TP profit 當成當日 PnL | `v1.5.0_preview` remediation |
+| **Compliance admission guard** | deterministic compliance headroom 已前移到 candidate / intent creation | `v1.5.0_preview` remediation |
+| **Scanner success contract** | success 已收緊為 process + artifact + ingestion + `target_date` matched | `v1.5.0_preview` remediation |
+| **Alert resilience baseline** | Telegram retry accounting、failure metrics、`ALERT_FALLBACK` secondary sink 已落地 | `v1.5.0_preview` remediation |
 | **Version identity baseline** | `qlib_market_scanner` 的 scanner contract baseline 已凍結在 `1.5.0_beta` / `v1.5.0_beta`；`prop-firm-pilot` 主線則已 bump 到 `1.5.0_preview` / `v1.5.0_preview`，明確標記 bounded uplift preview lane | `v1.5.0_beta` → `v1.5.0_preview` |
 | **FX scanner release cadence decision** | upstream 已完成第一輪 FX cadence research，canonical cadence 凍結為 `1d` | `qlib_market_scanner v1.5.0_beta` |
 | **Runtime bundle family isolation** | runtime `outputs/*` 與 legacy `data/shared_export/*` 已分流，不再混讀 sidecars | `v1.5.0_beta` |
@@ -74,22 +78,43 @@
 | **P1** | incident diagnostics closure：`bars_5m_unavailable` 類 incident 現在會帶出 market-data hub 初始化時間、uptime 與 per-symbol websocket closed bar counts |
 | **P2** | account config tuning / ergonomics：`e8_one_5k_challenge` 已把 off-hours scanner cadence 下調到 `3600s`，並按「高頻常調 / 低頻基礎」重排 YAML 結構與中文註解 |
 
-### 2.3 屬於 `v1.5.0 stable` 必須完成
+### 2.3 `v1.5.0_preview` incident remediation 已成為 stable 前 correctness hardening baseline
+
+根據 `prod_logs_20260318_v1.5.0_preview` 的 incident review，preview lane 雖已完成 bounded capital utilization uplift，但仍暴露出一組不能留到 stable 才處理的 correctness defects。這輪 remediation 已在本 repo 實作完成，stable gate 應視其為 baseline，而不是待選 enhancement。
+
+| 嚴重度 | `v1.5.0_preview` remediation 已納入的 corrective actions |
+|---|---|
+| **P0** | `Best Day Rule` 新單 gate 改為 actual `daily_pnl` only，禁止 hypothetical TP profit 造成 no-trade false reject |
+| **P0** | deterministic compliance headroom 前移到 candidate / intent creation，避免必定被拒的單子仍完整跑過 tactical / execution |
+| **P0** | tactical hard-gate observability 已拆開 `spread`、`atr_regime`、`data_freshness`，並可對 USDCAD spread / ATR warmup 做後續 calibration review |
+| **P1** | market-data routing 改為 `broker quote-first + API bars-first + websocket auxiliary`，websocket degraded 不再單獨 hard-block 系統 |
+| **P1** | scanner success contract 改為 process + artifact + ingestion + `target_date` matched 才算 success |
+| **P1** | Telegram send 補上 retry accounting、failure metrics 與 secondary sink；primary channel 失效時至少寫入 `ALERT_FALLBACK` journal event |
+
+這輪 remediation 的關鍵 evidence 如下：
+
+- websocket failures `15`
+- REST fallback warnings `129`
+- `market_data.quote_unavailable` log/journal 各 `2`
+- `spread.fail.ratio_too_wide = 72`
+- `atr.fail.insufficient_1h_data = 133`
+
+### 2.4 屬於 `v1.5.0 stable` 必須完成
 
 以下項目若未完成，`v1.5.0` 只能停留在 beta integration baseline，不能保守地稱為 stable：
 
 | 主題 | `v1.5.0 stable` 必須完成的 closure |
 |---|---|
-| **Operational repair closure** | `v1.5.0_beta_2` 所定義的 P0 / P1 repairs 必須先收斂，stable 不接受帶病升版 |
+| **Operational repair closure** | `v1.5.0_beta_2` 與 `2026-03-18` preview remediation 所定義的 P0 / P1 repairs 必須先收斂，stable 不接受帶病升版 |
 | **Tactical entry integrity** | deterministic reason code、source provenance、score breakdown、state transition closure |
 | **Tactical exit audit closure** | trigger source、broker read-back、journal consistency、postmortem replayability |
-| **Bounded capital utilization uplift** | preview implementation 已在本 repo 落地；`v1.5.0 stable` 尚需 multi-day validation、integrated acceptance，並與 exposure / memory / validation closure 一起驗收 |
-| **Portfolio / exposure guard v1** | base/quote currency exposure budget、同向集中暴露上限、低相關 setup budget |
+| **Bounded capital utilization uplift** | preview implementation 已在本 repo 落地；`v1.5.0 stable` 尚需 multi-day validation、integrated acceptance，並證明 uplift 不會讓 open-book worst-case natural-SL portfolio loss 穿透 `daily_drawdown_stop`；同時需與 preview remediation 的 regression-free validation、exposure / memory / validation closure 一起驗收 |
+| **Portfolio / exposure guard v1** | base/quote currency exposure budget、同向集中暴露上限、低相關 setup budget，以及 portfolio-level risk reservation / aggregate open-risk guard |
 | **Trade-memory v1** | raw event / reflection / retrieval 三層分工、schema freeze、quality gate |
 | **Validation closure** | multi-day market-open validation、live-vs-research consistency review、P0/P1 tactical incident 收斂 |
 | **Stable acceptance gate** | 把 scanner contract、entry / exit control plane、memory、exposure guard 放到同一個 release gate 內驗收 |
 
-### 2.4 明確延後到 `1.5.x`
+### 2.5 明確延後到 `1.5.x`
 
 以下項目重要，但不應把它們混進 `v1.5.0 stable` 的最小 closure：
 
@@ -101,7 +126,7 @@
 | **Memory ablation** | 需等 trade-memory contract 先凍結，再做可信比較 |
 | **更完整的 portfolio construction / capital allocation** | `v1.5.0 stable` 只做 bounded capital utilization uplift；完整 session / setup / currency / correlation-aware capital engine 仍延後 |
 
-### 2.5 明確不屬於 `1.5.x`
+### 2.6 明確不屬於 `1.5.x`
 
 以下內容不應在 `1.5.x` 被當成默認承諾：
 
@@ -145,8 +170,8 @@
 | 版本 | 角色 | 主軸 |
 |---|---|---|
 | `1.5.0_beta_2` | beta hardening repair gate | 已收斂 freshness、stale signals、tactical timeout、monitor / alert hardening，並補齊 market-data diagnostics 與 account config tuning |
-| `1.5.0_preview` | bounded uplift preview lane | 在 `1.5.0_beta_2` baseline 上落地 bounded capital utilization uplift implementation，先改善 sparse portfolio 的資金使用率，仍不宣稱 stable gate 已完成 |
-| `1.5.0` | 第一個 stable acceptance gate | 把 preview uplift 納入 entry / exit / memory / exposure / validation 的整體驗收，形成第一個可保守稱為 stable 的 release |
+| `1.5.0_preview` | bounded uplift + incident remediation preview lane | 先落地 bounded capital utilization uplift，再吸收 preview incident remediation，形成 stable 前的最新 correctness baseline |
+| `1.5.0` | 第一個 stable acceptance gate | 把 preview uplift 與 preview remediation 一起納入 entry / exit / memory / exposure / validation 的整體驗收，形成第一個可保守稱為 stable 的 release |
 | `1.5.1` | post-stable correctness sweep | 修正 first stable run 暴露的 correctness 與 taxonomy drift |
 | `1.5.2` | validation accumulation | 強化 live-vs-research consistency 與 multi-day acceptance evidence |
 | `1.5.3` | operator + risk hardening | 收斂 operator diagnostics、scheduler consistency、exposure guard v1 hardening |
@@ -218,9 +243,18 @@
 
 這一版仍不能被稱為 `v1.5.0 stable`，因為 stable 尚缺：
 
+- tactical exit 不介入時，open-book worst-case natural-SL portfolio loss 仍可能穿透 `daily_drawdown_stop`；stable 必須補上 portfolio-level risk reservation / aggregate open-risk guard
 - exposure guard v1 integrated acceptance
 - trade-memory v1 與 quality gate
 - multi-day market-open validation 與 integrated stable acceptance gate
+
+但 `2026-03-18` 的 preview incident 也已明確證明，stable gate 不能只驗收 uplift，還必須驗收以下 remediation 不回退：
+
+- `Best Day Rule` actual-`daily_pnl` semantics 不回退到 projected-profit gating
+- compliance headroom admission guard 仍在 candidate / intent creation 前生效
+- market-data 仍維持 `broker quote-first + API bars-first + websocket auxiliary`
+- scanner success 仍要求 `target_date` 真正落盤
+- Telegram alerting 在 primary channel 失效時仍保有 retry accounting 與 journal fallback
 
 ---
 
@@ -230,13 +264,14 @@
 
 `v1.5.0` 是第一個 stable milestone，不是新 feature 大包。
 
-它的任務是把 `v1.5.0_beta` 已經吸收進主線的 scanner contract、version identity 與 `1d` cadence baseline，加上 `v1.5.0_preview` 已落地的 bounded capital utilization uplift，經過 `v1.5.0_beta_2` repair gate 後，升級成可以被保守驗收的 stable trading system gate。
+它的任務是把 `v1.5.0_beta` 已經吸收進主線的 scanner contract、version identity 與 `1d` cadence baseline，加上 `v1.5.0_preview` 已落地的 bounded capital utilization uplift 與 `2026-03-18` preview incident remediation，經過 `v1.5.0_beta_2` repair gate 後，升級成可以被保守驗收的 stable trading system gate。
 
 ### 6.2 本 repo 主責
 
 - 完成 tactical entry production-grade closure
 - 完成 tactical exit audit / read-back / postmortem closure
-- 將 preview 已落地的 bounded capital utilization uplift 納入 stable acceptance，證明其在 live path 可用且未削弱 safety guard
+- 將 preview 已落地的 bounded capital utilization uplift 納入 stable acceptance，並證明 Best Day / compliance admission / market-data / scanner / alert remediation 沒有回退
+- 上線 portfolio-level open-risk reservation / daily drawdown budget guard，保證 tactical exit 不介入時的 worst-case natural-SL 組合損失不穿透 `daily_drawdown_stop`
 - 上線 exposure guard v1
 - 上線 trade-memory v1 與 quality gate v1
 - 完成 multi-day stable acceptance gate
@@ -260,9 +295,11 @@
 ### 6.5 完成條件
 
 - `v1.5.0_beta_2` 所定義的 P0 / P1 repair 已先收斂
+- `2026-03-18` preview remediation 所定義的 Best Day、compliance admission、market-data routing、scanner success contract、Telegram fallback 修正已經過 multi-day regression-free validation
 - entry verdict 有完整 deterministic reason taxonomy
 - exit action 有完整 broker read-back 與 canonical close facts
 - bounded capital utilization uplift 已完成 stable acceptance，且未削弱 safety-critical guard
+- tactical exit 不介入的 worst-case natural-SL 情境下，open-book portfolio risk 仍不會突破 `daily_drawdown_stop`
 - exposure guard v1 在 live path 可用
 - trade-memory schema 與 quality gate 已落地
 - 多日 market-open validation 無重複 P0/P1 tactical correctness incident
@@ -470,7 +507,7 @@
 |---|---|---|---|---|
 | **Beta_2 repair gate** | freshness / stale signal / tactical timeout / monitor hardening | runtime bundle contract 與 signal-date metadata 需可被可靠驗證 | 無新增 mandatory change | 不可讓 decision state transition 破壞 deterministic failure handling |
 | **Preview uplift** | bounded allocator / sizing override / execution audit metadata | 穩定輸出 scanner confidence / score metadata，讓 uplift 可被 bounded 使用 | candidate / discovered / manifest / archive contract 已存在即可，無新增 preview blocker | 不破壞既有 stable fields 與 decision schema |
-| **Stable gate** | entry / exit / exposure / memory / validation closure，並完成 preview uplift acceptance | 穩定輸出 `1d` scanner contract、score metadata、promotion boundary | 維持 factor artifact / archive lineage 一致，避免 upstream provenance 漂移 | 不破壞既有 stable contract |
+| **Stable gate** | entry / exit / exposure / memory / validation closure，補上 open-book worst-case natural-SL drawdown guard，並完成 preview uplift acceptance | 穩定輸出 `1d` scanner contract、score metadata、promotion boundary | 維持 factor artifact / archive lineage 一致，避免 upstream provenance 漂移 | 不破壞既有 stable contract |
 | **Memory** | schema、quality gate、pipeline | 提供穩定 scanner metadata | 提供可追溯的 factor artifact / archive lineage | lesson consumption / retrieval policy 配合 |
 | **Capital efficiency** | exposure budget、allocation discipline | 提供可分群的穩定 metadata | 無新增 mandatory change，但 artifact lineage 要穩定可追溯 | risk output 要能承載 portfolio context |
 | **Follow-up research productization** | bounded ingestion / metadata support | bounded metadata extension，不改 default cadence | 維持 candidate / archive contract backward-compatible | bounded context alignment |
@@ -495,7 +532,7 @@
 
 - tactical entry 已達 production-grade reliability
 - tactical exit 已達 fully auditable stable closure
-- bounded capital utilization uplift 已完成 stable acceptance 與 multi-day validation
+- bounded capital utilization uplift 已完成 stable acceptance 與 multi-day validation，且 open-book worst-case natural-SL drawdown guard 已閉環
 - trade-memory contract 已穩定
 - portfolio / exposure control 已達 stable v1
 - integrated validation gate 已成熟

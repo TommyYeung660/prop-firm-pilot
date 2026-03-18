@@ -362,6 +362,50 @@ class ScannerBridge:
             timeout=600,  # 10 min timeout for data download + training
         )
 
+    def _log_pipeline_outcome(
+        self,
+        *,
+        process_success: bool,
+        signals_path: Path,
+        signals: list[ScannerSignal],
+        signal_date: str,
+        request_date: str | None,
+    ) -> None:
+        """Log pipeline outcome using full success contract instead of subprocess exit alone."""
+        artifact_available = signals_path.exists()
+        ingestion_success = bool(signals)
+        target_date_matched = request_date is None or (
+            bool(signal_date) and signal_date == request_date
+        )
+        rejection_reason = self.get_last_rejection_reason_code()
+
+        if process_success and artifact_available and ingestion_success and target_date_matched:
+            logger.info(
+                "ScannerBridge: pipeline succeeded "
+                "(process_success={}, artifact_available={}, ingestion_success={}, "
+                "target_date_matched={}, signal_date={}, signal_count={})",
+                process_success,
+                artifact_available,
+                ingestion_success,
+                target_date_matched,
+                signal_date,
+                len(signals),
+            )
+            return
+
+        logger.warning(
+            "ScannerBridge: pipeline incomplete "
+            "(process_success={}, artifact_available={}, ingestion_success={}, "
+            "target_date_matched={}, signal_date={}, signal_count={}, rejection_reason={})",
+            process_success,
+            artifact_available,
+            ingestion_success,
+            target_date_matched,
+            signal_date,
+            len(signals),
+            rejection_reason or "none",
+        )
+
     # ── Main pipeline ───────────────────────────────────────────────────
 
     def run_pipeline(
@@ -473,6 +517,13 @@ class ScannerBridge:
                                 "ScannerBridge: attempting fallback to existing signals file: {}",
                                 signals_path,
                             )
+                        self._log_pipeline_outcome(
+                            process_success=False,
+                            signals_path=signals_path,
+                            signals=signals,
+                            signal_date=signal_date,
+                            request_date=date,
+                        )
                         self._update_cache(date, interval, signals, signal_date)
                         return signals
 
@@ -485,8 +536,6 @@ class ScannerBridge:
 
                 return []
 
-            logger.info("ScannerBridge: pipeline finished successfully.")
-
             # Read output file directly
             # Path: outputs/signals/signals.csv
             signals_path = self._scanner_path / "outputs" / "signals" / "signals.csv"
@@ -494,6 +543,13 @@ class ScannerBridge:
                 signals_path,
                 target_date=date,
                 max_signal_age_days=max_signal_age_days,
+            )
+            self._log_pipeline_outcome(
+                process_success=True,
+                signals_path=signals_path,
+                signals=signals,
+                signal_date=signal_date,
+                request_date=date,
             )
             if signals:
                 self._update_cache(date, interval, signals, signal_date)
