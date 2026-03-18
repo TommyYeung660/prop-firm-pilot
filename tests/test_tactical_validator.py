@@ -533,6 +533,41 @@ class TestTacticalVerdictSchema:
         assert payload["policy_hints"]["retryable"] is True
         assert payload["provenance"]["data_source"] == "rest_fallback"
 
+    def test_to_log_dict_flattens_multiple_failed_hard_gates(self) -> None:
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        data = TacticalData(
+            bars_1h=pd.DataFrame(
+                {
+                    "high": [1.1010] * 10,
+                    "low": [1.1000] * 10,
+                    "close": [1.1005] * 10,
+                }
+            ),
+            current_spread=0.00050,
+            typical_spread=0.00015,
+            latest_bar_time=datetime.now(timezone.utc),
+            quote_source="rest_fallback",
+            bars_1h_source="warmup_cache",
+            data_source="rest_fallback",
+        )
+
+        result = validator.evaluate(side="BUY", data=data)
+        payload = result.to_log_dict()
+
+        assert result.action == "WAIT"
+        assert result.summary_reason_code == "spread.fail.ratio_too_wide"
+        assert payload["failed_hard_gate_names"] == ["spread", "atr_regime"]
+        assert payload["failed_hard_gate_reason_codes"] == [
+            "spread.fail.ratio_too_wide",
+            "atr.fail.insufficient_1h_data",
+        ]
+        assert payload["hard_gate_reason_codes"] == [
+            "spread.fail.ratio_too_wide",
+            "atr.fail.insufficient_1h_data",
+            "freshness.pass.quote_fresh",
+        ]
+
     def test_waits_for_first_5m_bar_when_quote_is_fresh_but_bars_are_missing(self) -> None:
         config = TacticalConfig()
         validator = TacticalValidator(config)

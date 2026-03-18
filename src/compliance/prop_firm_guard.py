@@ -208,8 +208,8 @@ class PropFirmGuard:
 
         return ComplianceResult(passed=True, rule_name=rule_label)
 
-    def check_best_day_rule(self, trade: TradePlan, account: AccountSnapshot) -> ComplianceResult:
-        """E8 rule: daily PnL + potential profit must not exceed best_day_limit.
+    def check_best_day_rule(self, _trade: TradePlan, account: AccountSnapshot) -> ComplianceResult:
+        """E8 rule: actual daily PnL must not exceed best_day_limit safety threshold.
 
         best_day_limit = profit_target × initial_balance × best_day_ratio
         For $50k Signature: $50,000 × 8% × 40% = $1,600/day
@@ -218,23 +218,17 @@ class PropFirmGuard:
         stop_ratio = self._config.best_day_stop
         safe_limit = best_day_limit * stop_ratio
 
-        # Calculate potential profit from this trade (TP distance × volume × pip_value)
-        potential_profit = self._estimate_potential_profit(trade)
-        projected_daily_pnl = account.daily_pnl + potential_profit
-
-        if projected_daily_pnl >= safe_limit:
+        if account.daily_pnl >= safe_limit:
             return ComplianceResult(
                 passed=False,
                 rule_name="BEST_DAY_RULE",
                 reason=(
-                    f"Projected daily PnL ${projected_daily_pnl:.2f} would exceed "
+                    f"Current daily PnL ${account.daily_pnl:.2f} exceeds "
                     f"Best Day safety limit ${safe_limit:.2f} "
                     f"({stop_ratio:.0%} of ${best_day_limit:.2f})"
                 ),
                 details={
                     "current_daily_pnl": account.daily_pnl,
-                    "potential_profit": potential_profit,
-                    "projected_daily_pnl": projected_daily_pnl,
                     "safe_limit": safe_limit,
                     "hard_limit": best_day_limit,
                 },
@@ -284,6 +278,36 @@ class PropFirmGuard:
             )
 
         return ComplianceResult(passed=True, rule_name="API_REQUEST_BUDGET")
+
+    def check_admission_headroom(self, account: AccountSnapshot) -> ComplianceResult:
+        """Run deterministic no-risk checks for scanner admission.
+
+        This is a pre-admission optimization gate used by scheduler/scanner to skip
+        candidates that are guaranteed to be blocked by compliance anyway.
+        """
+        no_risk_trade = TradePlan(
+            symbol="ADMISSION",
+            side="BUY",
+            volume=0.01,
+            stop_loss=0.0,
+            take_profit=0.0,
+            risk_amount=0.0,
+        )
+        checks = [
+            self.check_best_day_rule,
+            self.check_daily_drawdown,
+            self.check_max_drawdown,
+            lambda _trade, snapshot: self.check_position_limit(snapshot),
+        ]
+        for check_fn in checks:
+            result = check_fn(no_risk_trade, account)
+            if not result.passed:
+                return result
+        return ComplianceResult(
+            passed=True,
+            rule_name="ADMISSION_HEADROOM",
+            reason="Admission headroom available",
+        )
 
     # ── Utility Methods ─────────────────────────────────────────────────
 

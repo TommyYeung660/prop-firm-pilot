@@ -323,26 +323,27 @@ class TestTrialBestDayRule:
     """Best Day Rule with Trial account's $160 limit."""
 
     def test_trial_best_day_passes(self) -> None:
-        """Daily PnL + potential profit within $160 * 85% = $136 should pass."""
+        """Best Day gate must ignore hypothetical TP potential on new trades."""
         guard = _trial_guard()
-        account = _snapshot(daily_pnl=50.0)
-        trade = _small_trade(risk=10.0)  # potential profit ~$20 (2:1 RR via pip calc)
+        account = _snapshot(daily_pnl=0.0, open_positions=0)
+        trade = _small_trade(risk=10.0)
+        trade.take_profit = 2000.0  # huge hypothetical potential should not block
 
         result = guard.check_best_day_rule(trade, account)
         assert result.passed is True
 
     def test_trial_best_day_rejects_near_limit(self) -> None:
-        """Daily PnL near $136 safety limit should reject further profitable trades."""
+        """Actual daily PnL at/above $136 safety limit should reject."""
         guard = _trial_guard()
-        account = _snapshot(daily_pnl=130.0)
-        # Potential profit for EURUSD: tp_pips = |1.1 - 1.09| / 0.0001 = 100 pips
-        # profit = 100 * 10 * 0.01 = $10 → total = $140 > $136 → REJECT
+        account = _snapshot(daily_pnl=136.0)
         trade = _small_trade(risk=5.0)
-        trade.take_profit = 100.0  # Set TP as 100 pips to generate $10 profit
 
         result = guard.check_best_day_rule(trade, account)
         assert result.passed is False
         assert result.rule_name == "BEST_DAY_RULE"
+        assert "Current daily PnL" in result.reason
+        assert "projected_daily_pnl" not in result.details
+        assert "potential_profit" not in result.details
 
 
 # ── check_all Integration ──────────────────────────────────────────────────

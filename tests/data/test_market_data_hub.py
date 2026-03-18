@@ -2,7 +2,7 @@
 
 import asyncio
 from datetime import date, datetime, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 import pytest
@@ -92,7 +92,7 @@ async def test_market_data_hub_prefers_websocket_cache_for_healthy_symbol() -> N
 
 
 @pytest.mark.asyncio
-async def test_market_data_hub_treats_closed_1h_websocket_bar_as_fresh_by_close_time() -> None:
+async def test_market_data_hub_falls_back_to_fresh_closed_1h_websocket_bar_after_api_miss() -> None:
     provider = DummyProvider([])
     aggregator = FXTickAggregator()
     aggregator.add_tick(
@@ -126,7 +126,9 @@ async def test_market_data_hub_treats_closed_1h_websocket_bar_as_fresh_by_close_
 
     assert bars.source == "websocket_cache"
     assert len(bars.bars) == 1
-    assert provider.calls == []
+    assert provider.calls == [
+        ("EURUSD", "1h", date(2026, 3, 4), date(2026, 3, 11))
+    ]
 
 
 @pytest.mark.asyncio
@@ -175,7 +177,83 @@ async def test_market_data_hub_tracks_quote_freshness_separately_from_bar_freshn
     bars = await hub.get_bars("EURUSD", "1m", 10)
 
     assert quote.source == "rest_fallback"
-    assert bars.source == "websocket_cache"
+    assert bars.source == "warmup_cache"
+
+
+@pytest.mark.asyncio
+async def test_market_data_hub_prefers_broker_quote_over_websocket_cache() -> None:
+    tick_dt = datetime(2026, 3, 17, 3, 0, 10, tzinfo=timezone.utc)
+    now = datetime(2026, 3, 17, 3, 0, 20, tzinfo=timezone.utc)
+    aggregator = FXTickAggregator()
+    aggregator.add_tick(_tick("EURUSD", 1.1000, 1.1002, tick_dt))
+
+    client = EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"], stale_after_seconds=60)
+    client._connected = True
+    client._record_tick(_tick("EURUSD", 1.1000, 1.1002, tick_dt))
+    broker_quote_provider = AsyncMock(
+        return_value={
+            "bid": 1.2001,
+            "ask": 1.2003,
+            "timestampMs": int((now.timestamp() - 2) * 1000),
+        }
+    )
+    hub = MarketDataHub(
+        aggregator=aggregator,
+        websocket_client=client,
+        rest_provider=DummyProvider([]),
+        symbols=["EURUSD"],
+        now_provider=lambda: now,
+        broker_quote_provider=broker_quote_provider,
+    )
+
+    result = await hub.get_quote("EURUSD")
+
+    assert result.source == "broker_quote"
+    assert result.quote is not None
+    assert result.quote["bid"] == pytest.approx(1.2001)
+    assert result.quote["ask"] == pytest.approx(1.2003)
+    broker_quote_provider.assert_awaited_once_with("EURUSD")
+
+
+@pytest.mark.asyncio
+async def test_market_data_hub_prefers_api_cache_for_bars_when_websocket_also_has_data() -> None:
+    now = datetime(2026, 3, 17, 4, 5, 1, tzinfo=timezone.utc)
+    aggregator = FXTickAggregator()
+    for minute, price in enumerate([1.10, 1.11, 1.12, 1.13, 1.14]):
+        aggregator.add_tick(
+            _tick(
+                "EURUSD",
+                price,
+                price + 0.0002,
+                datetime(2026, 3, 17, 4, minute, 10, tzinfo=timezone.utc),
+            )
+        )
+    aggregator.close_elapsed_bars(now=now)
+
+    hub = MarketDataHub(
+        aggregator=aggregator,
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=DummyProvider([]),
+        symbols=["EURUSD"],
+        now_provider=lambda: now,
+    )
+    hub._warm_cache[("EURUSD", "5m")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-17T04:00:00Z"),
+                "open": 1.0900,
+                "high": 1.1300,
+                "low": 1.0800,
+                "close": 1.1200,
+                "volume": 0,
+            }
+        ]
+    )
+
+    result = await hub.get_bars("EURUSD", "5m", 10)
+
+    assert result.source == "warmup_cache"
+    assert float(result.bars.iloc[-1]["close"]) == pytest.approx(1.1200)
 
 
 @pytest.mark.asyncio
@@ -437,6 +515,62 @@ async def test_entry_readiness_still_blocks_when_quote_is_missing() -> None:
     assert readiness.block_reason == "market_data.quote_unavailable"
     assert readiness.requires_tactical_retry is False
     assert readiness.pending_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_entry_readiness_blocks_when_broker_quote_unavailable_even_with_websocket_quote(
+) -> None:
+    tick_time = datetime(2026, 3, 17, 6, 42, 10, tzinfo=timezone.utc)
+    aggregator = FXTickAggregator()
+    aggregator.add_tick(_tick("EURUSD", 1.10, 1.1002, tick_time))
+
+    client = EODHDFXWebSocketClient(
+        api_token="token",
+        symbols=["EURUSD"],
+        stale_after_seconds=86400,
+    )
+    client._connected = True
+    client._record_tick(_tick("EURUSD", 1.10, 1.1002, tick_time))
+
+    hub = MarketDataHub(
+        aggregator=aggregator,
+        websocket_client=client,
+        rest_provider=DummyProvider([]),
+        symbols=["EURUSD"],
+        now_provider=lambda: datetime(2026, 3, 17, 6, 42, 30, tzinfo=timezone.utc),
+        broker_quote_provider=AsyncMock(return_value=None),
+    )
+    hub._warm_cache[("EURUSD", "5m")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-17T06:35:00Z"),
+                "open": 1.0995,
+                "high": 1.1005,
+                "low": 1.0990,
+                "close": 1.1000,
+                "volume": 0,
+            }
+        ]
+    )
+    hub._warm_cache[("EURUSD", "1h")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-17T05:00:00Z"),
+                "open": 1.0995,
+                "high": 1.1005,
+                "low": 1.0990,
+                "close": 1.1000,
+                "volume": 0,
+            }
+        ]
+    )
+
+    readiness = await hub.get_entry_readiness("EURUSD")
+
+    assert readiness.entry_safe is False
+    assert readiness.block_reason == "market_data.broker_quote_unavailable"
+    assert readiness.quote_available is True
+    assert readiness.quote_source == "websocket_cache"
 
 
 @pytest.mark.asyncio
@@ -813,7 +947,8 @@ async def test_market_data_hub_uses_timeframe_sized_cooldown_for_1h_refreshes() 
 
 
 @pytest.mark.asyncio
-async def test_market_data_hub_finalizes_elapsed_rollup_bars_before_lookup() -> None:
+async def test_market_data_hub_finalizes_elapsed_rollup_bars_before_api_then_websocket_lookup(
+) -> None:
     aggregator = FXTickAggregator()
     for minute, price in enumerate([1.10, 1.11, 1.12, 1.13, 1.14]):
         aggregator.add_tick(
@@ -838,4 +973,67 @@ async def test_market_data_hub_finalizes_elapsed_rollup_bars_before_lookup() -> 
 
     assert result.source == "websocket_cache"
     assert len(result.bars) == 1
-    assert provider.calls == []
+    assert provider.calls == [
+        ("EURUSD", "5min", date(2026, 3, 8), date(2026, 3, 11))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_feed_status_exposes_primary_routing_and_degraded_summary() -> None:
+    now = datetime(2026, 3, 17, 8, 30, tzinfo=timezone.utc)
+    tick_time = datetime(2026, 3, 17, 8, 29, 50, tzinfo=timezone.utc)
+    aggregator = FXTickAggregator()
+    aggregator.add_tick(_tick("EURUSD", 1.10, 1.1002, tick_time))
+    client = EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"], stale_after_seconds=45)
+    client._last_error = "keepalive ping timeout"
+    broker_quote_provider = AsyncMock(
+        return_value={
+            "bid": 1.1001,
+            "ask": 1.1003,
+            "timestampMs": int((now.timestamp() - 5) * 1000),
+        }
+    )
+    hub = MarketDataHub(
+        aggregator=aggregator,
+        websocket_client=client,
+        rest_provider=DummyProvider([]),
+        symbols=["EURUSD"],
+        now_provider=lambda: now,
+        broker_quote_provider=broker_quote_provider,
+    )
+    hub._warm_cache[("EURUSD", "5m")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-17T08:25:00Z"),
+                "open": 1.0995,
+                "high": 1.1005,
+                "low": 1.0990,
+                "close": 1.1000,
+                "volume": 0,
+            }
+        ]
+    )
+    hub._warm_cache[("EURUSD", "1h")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-17T07:00:00Z"),
+                "open": 1.0990,
+                "high": 1.1010,
+                "low": 1.0980,
+                "close": 1.1000,
+                "volume": 0,
+            }
+        ]
+    )
+
+    await hub.get_entry_readiness("EURUSD")
+    status = hub.feed_status()
+
+    assert status["routing"]["quote_primary"] == "broker_quote"
+    assert status["routing"]["bars_primary"] == "api_cache"
+    assert status["degraded_summary"]["broker_quote"]["available"] is True
+    assert status["degraded_summary"]["api_bars"]["5m_available"] is True
+    assert status["degraded_summary"]["api_bars"]["1h_available"] is True
+    assert status["degraded_summary"]["websocket_auxiliary"]["state"] == "degraded"
+    assert status["degraded_summary"]["stale_age_thresholds"]["quote_ttl_seconds"] == 30
+    assert status["degraded_summary"]["stale_age_thresholds"]["bar_cache_max_age_seconds"] == 3600

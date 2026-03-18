@@ -102,10 +102,19 @@ class TacticalResult:
 
     def to_log_dict(self) -> dict[str, Any]:
         """Serialize to dict for JSONL/DuckDB logging."""
+        hard_gate_reason_codes = [r.reason_code for r in self.hard_gates if r.reason_code]
+        failed_hard_gates = [r for r in self.hard_gates if not r.passed]
+        failed_hard_gate_names = [r.gate_name for r in failed_hard_gates]
+        failed_hard_gate_reason_codes = [r.reason_code for r in failed_hard_gates if r.reason_code]
+        hard_gate_status_by_name = {r.gate_name: r.status for r in self.hard_gates}
         return {
             "action": self.action,
             "resolution": self.resolution,
             "summary_reason_code": self.summary_reason_code,
+            "hard_gate_reason_codes": hard_gate_reason_codes,
+            "failed_hard_gate_names": failed_hard_gate_names,
+            "failed_hard_gate_reason_codes": failed_hard_gate_reason_codes,
+            "hard_gate_status_by_name": hard_gate_status_by_name,
             "hard_gates": [
                 {
                     "gate": r.gate_name,

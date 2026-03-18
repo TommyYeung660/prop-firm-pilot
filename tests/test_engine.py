@@ -632,6 +632,25 @@ class TestAccountSnapshot:
 class TestBestDayExecutionGate:
     """Tests for execution-layer hard gate when Best Day protection is active."""
 
+    async def test_best_day_allows_ready_intent_when_daily_pnl_is_zero(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+        mock_guard: MagicMock,
+    ) -> None:
+        """Execution should not reject a new entry when actual daily PnL is still zero."""
+        ready = _make_ready_intent(store, tp_pips=5000.0)
+
+        await engine.execute_ready_intents()
+
+        updated = store.get_intent(ready.id)
+        assert updated is not None
+        assert updated.status == "opened"
+        assert updated.execution_error is None
+        mock_guard.check_all.assert_called_once()
+        mock_matchtrader.open_position.assert_called_once()
+
     async def test_rejects_ready_intent_when_best_day_gate_active(
         self,
         engine: ExecutionEngine,

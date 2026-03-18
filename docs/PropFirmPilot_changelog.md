@@ -13,12 +13,42 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 **Post-v1.5.0_preview Stable Acceptance Window**
 
-> **Status**: `v1.5.0_preview` 已於 `2026-03-17` 成為當前主線 preview release，建立在 `v1.5.0_beta_2` operational repair baseline 之上
-> **Reason**: core pilot 已先完成 bounded capital utilization uplift preview implementation，並同步核對 `qlib_market_scanner` / `qlib_rd_agent` 的 upstream contract 已落地；下一步不是再做同一輪 feature 實作，而是把 preview uplift 與 exposure / memory / validation closure 一起驗收成 `v1.5.0 stable`
+> **Status**: `v1.5.0_preview` 已於 `2026-03-17` 成為當前主線 preview release；`2026-03-18` 已再完成一輪 preview incident remediation，作為 stable acceptance 前的 correctness hardening baseline
+> **Reason**: core pilot 雖已完成 bounded capital utilization uplift preview implementation，但 `prod_logs_20260318_v1.5.0_preview` 暴露出 Best Day semantics、compliance admission、market-data routing、scanner success contract 與 Telegram alert resilience 的 P0/P1 correctness 缺口；stable 前必須先吸收這輪 remediation，而不是只驗收 uplift 本身
+
+### In Progress: v1.5.0_preview Incident Remediation
+
+#### Fixed
+- `PropFirmGuard` 的 `Best Day Rule` 新單 gate 現在只看 actual `daily_pnl`，不再把 hypothetical TP potential profit 當成當日已發生 PnL，因此 `0` 交易 / `0` 當日 PnL 不會再被錯誤阻擋
+- execution-side Best Day gate 與 compliance snapshot wording 已對齊 actual daily PnL semantics，避免 scheduler / engine 對同一規則出現不同語義
+- deterministic compliance headroom 現在前移到 candidate / intent admission，必定被拒的單子會直接以 `SCANNER_SKIP reason=compliance_headroom` 被淘汰，不再白跑 LLM / tactical / execution 流程
+- tactical result payload 現在會保留 `spread`、`atr_regime`、`data_freshness` 的獨立 hard-gate facts，incident review 不再只看到被壓扁的單一 summary reason
+- `ScannerBridge.run_pipeline()` 現在只有在 process success、artifact success、ingestion success 與 `target_date` matched 同時成立時才會記成 success；缺 target-date bundle 只會記成 incomplete
+- `AlertService.send()` 現在具備 Telegram retry accounting、failure metrics 與 secondary sink；primary send 失敗或 circuit open 時，告警會落到 `TradeJournal` `ALERT_FALLBACK`，不再完全消失
+
+#### Changed
+- `MarketDataHub` 的 live path 現在改為 `broker quote-first + API bars-first + websocket auxiliary`；websocket degraded 不再單獨決定整個系統是否可交易
+- `get_entry_readiness()` 現在只在 primary path 真正不可用時 block entry；若 broker quote 與 API bars 可用，即使 websocket 退化，系統仍可運行
+- `feed_status()` 現在會輸出 routing 與 degraded summary，明確區分 broker quote、API bars 與 websocket auxiliary 狀態
+- `docs/PropFirmPilot_v1.5.0_road_map.md` 與 `docs/plans/2026-03-18-v1.5.0-preview-incident-remediation*.md` 現在已同步吸收這輪 postmortem 結論與 corrective actions
+
+#### Added
+- `src/diagnostics/analyze_preview_bundle.py`：新增可重跑的 preview incident bundle diagnostics script，輸出 websocket failure、REST fallback、stale-age distribution、market-data block counts 與 tactical hard-gate provenance
+- `TradeJournal` secondary alert sink：當 Telegram channel 失效時，至少把 alert 原文與 failure reason 落到 journal，供 incident 後追查
+- regression tests 覆蓋 Best Day actual-PnL-only、candidate admission headroom、market-data hybrid routing、scanner success contract、Telegram retry / fallback
+
+#### Evidence
+- incident bundle 關鍵證據：websocket failures `15`、REST fallback warnings `129`、`market_data.quote_unavailable` log/journal 各 `2`
+- tactical hard-gate evidence：`spread.fail.ratio_too_wide = 72`、`atr.fail.insufficient_1h_data = 133`
+- 這輪 remediation 的正式 postmortem 已寫入 `docs/plans/2026-03-18-v1.5.0-preview-incident-remediation.md`
+
+#### Validated
+- `uv run pytest tests/test_prop_firm_guard_e8_one.py tests/test_prop_firm_guard.py tests/test_engine.py tests/test_scheduler.py tests/test_tactical_validator.py tests/optimize/test_tactical_entry_stats.py tests/data/test_market_data_hub.py tests/test_scanner_bridge.py tests/test_alert_service.py tests/test_operational_metrics.py -q` → `421 passed`
+- `uv run ruff check src/compliance/prop_firm_guard.py src/data/market_data_hub.py src/decision/tactical_validator.py src/execution/engine.py src/monitor/alert_service.py src/main.py src/optimize/tactical_entry_stats.py src/scheduler/scheduler.py src/signal/scanner_bridge.py src/diagnostics/analyze_preview_bundle.py tests/test_prop_firm_guard.py tests/test_prop_firm_guard_e8_one.py tests/test_engine.py tests/test_scheduler.py tests/test_tactical_validator.py tests/optimize/test_tactical_entry_stats.py tests/data/test_market_data_hub.py tests/test_scanner_bridge.py tests/test_alert_service.py tests/test_operational_metrics.py` → `All checks passed!`
 
 ### Planned: v1.5.0 (stable) — Stable Acceptance On Top Of Preview Uplift
 - 定義第一個「穩定版」基準：系統必須能穩定可靠地進出場，而不是只靠 hotfix 維持可用
-- 將 `v1.5.0_preview` 已落地的 bounded capital utilization uplift 納入 multi-day stable acceptance，而不是把 uplift 本身重新實作一次
+- 將 `v1.5.0_preview` 已落地的 bounded capital utilization uplift 與 `2026-03-18` preview incident remediation 一起納入 multi-day stable acceptance，而不是把 uplift 本身重新實作一次
 - tactical entry 與 tactical exit 需達到 production-grade reliability，包含 data provenance、execution integrity、close verification 與 postmortem replayability
 - 把 `v1.5.0_beta` 已吸收的 scanner contract、cadence decision 與 entry / exit control plane 升級為 stable release gate，而不是再做一次大重寫
 - 不重新開啟 `qlib_market_scanner` 的 FX release cadence 選型；`v1.5.0 stable` 直接沿用已凍結的 `1d` canonical cadence
@@ -28,7 +58,7 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ### Cross-Repo Note
 - `v1.5.0_preview` 已建立在已核對的 upstream contract 之上：`qlib_market_scanner` 已具備 `1d` canonical cadence、`dsr_net_oos_daily_v1`、scorecard / decision artifacts 與 RD-Agent factor promotion gate；`qlib_rd_agent` 已具備 `discovered/candidate/manifest` artifact 與 `runs/<run_id>/...` archive contract
-- `v1.5.0 stable` 的工作重點是 integrated acceptance，不是再替 upstream scanner / rd-agent 重新補 contract plumbing
+- `v1.5.0 stable` 的工作重點是 integrated acceptance，包括 preview uplift 與 preview incident remediation 的 regression-free validation，不是再替 upstream scanner / rd-agent 重新補 contract plumbing
 
 ### Tracking
 - Roadmap: `docs/PropFirmPilot_v1.5.0_road_map.md`

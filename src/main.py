@@ -29,6 +29,7 @@ import asyncio
 import os
 import signal
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -51,6 +52,22 @@ from src.monitor.telegram_bot import TelegramBotHandler
 from src.monitor.trade_journal import TradeJournal
 from src.signal.scanner_bridge import ScannerBridge
 from src.version import get_release_tag
+
+
+def _build_alert_fallback_sink(journal: TradeJournal) -> Callable[[str, str], bool]:
+    """Persist failed Telegram alerts to the trade journal as a secondary sink."""
+
+    def _write_alert_fallback(message: str, failure_reason: str) -> bool:
+        journal.log_event(
+            "ALERT_FALLBACK",
+            {
+                "failure_reason": failure_reason,
+                "message": message,
+            },
+        )
+        return True
+
+    return _write_alert_fallback
 
 
 class PropFirmPilot:
@@ -101,6 +118,7 @@ class PropFirmPilot:
             profit_target_pct=config.compliance.profit_target,
             daily_loss_pct=config.compliance.daily_drawdown_limit,
             max_drawdown_pct=config.compliance.max_drawdown_limit,
+            alternate_sink=_build_alert_fallback_sink(self.journal),
         )
 
         # Build instruments dict for order manager
@@ -418,6 +436,7 @@ async def _run_scheduler(config: AppConfig) -> None:
         ),
     )
     operational_metrics = OperationalMetrics()
+    journal = TradeJournal(config.monitor.trade_journal_path)
     alert_service = AlertService(
         bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
@@ -426,10 +445,9 @@ async def _run_scheduler(config: AppConfig) -> None:
         profit_target_pct=config.compliance.profit_target,
         daily_loss_pct=config.compliance.daily_drawdown_limit,
         max_drawdown_pct=config.compliance.max_drawdown_limit,
-        on_send_failure=operational_metrics.record_telegram_failure,
+        operational_metrics=operational_metrics,
+        alternate_sink=_build_alert_fallback_sink(journal),
     )
-
-    journal = TradeJournal(config.monitor.trade_journal_path)
     memory_journal = MemoryJournal(config.monitor.memory_dir)
     optimization_engine = OptimizationEngine(
         store=store,

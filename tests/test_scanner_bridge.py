@@ -538,6 +538,71 @@ class TestScannerBridgeInit:
 
         assert signals == []
 
+    def test_run_pipeline_logs_incomplete_when_target_date_did_not_land(
+        self, tmp_path: Path
+    ) -> None:
+        """Process success alone must not count as pipeline success."""
+        _seed_scanner_output_bundle(tmp_path, fixture_name="signals_multiday.csv")
+
+        bridge = ScannerBridge(scanner_path=tmp_path)
+        mock_result = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with (
+            patch("subprocess.run", return_value=mock_result),
+            patch("src.signal.scanner_bridge.logger") as mock_logger,
+        ):
+            signals = bridge.run_pipeline(date="2026-02-17")
+
+        assert signals == []
+        assert bridge.get_last_rejection_reason_code() == "scanner.bundle.target_date_missing"
+        success_calls = [
+            call
+            for call in mock_logger.info.call_args_list
+            if call.args and call.args[0].startswith("ScannerBridge: pipeline succeeded")
+        ]
+        assert success_calls == []
+        mock_logger.warning.assert_any_call(
+            "ScannerBridge: pipeline incomplete "
+            "(process_success={}, artifact_available={}, ingestion_success={}, "
+            "target_date_matched={}, signal_date={}, signal_count={}, rejection_reason={})",
+            True,
+            True,
+            False,
+            False,
+            "",
+            0,
+            "scanner.bundle.target_date_missing",
+        )
+
+    def test_run_pipeline_logs_success_only_after_target_date_ingestion(
+        self, tmp_path: Path
+    ) -> None:
+        """Success requires process, artifact, ingestion, and target-date match."""
+        _seed_scanner_output_bundle(tmp_path)
+
+        bridge = ScannerBridge(scanner_path=tmp_path)
+        mock_result = MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with (
+            patch("subprocess.run", return_value=mock_result),
+            patch("src.signal.scanner_bridge.logger") as mock_logger,
+        ):
+            signals = bridge.run_pipeline(date="2026-02-16")
+
+        assert len(signals) == 1
+        assert signals[0].instrument == "EURUSD"
+        mock_logger.info.assert_any_call(
+            "ScannerBridge: pipeline succeeded "
+            "(process_success={}, artifact_available={}, ingestion_success={}, "
+            "target_date_matched={}, signal_date={}, signal_count={})",
+            True,
+            True,
+            True,
+            True,
+            "2026-02-16",
+            1,
+        )
+
 
 # ── Section 3: Scanner → DecisionStore E2E Pipeline ─────────────────────────
 

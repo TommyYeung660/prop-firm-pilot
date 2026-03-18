@@ -13,7 +13,7 @@ Usage:
 """
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
@@ -32,7 +32,7 @@ class QuoteResult:
     """Quote lookup result with explicit source metadata."""
 
     symbol: str
-    source: Literal["websocket_cache", "rest_fallback"]
+    source: Literal["broker_quote", "websocket_cache", "rest_fallback"]
     quote: dict[str, Any] | None
 
 
@@ -61,6 +61,9 @@ class EntryReadinessResult:
     bars_5m_fresh: bool
     bars_1h_source: str
     bars_1h_fresh: bool
+    broker_quote_available: bool = False
+    api_bars_5m_fresh: bool = False
+    api_bars_1h_fresh: bool = False
     requires_tactical_retry: bool = False
     pending_reason: str = ""
 
@@ -103,10 +106,12 @@ class MarketDataHub:
         rest_refresh_cooldown_seconds: int = 300,
         now_provider: Callable[[], datetime] | None = None,
         operational_metrics: OperationalMetrics | None = None,
+        broker_quote_provider: Callable[[str], Awaitable[Any | None]] | None = None,
     ) -> None:
         self._aggregator = aggregator
         self._websocket_client = websocket_client
         self._rest_provider = rest_provider
+        self._broker_quote_provider = broker_quote_provider
         self._symbols = list(symbols)
         self._quote_ttl_seconds = quote_ttl_seconds
         self._bar_cache_max_age_seconds = bar_cache_max_age_seconds
@@ -118,6 +123,8 @@ class MarketDataHub:
         self._forced_stale_symbols: set[str] = set()
         self._metrics = operational_metrics
         self._initialized_at = self._now_provider()
+        self._broker_quote_available_by_symbol: dict[str, bool] = {}
+        self._broker_quote_error_by_symbol: dict[str, str] = {}
 
     async def warmup(self) -> None:
         """Backfill recent intraday bars into the warm cache for all symbols."""
@@ -137,7 +144,15 @@ class MarketDataHub:
         self._forced_stale_symbols.discard(symbol)
 
     async def get_quote(self, symbol: str) -> QuoteResult:
-        """Resolve latest quote from WebSocket cache first, REST fallback second."""
+        """Resolve latest quote from broker primary, then websocket/rest fallback."""
+        broker_quote = await self._fetch_broker_quote(symbol)
+        if broker_quote is not None:
+            self._broker_quote_available_by_symbol[symbol] = True
+            self._broker_quote_error_by_symbol.pop(symbol, None)
+            return QuoteResult(symbol=symbol, source="broker_quote", quote=broker_quote)
+        if self._broker_quote_provider is not None:
+            self._broker_quote_available_by_symbol[symbol] = False
+
         if symbol not in self._forced_stale_symbols:
             quote = self._aggregator.latest_quote(symbol)
             tick = self._websocket_client.get_last_tick(symbol)
@@ -172,7 +187,38 @@ class MarketDataHub:
         timeframe: Literal["1m", "5m", "1h"],
         limit: int,
     ) -> BarResult:
-        """Resolve closed bars from websocket cache, warm cache, or REST fallback."""
+        """Resolve closed bars from API cache first, websocket only as auxiliary fallback."""
+        warm = self._warm_cache.get((symbol, timeframe))
+        if warm is not None and not warm.empty and self._bars_are_fresh(warm, timeframe):
+            self._record_market_data_read("warmup_cache")
+            return BarResult(
+                symbol=symbol,
+                timeframe=timeframe,
+                source="warmup_cache",
+                bars=warm.tail(limit).reset_index(drop=True),
+            )
+
+        rows_fetched = 0
+        bars, rows_fetched, refreshed = await self._refresh_rest_cache_serialized(
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+        if refreshed:
+            self._log_rest_fallback(
+                symbol=symbol,
+                timeframe=timeframe,
+                rows_fetched=rows_fetched,
+                bars=bars,
+            )
+        if not bars.empty and self._bars_are_fresh(bars, timeframe):
+            self._record_market_data_read("rest_fallback", rows_fetched)
+            return BarResult(
+                symbol=symbol,
+                timeframe=timeframe,
+                source="rest_fallback",
+                bars=bars.tail(limit).reset_index(drop=True),
+            )
+
         if symbol not in self._forced_stale_symbols:
             self._aggregator.close_elapsed_bars(now=self._now_provider())
             websocket_bars = self._bars_from_aggregator(
@@ -188,27 +234,7 @@ class MarketDataHub:
                     source="websocket_cache",
                     bars=websocket_bars,
                 )
-        warm = self._warm_cache.get((symbol, timeframe))
-        if warm is not None and not warm.empty and self._bars_are_fresh(warm, timeframe):
-            self._record_market_data_read("warmup_cache")
-            return BarResult(
-                symbol=symbol,
-                timeframe=timeframe,
-                source="warmup_cache",
-                bars=warm.tail(limit).reset_index(drop=True),
-            )
-        rows_fetched = 0
-        bars, rows_fetched, refreshed = await self._refresh_rest_cache_serialized(
-            symbol=symbol,
-            timeframe=timeframe,
-        )
-        if refreshed:
-            self._log_rest_fallback(
-                symbol=symbol,
-                timeframe=timeframe,
-                rows_fetched=rows_fetched,
-                bars=bars,
-            )
+
         self._record_market_data_read("rest_fallback", rows_fetched)
         return BarResult(
             symbol=symbol,
@@ -220,10 +246,58 @@ class MarketDataHub:
     def feed_status(self) -> dict[str, Any]:
         """Expose current feed status and cache fallback state."""
         now = self._now_provider()
+        websocket_status = self._websocket_client.get_status()
+        api_5m_by_symbol = {symbol: self._api_bars_fresh(symbol, "5m") for symbol in self._symbols}
+        api_1h_by_symbol = {symbol: self._api_bars_fresh(symbol, "1h") for symbol in self._symbols}
+        broker_available_by_symbol = {
+            symbol: self._broker_quote_available_by_symbol.get(symbol) for symbol in self._symbols
+        }
+        known_broker_states = [
+            available
+            for available in broker_available_by_symbol.values()
+            if isinstance(available, bool)
+        ]
+        broker_available: bool | None = None
+        if known_broker_states:
+            broker_available = all(known_broker_states)
+
         return {
             "initialized_at": self._initialized_at.isoformat(),
             "uptime_seconds": max(0, int((now - self._initialized_at).total_seconds())),
-            "websocket": self._websocket_client.get_status(),
+            "routing": {
+                "quote_primary": (
+                    "broker_quote"
+                    if self._broker_quote_provider is not None
+                    else "websocket_cache"
+                ),
+                "bars_primary": "api_cache",
+                "websocket_role": "auxiliary",
+            },
+            "degraded_summary": {
+                "broker_quote": {
+                    "enabled": self._broker_quote_provider is not None,
+                    "available": broker_available,
+                    "available_by_symbol": broker_available_by_symbol,
+                    "last_errors": dict(self._broker_quote_error_by_symbol),
+                },
+                "api_bars": {
+                    "5m_available": all(api_5m_by_symbol.values()) if api_5m_by_symbol else False,
+                    "1h_available": all(api_1h_by_symbol.values()) if api_1h_by_symbol else False,
+                    "5m_available_by_symbol": api_5m_by_symbol,
+                    "1h_available_by_symbol": api_1h_by_symbol,
+                },
+                "websocket_auxiliary": {
+                    "state": websocket_status.get("state", ""),
+                    "last_error": websocket_status.get("last_error"),
+                    "stale_symbols": websocket_status.get("stale_symbols", []),
+                },
+                "stale_age_thresholds": {
+                    "quote_ttl_seconds": self._quote_ttl_seconds,
+                    "bar_cache_max_age_seconds": self._bar_cache_max_age_seconds,
+                    "rest_refresh_cooldown_seconds": self._rest_refresh_cooldown_seconds,
+                },
+            },
+            "websocket": websocket_status,
             "websocket_closed_bar_counts": self._aggregator.get_closed_bar_counts(self._symbols),
             "forced_stale_symbols": sorted(self._forced_stale_symbols),
             "warm_cache_keys": sorted(f"{symbol}:{tf}" for symbol, tf in self._warm_cache.keys()),
@@ -239,6 +313,8 @@ class MarketDataHub:
             self.get_bars(symbol, "1h", 10),
         )
         quote_available = quote_result.quote is not None
+        broker_quote_required = self._broker_quote_provider is not None
+        broker_quote_available = quote_result.source == "broker_quote" and quote_available
         bars_5m_fresh = not bars_5m_result.bars.empty and self._bars_are_fresh(
             bars_5m_result.bars, "5m"
         )
@@ -249,10 +325,10 @@ class MarketDataHub:
         block_reason = ""
         requires_tactical_retry = False
         pending_reason = ""
-        if not quote_available:
+        if broker_quote_required and not broker_quote_available:
+            block_reason = "market_data.broker_quote_unavailable"
+        elif not quote_available:
             block_reason = "market_data.quote_unavailable"
-        elif websocket_state != "healthy" and not bars_5m_fresh:
-            block_reason = "market_data.feed_degraded"
         elif not bars_5m_fresh:
             requires_tactical_retry = True
             pending_reason = "market_data.startup_5m_bar_pending"
@@ -267,10 +343,13 @@ class MarketDataHub:
             ws_last_error=websocket_status.get("last_error"),
             quote_source=quote_result.source,
             quote_available=quote_available,
+            broker_quote_available=broker_quote_available,
             bars_5m_source=bars_5m_result.source,
             bars_5m_fresh=bars_5m_fresh,
+            api_bars_5m_fresh=self._api_bars_fresh(symbol, "5m"),
             bars_1h_source=bars_1h_result.source,
             bars_1h_fresh=bars_1h_fresh,
+            api_bars_1h_fresh=self._api_bars_fresh(symbol, "1h"),
         )
 
     def _bars_from_aggregator(
@@ -342,11 +421,76 @@ class MarketDataHub:
             "timestamp_ms": int(pd.Timestamp(last["datetime"]).timestamp() * 1000),
         }
 
+    async def _fetch_broker_quote(self, symbol: str) -> dict[str, Any] | None:
+        """Fetch and normalize broker quote payload when a provider is configured."""
+        if self._broker_quote_provider is None:
+            return None
+        try:
+            raw_quote = await self._broker_quote_provider(symbol)
+        except Exception as e:
+            self._broker_quote_error_by_symbol[symbol] = str(e)
+            logger.warning("MarketDataHub: broker quote fetch failed for {} ({})", symbol, e)
+            return None
+
+        normalized = self._normalize_quote_payload(symbol=symbol, payload=raw_quote)
+        if normalized is None:
+            self._broker_quote_error_by_symbol[symbol] = "empty_or_invalid_broker_quote"
+            return None
+        return normalized
+
+    def _normalize_quote_payload(
+        self,
+        *,
+        symbol: str,
+        payload: Any,
+    ) -> dict[str, Any] | None:
+        """Normalize dict/object quote payload to the internal quote schema."""
+        if payload is None:
+            return None
+
+        if isinstance(payload, dict):
+            bid = payload.get("bid", 0)
+            ask = payload.get("ask", 0)
+            ts_ms = payload.get("timestamp_ms", 0) or payload.get("timestampMs", 0)
+        else:
+            bid = getattr(payload, "bid", 0)
+            ask = getattr(payload, "ask", 0)
+            ts_ms = getattr(payload, "timestamp_ms", 0) or getattr(payload, "timestampMs", 0)
+
+        try:
+            bid_f = float(bid)
+            ask_f = float(ask)
+        except (TypeError, ValueError):
+            return None
+        if bid_f <= 0 or ask_f <= 0:
+            return None
+
+        normalized: dict[str, Any] = {
+            "symbol": symbol,
+            "bid": bid_f,
+            "ask": ask_f,
+            "mid": (bid_f + ask_f) / 2.0,
+        }
+        try:
+            ts_ms_int = int(ts_ms) if ts_ms else 0
+        except (TypeError, ValueError):
+            ts_ms_int = 0
+        if ts_ms_int > 0:
+            normalized["timestamp_ms"] = ts_ms_int
+        return normalized
+
     def _normalize_bars(self, bars: pd.DataFrame) -> pd.DataFrame:
         """Sort and normalize provider bars to the expected schema."""
         if bars.empty:
             return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
         return bars.sort_values("datetime").reset_index(drop=True)
+
+    def _api_bars_fresh(self, symbol: str, timeframe: Literal["5m", "1h"]) -> bool:
+        """Whether the API-backed warm cache currently has fresh bars for a symbol/timeframe."""
+        bars = self._warm_cache.get((symbol, timeframe))
+        if bars is None or bars.empty:
+            return False
+        return self._bars_are_fresh(bars, timeframe)
 
     def _should_refresh_rest_cache(
         self,

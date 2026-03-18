@@ -104,6 +104,7 @@ def mock_matchtrader() -> AsyncMock:
         margin=0.0,
         free_margin=50000.0,
     )
+    client.get_open_positions.return_value = []
     client.get_quote.return_value = {"ask": 1.0850, "bid": 1.0848}
     # Mock rate limiter for auto-throttle code in _position_monitor_loop
     rate_limiter = MagicMock()
@@ -193,6 +194,64 @@ async def _run_loop_once(scheduler: Scheduler, loop_coro) -> None:
 
 class TestScannerLoop:
     """Tests for Scheduler._scanner_loop()."""
+
+    async def test_skips_intent_creation_when_best_day_headroom_is_exhausted(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        """Scanner should skip candidates before intent creation when Best Day headroom is gone."""
+        from src.monitor.trade_journal import TradeJournal
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            trade_journal=journal,
+        )
+        today = Scheduler._today_str()
+        safe_limit = config.compliance.best_day_limit * config.compliance.best_day_stop
+        _advance_intent_to_closed(
+            store,
+            trade_date=today,
+            symbol="GBPUSD",
+            realized_pnl=safe_limit,
+        )
+        mock_matchtrader.get_balance.return_value = MagicMock(
+            balance=50000.0 + safe_limit,
+            equity=50000.0 + safe_limit,
+            margin=0.0,
+            free_margin=50000.0 + safe_limit,
+        )
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("EURUSD", market_date=today)]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        pending = store.claim_next_pending("llm-0")
+        assert pending is None
+
+        lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+        events = [json.loads(line) for line in lines]
+        skip_event = next(e for e in events if e["type"] == "SCANNER_SKIP")
+        assert skip_event["symbol"] == "EURUSD"
+        assert skip_event["reason"] == "compliance_headroom"
+        assert skip_event["rule_name"] == "BEST_DAY_RULE"
+
+        new_intents = [
+            intent
+            for intent in store.get_intents_by_date(today)
+            if not (intent.status == "closed" and intent.symbol == "GBPUSD")
+        ]
+        assert new_intents == []
 
     async def test_creates_intents_from_signals(
         self,
@@ -1416,6 +1475,46 @@ class TestStartStop:
                 item.close()
             elif hasattr(item, "cancel"):
                 item.cancel()
+
+    async def test_initialize_market_data_hub_injects_broker_quote_provider(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        monkeypatch,
+    ) -> None:
+        """MarketDataHub must receive an async broker-quote callback at initialization."""
+        monkeypatch.setenv("EODHD_API_KEY", "test-key")
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+
+        mock_hub = MagicMock()
+        mock_hub.warmup = AsyncMock()
+        mock_ws = MagicMock()
+        mock_ws.register_tick_callback = MagicMock()
+        mock_ws.run = AsyncMock(return_value=None)
+
+        with (
+            patch("src.scheduler.scheduler.EODHDFXWebSocketClient", return_value=mock_ws),
+            patch("src.scheduler.scheduler.MarketDataHub", return_value=mock_hub) as hub_cls,
+            patch("src.scheduler.scheduler.asyncio.create_task", return_value=MagicMock()),
+        ):
+            await sched._initialize_market_data_hub()
+
+        kwargs = hub_cls.call_args.kwargs
+        assert "broker_quote_provider" in kwargs
+        assert callable(kwargs["broker_quote_provider"])
+        await kwargs["broker_quote_provider"]("EURUSD")
+        mock_matchtrader.get_quote.assert_awaited_once_with("EURUSD")
 
 
 # ── Helper Method Tests ─────────────────────────────────────────────────────
@@ -4231,7 +4330,7 @@ async def test_tactical_result_event_includes_feed_and_signal_diagnostics(
     tmp_path,
 ):
     """TACTICAL_RESULT should carry feed and scanner diagnostics for incident triage."""
-    from src.decision.tactical_validator import TacticalResult
+    from src.decision.tactical_validator import GateResult, TacticalResult
     from src.monitor.trade_journal import TradeJournal
 
     journal = TradeJournal(tmp_path / "trade_journal.jsonl")
@@ -4263,7 +4362,30 @@ async def test_tactical_result_event_includes_feed_and_signal_diagnostics(
     result = TacticalResult(
         action="WAIT",
         detail="Need another 5min bar",
-        summary_reason_code="soft.wait.score_below_threshold",
+        summary_reason_code="spread.fail.ratio_too_wide",
+        hard_gates=[
+            GateResult(
+                gate_name="spread",
+                passed=False,
+                status="FAIL",
+                reason_code="spread.fail.ratio_too_wide",
+                detail="spread_ratio=3.33, limit=2.0x",
+            ),
+            GateResult(
+                gate_name="atr_regime",
+                passed=False,
+                status="FAIL",
+                reason_code="atr.fail.insufficient_1h_data",
+                detail="Insufficient 1H data for ATR calculation",
+            ),
+            GateResult(
+                gate_name="data_freshness",
+                passed=True,
+                status="PASS",
+                reason_code="freshness.pass.quote_fresh",
+                detail="quote_age=20s, max=600s",
+            ),
+        ],
         provenance={
             "data_source": "rest_fallback",
             "quote_source": "rest_fallback",
@@ -4284,6 +4406,16 @@ async def test_tactical_result_event_includes_feed_and_signal_diagnostics(
     assert tactical_event["bars_5m_source"] == "rest_fallback"
     assert tactical_event["bars_1h_source"] == "warmup_cache"
     assert tactical_event["tactical_deadline_at"] == "2026-03-17T12:00:00+00:00"
+    assert tactical_event["failed_hard_gate_names"] == ["spread", "atr_regime"]
+    assert tactical_event["failed_hard_gate_reason_codes"] == [
+        "spread.fail.ratio_too_wide",
+        "atr.fail.insufficient_1h_data",
+    ]
+    assert tactical_event["hard_gate_reason_codes"] == [
+        "spread.fail.ratio_too_wide",
+        "atr.fail.insufficient_1h_data",
+        "freshness.pass.quote_fresh",
+    ]
 
 
 async def test_tactical_wait_degrades_to_ready_for_exec_on_retry_expiry(
