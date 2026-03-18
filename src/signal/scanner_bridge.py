@@ -15,7 +15,7 @@ from typing import Any
 
 from loguru import logger
 
-SUPPORTED_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v1"}
+SUPPORTED_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v1", "fx_signal_v2"}
 SUPPORTED_SCANNER_VERSIONS = {"v1.5.0", "v1.5.0_beta", "v1.5.0_beta_2"}
 PASSING_VALIDATION_STATUSES = {"", "ok", "pass", "passed", "ready", "success", "valid", "validated"}
 REQUIRED_SIGNAL_COLUMNS = {
@@ -36,6 +36,7 @@ REQUIRED_SIGNAL_COLUMNS = {
     "regime_label",
     "market_date",
 }
+SIDE_AWARE_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v2"}
 
 
 @dataclass
@@ -75,6 +76,7 @@ class ScannerSignal:
         label_version: str = "",
         regime_label: str = "",
         market_date: str = "",
+        side: str | None = None,
     ) -> None:
         self.instrument = instrument
         self.score = score
@@ -92,6 +94,12 @@ class ScannerSignal:
         self.label_version = label_version
         self.regime_label = regime_label
         self.market_date = market_date
+        self.side = side
+
+    def directional_quality(self) -> float:
+        if self.side == "short":
+            return round(1.0 - self.score, 6)
+        return self.score
 
     def to_qlib_data(self) -> dict[str, Any]:
         """Convert to qlib_data dict for TradingAgents.propagate().
@@ -112,6 +120,8 @@ class ScannerSignal:
             "drop_distance": self.drop_distance,
             "topk_spread": self.topk_spread,
             "entry_timeframe": self.entry_timeframe,
+            "scanner_side": self.side,
+            "scanner_direction_quality": self.directional_quality(),
         }
 
     def __repr__(self) -> str:
@@ -134,12 +144,14 @@ class ScannerBridge:
         self,
         scanner_path: str | Path,
         topk: int = 3,
+        topk_short: int = 0,
         profile: str = "fx",
         entry_timeframe: str = "4h",
         benchmark: str = "FX",
     ) -> None:
         self._scanner_path = Path(scanner_path).resolve()
         self._topk = topk
+        self._topk_short = topk_short
         self._profile = profile
         self._entry_timeframe = entry_timeframe
         self._benchmark = benchmark
@@ -259,10 +271,7 @@ class ScannerBridge:
                 candidates.append(signals_path.parents[1] / "metrics" / "metrics.json")
             if len(signals_path.parents) > 2:
                 candidates.append(
-                    signals_path.parents[2]
-                    / "scanner_outputs"
-                    / "metrics"
-                    / "metrics.json"
+                    signals_path.parents[2] / "scanner_outputs" / "metrics" / "metrics.json"
                 )
         return self._first_existing_path(candidates)
 
@@ -285,9 +294,7 @@ class ScannerBridge:
             metrics = self._read_json_file(metrics_path)
         return manifest, metrics
 
-    def _validation_status(
-        self, manifest: dict[str, Any], metrics: dict[str, Any]
-    ) -> str:
+    def _validation_status(self, manifest: dict[str, Any], metrics: dict[str, Any]) -> str:
         for payload in (manifest, metrics):
             validation = payload.get("validation", {})
             if isinstance(validation, dict):
@@ -323,7 +330,11 @@ class ScannerBridge:
         if manifest_scanner_version not in SUPPORTED_SCANNER_VERSIONS:
             raise ValueError(f"unsupported scanner version: {manifest_scanner_version}")
 
-        missing_columns = REQUIRED_SIGNAL_COLUMNS - fieldnames
+        required_columns = set(REQUIRED_SIGNAL_COLUMNS)
+        if manifest_schema in SIDE_AWARE_SIGNAL_SCHEMA_VERSIONS:
+            required_columns.add("side")
+
+        missing_columns = required_columns - fieldnames
         if missing_columns:
             raise ValueError(f"signals csv missing required columns: {sorted(missing_columns)}")
 
@@ -474,6 +485,8 @@ class ScannerBridge:
             cmd.extend(["--tickers", ",".join(tickers)])
 
         cmd.extend(["--topk", str(self._topk)])
+        if self._topk_short > 0:
+            cmd.extend(["--topk-short", str(self._topk_short)])
         cmd.extend(["--interval", interval])
         cmd_without_benchmark = list(cmd)
         if "--benchmark" in cmd_without_benchmark:
@@ -650,11 +663,18 @@ class ScannerBridge:
                                 f"cadence mismatch for {inst}: {row_cadence} != {manifest_cadence}"
                             )
 
-                        row_date = row.get("market_date", "").strip() or row.get(
-                            "datetime", ""
-                        ).split(" ")[0]
+                        row_date = (
+                            row.get("market_date", "").strip()
+                            or row.get("datetime", "").split(" ")[0]
+                        )
                         if not row_date:
                             raise ValueError(f"missing market_date for {inst}")
+
+                        row_side = None
+                        if manifest_schema in SIDE_AWARE_SIGNAL_SCHEMA_VERSIONS:
+                            row_side = row.get("side", "").strip().lower()
+                            if row_side not in {"long", "short"}:
+                                raise ValueError(f"invalid side for {inst}: {row.get('side', '')}")
 
                         signal = ScannerSignal(
                             instrument=inst,
@@ -673,6 +693,7 @@ class ScannerBridge:
                             label_version=row.get("label_version", manifest_label_version),
                             regime_label=row.get("regime_label", ""),
                             market_date=row_date,
+                            side=row_side,
                         )
 
                         if row_date not in all_signals:
@@ -680,7 +701,11 @@ class ScannerBridge:
                         all_signals[row_date].append(signal)
 
                     except (ValueError, TypeError) as e:
-                        if "mismatch" in str(e) or "missing market_date" in str(e):
+                        if (
+                            "mismatch" in str(e)
+                            or "missing market_date" in str(e)
+                            or "invalid side" in str(e)
+                        ):
                             message = f"contract validation failed: {e}"
                             self._set_rejection_reason("scanner.contract.invalid", message)
                             logger.warning("ScannerBridge: {}", message)

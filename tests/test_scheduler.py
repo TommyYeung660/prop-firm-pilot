@@ -28,7 +28,7 @@ from src.config import (
 from src.decision.agent_bridge import AgentDecision
 from src.decision.schemas import TradeIntent
 from src.decision_store.sqlite_store import DecisionStore, InvalidTransitionError
-from src.optimize.optimization_state import OptimizationState
+from src.optimize.optimization_state import OptimizationState, Thresholds
 from src.scheduler.scheduler import Scheduler
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -139,6 +139,8 @@ def _make_mock_signal(
     score: float = 0.85,
     confidence: str = "high",
     market_date: str = "2026-02-16",
+    side: str | None = None,
+    schema_version: str = "fx_signal_v1",
 ) -> MagicMock:
     """Create a mock ScannerSignal."""
     signal = MagicMock()
@@ -149,9 +151,10 @@ def _make_mock_signal(
     signal.drop_distance = 0.05
     signal.topk_spread = 0.02
     signal.scanner_version = "v1.5.0_beta"
-    signal.schema_version = "fx_signal_v1"
+    signal.schema_version = schema_version
     signal.market_date = market_date
     signal.label_version = "cost_aware_directional_return_v1"
+    signal.side = side
     return signal
 
 
@@ -310,6 +313,79 @@ class TestScannerLoop:
         assert intent.scanner_schema_version == "fx_signal_v1"
         assert intent.scanner_market_date == Scheduler._today_str()
         assert intent.scanner_label_version == "cost_aware_directional_return_v1"
+
+    async def test_scanner_loop_creates_long_and_short_intents_with_side(
+        self,
+        scheduler: Scheduler,
+        mock_scanner: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("EURUSD", score=0.83, side="long", schema_version="fx_signal_v2"),
+            _make_mock_signal("USDCHF", score=0.14, side="short", schema_version="fx_signal_v2"),
+        ]
+
+        await _run_loop_once(scheduler, scheduler._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        assert len(intents) == 2
+        assert {intent.scanner_side for intent in intents} == {"long", "short"}
+
+    async def test_scanner_loop_sorts_v2_candidates_by_directional_quality(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        config.scanner.topk = 1
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("EURUSD", score=0.81, side="long", schema_version="fx_signal_v2"),
+            _make_mock_signal("USDCHF", score=0.12, side="short", schema_version="fx_signal_v2"),
+        ]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        assert len(intents) == 1
+        assert intents[0].symbol == "USDCHF"
+        assert intents[0].scanner_side == "short"
+
+    async def test_scanner_loop_duplicate_guard_is_side_aware_for_v2(
+        self,
+        scheduler: Scheduler,
+        mock_scanner: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        store.insert_intent(
+            TradeIntent(
+                trade_date=Scheduler._today_str(),
+                symbol="USDCHF",
+                source="scanner",
+                scanner_schema_version="fx_signal_v2",
+                scanner_side="short",
+            )
+        )
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("USDCHF", score=0.15, side="short", schema_version="fx_signal_v2"),
+            _make_mock_signal("USDCHF", score=0.84, side="long", schema_version="fx_signal_v2"),
+        ]
+
+        await _run_loop_once(scheduler, scheduler._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        assert len(intents) == 2
+        assert {intent.scanner_side for intent in intents} == {"short", "long"}
 
     async def test_logs_structured_cooldown_skip_event(
         self,
@@ -1273,6 +1349,240 @@ class TestProcessClaimedIntent:
         assert latest is not None
         assert latest.status == "timed_out"
         assert latest.suggested_side is None
+
+    async def test_short_candidate_buy_decision_is_cancelled_as_direction_mismatch(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        scheduler._config.tactical.enabled = False
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="USDCHF",
+            decision="BUY",
+            final_state={"risk_report": "countertrend buy"},
+            risk_report="countertrend buy",
+        )
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="USDCHF",
+            scanner_score=0.12,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="short",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        await scheduler._process_claimed_intent("llm-0", claimed)
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+        assert updated.execution_error == "direction_mismatch"
+
+    async def test_long_candidate_sell_decision_is_cancelled_as_direction_mismatch(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        scheduler._config.tactical.enabled = False
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD",
+            decision="SELL",
+            final_state={"risk_report": "countertrend sell"},
+            risk_report="countertrend sell",
+        )
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.88,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        await scheduler._process_claimed_intent("llm-0", claimed)
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+        assert updated.execution_error == "direction_mismatch"
+
+    def test_decision_cache_key_includes_scanner_side(self, scheduler: Scheduler) -> None:
+        intent_long = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="USDCHF",
+            scanner_score=0.12,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        intent_short = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="USDCHF",
+            scanner_score=0.12,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="short",
+        )
+
+        assert scheduler._decision_cache_key(intent_long) != scheduler._decision_cache_key(
+            intent_short
+        )
+
+    async def test_pre_filter_logs_threshold_source_and_values(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        """Pre-filter cancellation event should include threshold source and values."""
+        from src.monitor.trade_journal import TradeJournal
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            trade_journal=journal,
+        )
+        sched._optimization_state = OptimizationState(
+            global_thresholds=Thresholds(min_confidence="low", min_blended_confidence=0.1),
+            symbol_thresholds={
+                "EURUSD": Thresholds(min_confidence="low", min_blended_confidence=0.1)
+            },
+        )
+        sched._config.scheduler.llm_threshold_override.enabled = True
+        sched._config.scheduler.llm_threshold_override.min_confidence = "high"
+        sched._config.scheduler.llm_threshold_override.min_blended_confidence = 0.9
+
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.35,
+            scanner_confidence="low",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        await sched._process_claimed_intent("llm-0", claimed)
+
+        lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+        events = [json.loads(line) for line in lines]
+        cancel_event = next(
+            event
+            for event in events
+            if event["type"] == "INTENT_CANCELLED"
+            and event["reason"] == "LLM pre-filter: low confidence"
+        )
+        assert cancel_event["threshold_source"] == "override"
+        assert cancel_event["threshold_min_confidence"] == "high"
+        assert cancel_event["threshold_min_blended_confidence"] == 0.9
+
+    async def test_post_filter_logs_threshold_source_and_values(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        """Post-filter decision/cancel events should include threshold source and values."""
+        from src.monitor.trade_journal import TradeJournal
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            trade_journal=journal,
+        )
+        sched._optimization_state = OptimizationState(
+            global_thresholds=Thresholds(min_confidence="low", min_blended_confidence=0.8)
+        )
+        sched._config.scheduler.llm_threshold_override.enabled = False
+
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.95,
+            scanner_confidence="high",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        with patch("src.scheduler.scheduler.format_decision") as mock_format:
+            mock_format.return_value = MagicMock(confidence_score=0.4)
+            await sched._process_claimed_intent("llm-0", claimed)
+
+        lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+        events = [json.loads(line) for line in lines]
+        decision_event = next(event for event in events if event["type"] == "LLM_DECISION")
+        cancel_event = next(
+            event
+            for event in events
+            if event["type"] == "INTENT_CANCELLED"
+            and event["reason"] == "LLM post-filter: low confidence"
+        )
+
+        assert decision_event["threshold_source"] == "dynamic"
+        assert decision_event["threshold_min_confidence"] == "low"
+        assert decision_event["threshold_min_blended_confidence"] == 0.8
+        assert cancel_event["threshold_source"] == "dynamic"
+        assert cancel_event["threshold_min_confidence"] == "low"
+        assert cancel_event["threshold_min_blended_confidence"] == 0.8
+
+    async def test_memory_journal_context_includes_threshold_fields(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+    ) -> None:
+        """Memory journal decision context should include threshold metadata."""
+        scheduler._memory_journal = MagicMock()
+        scheduler._optimization_state = OptimizationState(
+            global_thresholds=Thresholds(min_confidence="high", min_blended_confidence=0.95)
+        )
+        scheduler._config.scheduler.llm_threshold_override.enabled = True
+        scheduler._config.scheduler.llm_threshold_override.min_confidence = "medium"
+        scheduler._config.scheduler.llm_threshold_override.min_blended_confidence = 0.62
+
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.85,
+            scanner_confidence="high",
+        )
+        store.insert_intent(intent)
+        claimed = store.claim_next_pending("llm-0")
+        assert claimed is not None
+
+        await scheduler._process_claimed_intent("llm-0", claimed)
+
+        scheduler._memory_journal.log_decision.assert_called_once()
+        context = scheduler._memory_journal.log_decision.call_args.kwargs["context"]
+        assert context["threshold_source"] == "override"
+        assert context["threshold_min_confidence"] == "medium"
+        assert context["threshold_min_blended_confidence"] == 0.62
 
 
 # ── Execution Loop Tests ────────────────────────────────────────────────────

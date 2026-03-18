@@ -83,6 +83,7 @@ class ScannerConfig(BaseModel):
 
     project_path: str = "../../qlib_market_scanner"
     topk: int = 3
+    topk_short: int = 0
     benchmark: str = "FX"
     max_signal_age_days: int = 2  # v1.3.0: reject signals older than N days
 
@@ -179,6 +180,25 @@ class MarketHoursConfig(BaseModel):
     )
 
 
+class LLMThresholdOverrideConfig(BaseModel):
+    """Manual override values for LLM confidence gating."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Force fixed LLM thresholds at runtime",
+    )
+    min_confidence: Literal["low", "medium", "high"] = Field(
+        default="medium",
+        description="Minimum categorical confidence gate when override is enabled",
+    )
+    min_blended_confidence: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+        description="Minimum blended confidence gate in range [0.0, 1.0]",
+    )
+
+
 class SchedulerConfig(BaseModel):
     """Async scheduler cadences for the Hybrid EA+LLM pipeline."""
 
@@ -210,6 +230,10 @@ class SchedulerConfig(BaseModel):
     market_hours: MarketHoursConfig = Field(
         default_factory=MarketHoursConfig,
         description="Weekend market closure settings",
+    )
+    llm_threshold_override: LLMThresholdOverrideConfig = Field(
+        default_factory=LLMThresholdOverrideConfig,
+        description="Manual override for pre/post LLM confidence gating",
     )
 
     # v1.2.0: Session-aware scanning cadence

@@ -1,5 +1,8 @@
 """Tests for configuration defaults and validation."""
 
+import pytest
+from pydantic import ValidationError
+
 from src.config import AppConfig, ScannerConfig, SchedulerConfig
 
 
@@ -21,6 +24,20 @@ def test_e8_one_5k_scanner_benchmark_from_config():
 
     config = load_config("config/e8_one_5k_challenge.yaml")
     assert config.scanner.benchmark == "FX"
+
+
+def test_scanner_config_topk_short_default():
+    """Side-aware short export should stay opt-in by default at the model level."""
+    config = ScannerConfig()
+    assert config.topk_short == 0
+
+
+def test_e8_one_5k_scanner_topk_short_from_config():
+    """e8_one_5k_challenge should explicitly activate one short-side candidate."""
+    from src.config import load_config
+
+    config = load_config("config/e8_one_5k_challenge.yaml")
+    assert config.scanner.topk_short == 1
 
 
 def test_scheduler_config_reeval_interval_default():
@@ -70,6 +87,41 @@ def test_e8_one_5k_v136_tuned_params():
     assert config.scheduler.volatility_poll_interval_seconds == 30
     assert config.scheduler.volatility_cooldown_seconds == 1800
     assert config.scheduler.volatility_threshold_pct == 0.5
+
+
+def test_scheduler_threshold_override_defaults():
+    """Task 1: Scheduler should expose default manual LLM threshold override config."""
+    config = SchedulerConfig()
+    override = config.llm_threshold_override
+    assert override.enabled is False
+    assert override.min_confidence == "medium"
+    assert override.min_blended_confidence == 0.55
+
+
+def test_e8_one_5k_threshold_override_from_config():
+    """Task 1: e8_one_5k_challenge should enable manual LLM threshold override."""
+    from src.config import load_config
+
+    config = load_config("config/e8_one_5k_challenge.yaml")
+    override = config.scheduler.llm_threshold_override
+    assert override.enabled is True
+    assert override.min_confidence == "medium"
+    assert override.min_blended_confidence == 0.55
+
+
+@pytest.mark.parametrize("invalid_value", [-0.01, 1.01])
+def test_scheduler_threshold_override_rejects_out_of_range_blended_confidence(
+    invalid_value: float,
+) -> None:
+    """Task 1 follow-up: min_blended_confidence must stay within 0.0..1.0."""
+    with pytest.raises(ValidationError):
+        SchedulerConfig(
+            llm_threshold_override={
+                "enabled": True,
+                "min_confidence": "medium",
+                "min_blended_confidence": invalid_value,
+            }
+        )
 
 
 class TestTacticalConfig:

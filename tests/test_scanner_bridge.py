@@ -30,6 +30,7 @@ from src.signal.scanner_bridge import ScannerBridge, ScannerSignal
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "scanner"
 DEFAULT_SCANNER_VERSION = "v1.5.0_beta"
 DEFAULT_SIGNAL_SCHEMA_VERSION = "fx_signal_v1"
+DEFAULT_SIGNAL_SCHEMA_VERSION_V2 = "fx_signal_v2"
 DEFAULT_LABEL_VERSION = "cost_aware_directional_return_v1"
 
 
@@ -167,6 +168,33 @@ def _seed_runtime_output_only(
     return dest
 
 
+def _write_signal_csv(
+    path: Path,
+    *,
+    schema_version: str = DEFAULT_SIGNAL_SCHEMA_VERSION,
+    side: str | None = None,
+    market_date: str = "2026-02-16",
+    instrument: str = "EURUSD",
+    score: float = 0.61,
+    rank: int = 1,
+    confidence: str = "high",
+) -> None:
+    header = (
+        "datetime,instrument,score,rank,score_gap,drop_distance,topk_spread,"
+        "confidence,weight,profile,scanner_version,schema_version,cadence,"
+        "label_version,regime_label,market_date"
+    )
+    row = (
+        f"{market_date},{instrument},{score},{rank},0.05,0.18,0.12,{confidence},0.333,"
+        f"fx,{DEFAULT_SCANNER_VERSION},{schema_version},1d,"
+        f"{DEFAULT_LABEL_VERSION},trend,{market_date}"
+    )
+    if schema_version == DEFAULT_SIGNAL_SCHEMA_VERSION_V2:
+        header = f"{header},side"
+        row = f"{row},{'' if side is None else side}"
+    path.write_text(f"{header}\n{row}\n", encoding="utf-8")
+
+
 # ── Section 1: CSV Parsing Tests ────────────────────────────────────────────
 
 
@@ -229,6 +257,48 @@ class TestCSVParsing:
         assert len(medium_signals) >= 1
         qlib = medium_signals[0].to_qlib_data()
         assert qlib["signal_strength"] == "MODERATE"
+
+    def test_load_signals_accepts_fx_signal_v2_with_side(
+        self, bridge: ScannerBridge, tmp_path: Path
+    ) -> None:
+        csv_path = tmp_path / "signals_v2.csv"
+        _write_signal_csv(
+            csv_path,
+            schema_version=DEFAULT_SIGNAL_SCHEMA_VERSION_V2,
+            side="long",
+        )
+        _write_contract_sidecars(
+            tmp_path,
+            tmp_path,
+            schema_version=DEFAULT_SIGNAL_SCHEMA_VERSION_V2,
+        )
+
+        signals, chosen_date = bridge.load_signals_from_file(csv_path, target_date="2026-02-16")
+
+        assert chosen_date == "2026-02-16"
+        assert len(signals) == 1
+        assert signals[0].side == "long"
+
+    def test_load_v2_signals_rejects_missing_side(
+        self, bridge: ScannerBridge, tmp_path: Path
+    ) -> None:
+        csv_path = tmp_path / "signals_v2_missing_side.csv"
+        _write_signal_csv(
+            csv_path,
+            schema_version=DEFAULT_SIGNAL_SCHEMA_VERSION_V2,
+            side=None,
+        )
+        _write_contract_sidecars(
+            tmp_path,
+            tmp_path,
+            schema_version=DEFAULT_SIGNAL_SCHEMA_VERSION_V2,
+        )
+
+        signals, chosen_date = bridge.load_signals_from_file(csv_path, target_date="2026-02-16")
+
+        assert signals == []
+        assert chosen_date == ""
+        assert bridge.get_last_rejection_reason_code() == "scanner.contract.invalid"
 
     def test_load_single_signal(self, bridge: ScannerBridge) -> None:
         """signals_single.csv has 1 signal: EURUSD, score≈0.92, high confidence."""
@@ -407,6 +477,19 @@ class TestCSVParsing:
         assert "rank=1" in r
         assert "high" in r
 
+    def test_directional_quality_uses_one_minus_score_for_short(self) -> None:
+        signal = ScannerSignal(
+            instrument="USDCHF",
+            score=0.12,
+            rank=1,
+            confidence="high",
+            side="short",
+        )
+
+        qlib = signal.to_qlib_data()
+
+        assert qlib["scanner_direction_quality"] == 0.88
+
 
 # ── Section 2: Constructor and Path Tests ───────────────────────────────────
 
@@ -483,6 +566,25 @@ class TestScannerBridgeInit:
         assert "--topk" in cmd
         assert cmd[cmd.index("--topk") + 1] == "5"
 
+    def test_run_pipeline_includes_configured_topk_short(self, tmp_path: Path) -> None:
+        """Configured topk_short should be passed to qlib scanner CLI."""
+        _seed_scanner_output_bundle(tmp_path)
+
+        bridge = ScannerBridge(scanner_path=tmp_path, topk_short=1)
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "ok"
+        mock_result.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            signals = bridge.run_pipeline(date="2026-02-16")
+
+        assert len(signals) == 1
+        cmd = mock_run.call_args.args[0]
+        assert "--topk-short" in cmd
+        assert cmd[cmd.index("--topk-short") + 1] == "1"
+
     def test_run_pipeline_retries_without_benchmark_when_cli_rejects_argument(
         self, tmp_path: Path
     ) -> None:
@@ -512,7 +614,6 @@ class TestScannerBridgeInit:
         second_cmd = mock_run.call_args_list[1].args[0]
         assert "--benchmark" in first_cmd
         assert "--benchmark" not in second_cmd
-
 
     def test_run_pipeline_timeout(self, tmp_path: Path) -> None:
         """subprocess.TimeoutExpired → empty list."""
@@ -621,6 +722,7 @@ def _signal_to_intent(signal: ScannerSignal, trade_date: str) -> TradeIntent:
         scanner_schema_version=signal.schema_version,
         scanner_market_date=signal.market_date,
         scanner_label_version=signal.label_version,
+        scanner_side=signal.side,
         source="scanner",
         expires_at=datetime.now(timezone.utc) + timedelta(hours=4),
     )
@@ -681,6 +783,34 @@ class TestE2EPipeline:
 
         intents = store.get_intents_by_date(trade_date)
         assert len(intents) == 5  # Still only 5, not 10
+
+    def test_v2_signal_to_intent_copies_scanner_side(
+        self, bridge: ScannerBridge, store: DecisionStore, tmp_path: Path
+    ) -> None:
+        trade_date = "2026-02-16"
+        csv_path = tmp_path / "signals_v2_short.csv"
+        _write_signal_csv(
+            csv_path,
+            schema_version=DEFAULT_SIGNAL_SCHEMA_VERSION_V2,
+            side="short",
+            instrument="USDCHF",
+            score=0.12,
+        )
+        _write_contract_sidecars(
+            tmp_path,
+            tmp_path,
+            schema_version=DEFAULT_SIGNAL_SCHEMA_VERSION_V2,
+        )
+
+        signals, _ = bridge.load_signals_from_file(csv_path, target_date=trade_date)
+
+        assert len(signals) == 1
+        intent = _signal_to_intent(signals[0], trade_date)
+        store.insert_intent(intent)
+        persisted = store.get_intent(intent.id)
+
+        assert persisted is not None
+        assert persisted.scanner_side == "short"
 
     def test_scanner_to_llm_to_execution(self, bridge: ScannerBridge, store: DecisionStore) -> None:
         """Full pipeline: signal → intent → claim → LLM BUY → ready_for_exec."""

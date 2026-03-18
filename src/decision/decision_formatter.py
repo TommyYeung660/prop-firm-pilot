@@ -54,6 +54,7 @@ def format_decision(
     decision: str,
     scanner_score: float,
     scanner_confidence: str,
+    scanner_side: str | None = None,
     agent_state: dict[str, Any] | None = None,
 ) -> FormattedDecision:
     """Convert raw decision into execution-ready format.
@@ -63,6 +64,7 @@ def format_decision(
         decision: "BUY", "SELL", or "HOLD" from TradingAgents.
         scanner_score: Score from qlib_market_scanner.
         scanner_confidence: "high", "medium", or "low".
+        scanner_side: Optional scanner direction for side-aware bundles ("long"/"short").
         agent_state: Full final_state from TradingAgents (optional).
 
     Returns:
@@ -77,8 +79,9 @@ def format_decision(
     conf_map = {"high": 0.9, "medium": 0.6, "low": 0.3}
     conf_score = conf_map.get(scanner_confidence, 0.5)
 
-    # Blend with scanner score
-    blended_confidence = 0.6 * conf_score + 0.4 * scanner_score
+    # Side-aware exports use the lower tail as short quality.
+    direction_quality = 1.0 - scanner_score if scanner_side == "short" else scanner_score
+    blended_confidence = 0.6 * conf_score + 0.4 * direction_quality
 
     # Extract reasoning from agent state
     reasoning = ""
