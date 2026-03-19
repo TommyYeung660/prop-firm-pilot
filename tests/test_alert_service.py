@@ -379,6 +379,42 @@ class TestDailySummary:
             assert "Daily loss buffer" in msg
             assert "Max DD buffer" in msg
 
+    async def test_appends_ablation_section_when_present(
+        self, alert_with_context: AlertService
+    ) -> None:
+        ablation_summary = {
+            "recommendation": "insufficient_ablation_data",
+            "available_modes": ["B", "D"],
+            "economic_summary": {
+                "B": {"mode": "scanner_llm_tactical", "net_pnl": 120.0, "opened_count": 3},
+                "D": {"mode": "no_trade", "net_pnl": 0.0, "opened_count": 0},
+            },
+            "churn_summary": {
+                "B": {"mode": "scanner_llm_tactical", "llm_veto_rate": 0.2},
+                "D": {"mode": "no_trade", "llm_veto_rate": None},
+            },
+        }
+
+        with patch.object(alert_with_context, "send", new_callable=AsyncMock) as mock:
+            mock.return_value = True
+            await alert_with_context.daily_summary(
+                "2026-02-16",
+                5,
+                100.0,
+                5100.0,
+                0.1,
+                open_positions=2,
+                day_start_balance=5000.0,
+                ablation_summary=ablation_summary,
+            )
+            msg = mock.call_args[0][0]
+            assert "<b>Ablation (7d)</b>" in msg
+            assert "Recommendation: insufficient_ablation_data" in msg
+            assert "Available modes: B, D" in msg
+            assert "B PnL/Open: $+120.00 / 3" in msg
+            assert "B LLM veto: 20.0%" in msg
+            assert "D PnL/Open: $+0.00 / 0" in msg
+
 
 # ── Compliance & System Error (backward compat) ────────────────────────────
 
