@@ -585,6 +585,69 @@ class TestScannerLoop:
         assert admitted_event["bars_5m_source"] == "rest_fallback"
         assert admitted_event["bars_1h_source"] == "warmup_cache"
 
+    async def test_blocks_intent_creation_when_market_data_trade_date_is_not_ready(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        from src.monitor.trade_journal import TradeJournal
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            trade_journal=journal,
+        )
+        sched._market_data_ready = True
+        sched._market_data_hub = MagicMock()
+        sched._market_data_hub.get_entry_readiness = AsyncMock(
+            return_value=MagicMock(
+                entry_safe=False,
+                block_reason="market_data.trade_date_not_ready",
+                websocket_state="healthy",
+                ws_last_error=None,
+                quote_source="broker_quote",
+                bars_5m_source="warmup_cache",
+                bars_1h_source="warmup_cache",
+            )
+        )
+        sched._market_data_hub.feed_status.return_value = {
+            "initialized_at": "2026-03-19T00:00:05+00:00",
+            "uptime_seconds": 30,
+            "websocket_closed_bar_counts": {
+                "EURUSD": {"1m": 2, "5m": 0, "1h": 0},
+            },
+        }
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("EURUSD", market_date=Scheduler._today_str())
+        ]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        assert intents == []
+        sched._market_data_hub.get_entry_readiness.assert_awaited_once_with("EURUSD")
+
+        lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+        events = [json.loads(line) for line in lines]
+        skip_event = next(e for e in events if e["type"] == "SCANNER_SKIP")
+        assert skip_event["symbol"] == "EURUSD"
+        assert skip_event["reason"] == "market_data_entry_block"
+        assert skip_event["entry_block_reason"] == "market_data.trade_date_not_ready"
+        assert skip_event["feed_state"] == "healthy"
+        assert skip_event["quote_source"] == "broker_quote"
+        assert skip_event["bars_5m_source"] == "warmup_cache"
+        assert skip_event["bars_1h_source"] == "warmup_cache"
+
     async def test_logs_scanner_bundle_rejection_reason_code(
         self,
         config: AppConfig,

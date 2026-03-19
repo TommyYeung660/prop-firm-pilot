@@ -246,7 +246,7 @@ class MarketDataHub:
     def feed_status(self) -> dict[str, Any]:
         """Expose current feed status and cache fallback state."""
         now = self._now_provider()
-        websocket_status = self._websocket_client.get_status()
+        websocket_status = self._websocket_client.get_status(now=now)
         api_5m_by_symbol = {symbol: self._api_bars_fresh(symbol, "5m") for symbol in self._symbols}
         api_1h_by_symbol = {symbol: self._api_bars_fresh(symbol, "1h") for symbol in self._symbols}
         broker_available_by_symbol = {
@@ -305,7 +305,8 @@ class MarketDataHub:
 
     async def get_entry_readiness(self, symbol: str) -> EntryReadinessResult:
         """Return whether current market data is sufficient for a new entry."""
-        websocket_status = self._websocket_client.get_status()
+        now = self._now_provider()
+        websocket_status = self._websocket_client.get_status(now=now)
         websocket_state = str(websocket_status.get("state", ""))
         quote_result = await self.get_quote(symbol)
         bars_5m_result, bars_1h_result = await asyncio.gather(
@@ -321,6 +322,9 @@ class MarketDataHub:
         bars_1h_fresh = not bars_1h_result.bars.empty and self._bars_are_fresh(
             bars_1h_result.bars, "1h"
         )
+        bars_5m_close_at = self._latest_bar_close_time(bars_5m_result.bars, "5m")
+        bars_1h_close_at = self._latest_bar_close_time(bars_1h_result.bars, "1h")
+        current_trade_date = now.date()
 
         block_reason = ""
         requires_tactical_retry = False
@@ -329,9 +333,22 @@ class MarketDataHub:
             block_reason = "market_data.broker_quote_unavailable"
         elif not quote_available:
             block_reason = "market_data.quote_unavailable"
-        elif not bars_5m_fresh:
+        elif not bars_1h_fresh:
+            block_reason = "market_data.bars_1h_stale"
+        elif bars_5m_result.bars.empty:
             requires_tactical_retry = True
             pending_reason = "market_data.startup_5m_bar_pending"
+        elif not bars_5m_fresh:
+            if bars_5m_close_at is not None and bars_5m_close_at.date() < current_trade_date:
+                block_reason = "market_data.trade_date_not_ready"
+            else:
+                block_reason = "market_data.bars_5m_stale"
+        elif (
+            bars_5m_close_at is not None and bars_5m_close_at.date() < current_trade_date
+        ) or (
+            bars_1h_close_at is not None and bars_1h_close_at.date() < current_trade_date
+        ):
+            block_reason = "market_data.trade_date_not_ready"
 
         return EntryReadinessResult(
             symbol=symbol,
@@ -596,7 +613,7 @@ class MarketDataHub:
         bars: pd.DataFrame | None,
     ) -> None:
         """Log degraded market-data fallback with current websocket health context."""
-        status = self._websocket_client.get_status()
+        status = self._websocket_client.get_status(now=self._now_provider())
         latest_bar_open_at = self._latest_bar_time(bars)
         latest_bar_close_at = self._latest_bar_close_time(bars, timeframe)
         latest_bar_age_by_close_sec = None

@@ -153,9 +153,9 @@ class EODHDFXWebSocketClient:
                 stale.add(symbol)
         return stale
 
-    def get_status(self) -> dict[str, Any]:
+    def get_status(self, now: datetime | None = None) -> dict[str, Any]:
         """Expose client runtime state for monitoring and fallback decisions."""
-        stale_symbols = sorted(self.stale_symbols())
+        stale_symbols = sorted(self.stale_symbols(now=now))
         if not self._connected and self._last_error:
             state = "degraded"
         elif not self._connected:
