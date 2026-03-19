@@ -449,6 +449,8 @@ class Scheduler:
                     len(best_per_symbol),
                     len(topk_signals),
                 )
+                for _ in topk_signals:
+                    self._metrics.record_entry_funnel_event("scanner_candidate")
                 if self._entry_funnel_mode() == "tactical_only":
                     reason_code = "tactical_only_mode_requires_tactical_signal_source"
                     logger.warning(
@@ -753,6 +755,7 @@ class Scheduler:
                             expires_at=self._now_utc() + timedelta(hours=4),
                         )
                         await asyncio.to_thread(self._store.insert_intent, intent)
+                        self._metrics.record_entry_funnel_event("intent_created")
                         created_count += 1
                         self._log_trade_event(
                             "INTENT_CREATED",
@@ -918,6 +921,7 @@ class Scheduler:
                     worker_id,
                     intent.id,
                 )
+                self._metrics.record_no_trade("no_trade_mode")
             return
 
         use_llm = self._uses_llm()
@@ -1033,6 +1037,8 @@ class Scheduler:
                     self._low_confidence_cooldown.record_low_confidence(
                         intent.symbol, self._now_utc()
                     )
+                    self._metrics.record_entry_funnel_event("llm_cancel")
+                    self._metrics.record_no_trade("llm_cancel")
                     self._metrics.record_llm_result("cancel")
                 return
 
@@ -1252,6 +1258,8 @@ class Scheduler:
                         formatted.confidence_score,
                     )
                 self._low_confidence_cooldown.record_low_confidence(intent.symbol, self._now_utc())
+                self._metrics.record_entry_funnel_event("llm_cancel")
+                self._metrics.record_no_trade("llm_cancel")
                 self._metrics.record_llm_result("cancel")
                 return
             try:
@@ -1377,6 +1385,8 @@ class Scheduler:
                 raise
         else:
             if use_llm:
+                self._metrics.record_llm_veto()
+                self._metrics.record_no_trade("llm_veto")
                 self._metrics.record_llm_result("cancel")
             cancelled = await self._cancel_intent_safe(
                 worker_id=worker_id,
@@ -1568,6 +1578,14 @@ class Scheduler:
             data_source=tactical_result.provenance.get("data_source", ""),
             retry_count=retry_count,
         )
+        if tactical_result.resolution == "RETRY_PENDING":
+            self._metrics.record_entry_funnel_event("tactical_wait")
+        elif tactical_result.resolution == "EXPIRE_TIMEOUT":
+            self._metrics.record_entry_funnel_event("tactical_expire")
+            if not self._config.tactical.shadow_mode:
+                self._metrics.record_no_trade("tactical_expire")
+        elif tactical_result.resolution == "SKIP_CANCEL" and not self._config.tactical.shadow_mode:
+            self._metrics.record_no_trade("tactical_reject")
 
         if self._alert_service:
             hard_summary = " ".join(

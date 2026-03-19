@@ -274,6 +274,20 @@ class TestScannerLoop:
         assert intents[0].source == "scanner"
         assert intents[0].status == "pending"
 
+    async def test_scanner_loop_records_entry_funnel_candidate_and_intent_counts(
+        self,
+        scheduler: Scheduler,
+        mock_scanner: MagicMock,
+    ) -> None:
+        """Scanner loop should record raw funnel counts for ablation evidence."""
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("EURUSD")]
+
+        await _run_loop_once(scheduler, scheduler._scanner_loop())
+
+        snapshot = scheduler._metrics.snapshot()
+        assert snapshot["entry_funnel"]["scanner_candidates"] == 1
+        assert snapshot["entry_funnel"]["intents_created"] == 1
+
     async def test_creates_multiple_intents(
         self,
         scheduler: Scheduler,
@@ -1328,6 +1342,38 @@ class TestLLMWorkerLoop:
         assert updated is not None
         assert updated.status == "ready_for_exec"
         mock_agents.decide.assert_called_once()
+
+    async def test_scanner_llm_tactical_hold_records_llm_veto_bucket(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """LLM HOLD should be counted as a veto/no-trade outcome for ablation."""
+        scheduler._config.scheduler.entry_funnel_mode = "scanner_llm_tactical"
+        scheduler._config.tactical.enabled = False
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD",
+            decision="HOLD",
+            final_state={"test": True},
+            risk_report="hold for now",
+        )
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        snapshot = scheduler._metrics.snapshot()
+        assert snapshot["entry_funnel"]["llm_vetoes"] == 1
+        assert snapshot["entry_funnel"]["no_trade_count"] == 1
+        assert snapshot["entry_funnel"]["no_trade_reasons"]["llm_veto"] == 1
 
     async def test_no_trade_mode_never_marks_ready_for_exec(
         self,
@@ -5371,6 +5417,10 @@ async def test_tactical_wait_with_timeout_resolution_marks_timed_out_immediately
     assert final is not None
     assert final.status == "timed_out"
     assert "Tactical gate WAIT" in (final.execution_error or "")
+    snapshot = sched._metrics.snapshot()
+    assert snapshot["entry_funnel"]["tactical_expires"] == 1
+    assert snapshot["entry_funnel"]["no_trade_count"] == 1
+    assert snapshot["entry_funnel"]["no_trade_reasons"]["tactical_expire"] == 1
     mock_retry.assert_not_awaited()
 
 
