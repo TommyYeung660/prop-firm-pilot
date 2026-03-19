@@ -165,3 +165,49 @@ def test_build_daily_entry_calibration_snapshot_derives_economic_fields_from_tra
     assert snapshot["net_pnl"] == 40.0
     assert snapshot["profit_factor"] == 3.0
     assert snapshot["max_drawdown"] == 20.0
+
+
+def test_build_daily_entry_calibration_snapshot_surfaces_close_attribution_and_degrade_counts(
+    tmp_path: Path,
+) -> None:
+    journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+    journal.log_event(
+        "TACTICAL_RESULT",
+        {
+            "timestamp": "2026-03-14T08:00:00+00:00",
+            "symbol": "USDCAD",
+            "resolution": "EXECUTE_DEGRADED",
+            "summary_reason_code": "tactical.degrade.retry_expired",
+            "context": {"session_label": "new_york", "regime_label": "normal"},
+            "provenance": {"data_source": "rest_fallback"},
+        },
+    )
+    journal.log_event(
+        "TRADE_CLOSED",
+        {
+            "timestamp": "2026-03-14T09:15:00+00:00",
+            "symbol": "USDCAD",
+            "pnl": 0.83,
+            "trigger_source": "tactical_exit",
+            "final_close_reason": "tp_hit",
+            "reason": "tp_hit",
+        },
+    )
+    journal.log_event(
+        "TRADE_CLOSED",
+        {
+            "timestamp": "2026-03-14T10:00:00+00:00",
+            "symbol": "AUDJPY",
+            "pnl": -92.34,
+            "trigger_source": "manual_or_broker",
+            "final_close_reason": "sl_hit",
+            "reason": "sl_hit",
+        },
+    )
+
+    snapshot = build_daily_entry_calibration_snapshot(journal, "2026-03-14")
+
+    assert snapshot["degrade_to_exec_count"] == 1
+    assert snapshot["tactical_exit_close_count"] == 1
+    assert snapshot["close_trigger_source_counts"]["tactical_exit"] == 1
+    assert snapshot["close_reason_counts"]["tp_hit"] == 1

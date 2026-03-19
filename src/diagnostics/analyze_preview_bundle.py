@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.version import get_release_tag
+
 WEBSOCKET_FAILURE_RE = re.compile(
     r"EODHDFXWebSocketClient: connection failed \((?P<reason>.+?)\), reconnecting"
 )
@@ -116,9 +118,9 @@ def _summarize_source_usage(raw_counts: Counter[str], total_slots: int) -> dict[
 def _choose_main_log(log_dir: Path) -> Path | None:
     if not log_dir.exists():
         return None
-    preview_logs = sorted(log_dir.glob("*v1.5.0_preview.log"))
-    if preview_logs:
-        return preview_logs[-1]
+    release_logs = sorted(log_dir.glob(f"*{get_release_tag()}.log"))
+    if release_logs:
+        return release_logs[-1]
     all_logs = sorted(log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime)
     if all_logs:
         return all_logs[-1]

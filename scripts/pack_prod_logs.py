@@ -874,6 +874,12 @@ def _build_decisions_fallback_summary(trade_content: str) -> str:
         ),
     )
     shadow_rows: dict[tuple[str, str], dict[str, int | float]] = {}
+
+    def _format_counter_summary(counter: Counter) -> str:
+        if not counter:
+            return "none"
+        return ",".join(f"{key}={count}" for key, count in sorted(counter.items()))
+
     for idx, (_, payload) in enumerate(ordered_records):
         event_type = payload.get("type")
         reason = payload.get("reason")
@@ -891,6 +897,16 @@ def _build_decisions_fallback_summary(trade_content: str) -> str:
         opened = any(item.get("type") == "TRADE_OPENED" for item in follow_up_events)
         closed = [item for item in follow_up_events if item.get("type") == "TRADE_CLOSED"]
         pnl = sum(float(item.get("pnl", 0.0) or 0.0) for item in closed)
+        trigger_sources = Counter(
+            str(item.get("trigger_source", ""))
+            for item in closed
+            if item.get("trigger_source")
+        )
+        final_close_reasons = Counter(
+            str(item.get("final_close_reason", item.get("reason", "")))
+            for item in closed
+            if item.get("final_close_reason") or item.get("reason")
+        )
         key = (symbol, reason)
         bucket = shadow_rows.setdefault(
             key,
@@ -899,12 +915,16 @@ def _build_decisions_fallback_summary(trade_content: str) -> str:
                 "same_day_follow_up_opens": 0,
                 "same_day_follow_up_closes": 0,
                 "same_day_follow_up_pnl": 0.0,
+                "same_day_trigger_sources": Counter(),
+                "same_day_final_close_reasons": Counter(),
             },
         )
         bucket["count"] += 1
         bucket["same_day_follow_up_opens"] += int(opened)
         bucket["same_day_follow_up_closes"] += int(bool(closed))
         bucket["same_day_follow_up_pnl"] += pnl
+        bucket["same_day_trigger_sources"].update(trigger_sources)
+        bucket["same_day_final_close_reasons"].update(final_close_reasons)
 
     lines = [
         "# Decisions Summary (Deterministic Fallback)",
@@ -940,24 +960,29 @@ def _build_decisions_fallback_summary(trade_content: str) -> str:
         [
             "",
             "## Shadow Analysis",
-            "| Symbol | Reason | Events | Same-day Opens | Same-day Closes | Same-day PnL |",
-            "|------|------|------:|------:|------:|------:|",
+            (
+                "| Symbol | Reason | Events | Same-day Opens | Same-day Closes | "
+                "Same-day PnL | Trigger Sources | Final Close Reasons |"
+            ),
+            "|------|------|------:|------:|------:|------:|------|------|",
         ]
     )
     if shadow_rows:
         for (symbol, reason), summary in sorted(shadow_rows.items()):
             lines.append(
-                "| {} | {} | {} | {} | {} | {:.2f} |".format(
+                "| {} | {} | {} | {} | {} | {:.2f} | {} | {} |".format(
                     symbol,
                     reason,
                     int(summary["count"]),
                     int(summary["same_day_follow_up_opens"]),
                     int(summary["same_day_follow_up_closes"]),
                     float(summary["same_day_follow_up_pnl"]),
+                    _format_counter_summary(summary["same_day_trigger_sources"]),
+                    _format_counter_summary(summary["same_day_final_close_reasons"]),
                 )
             )
     else:
-        lines.append("| none | none | 0 | 0 | 0 | 0.00 |")
+        lines.append("| none | none | 0 | 0 | 0 | 0.00 | none | none |")
 
     return "\n".join(lines)
 
