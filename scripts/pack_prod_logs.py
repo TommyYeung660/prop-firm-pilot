@@ -960,7 +960,10 @@ def _build_decisions_fallback_summary(trade_content: str) -> str:
         [
             "",
             "## Shadow Analysis",
-            "| Symbol | Reason | Events | Same-day Opens | Same-day Closes | Same-day PnL | Trigger Sources | Final Close Reasons |",
+            (
+                "| Symbol | Reason | Events | Same-day Opens | Same-day Closes | "
+                "Same-day PnL | Trigger Sources | Final Close Reasons |"
+            ),
             "|------|------|------:|------:|------:|------:|------|------|",
         ]
     )

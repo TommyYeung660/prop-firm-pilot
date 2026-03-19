@@ -1,10 +1,12 @@
-from pathlib import Path
 import os
+from pathlib import Path
 
 from src.diagnostics.analyze_preview_bundle import _choose_main_log
 
 
-def test_choose_main_log_prefers_current_release_tag_over_latest_generic_log(tmp_path: Path) -> None:
+def test_choose_main_log_prefers_current_release_tag_over_latest_generic_log(
+    tmp_path: Path,
+) -> None:
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     release_log = log_dir / "prop_firm_pilot_20260319_092004_v1.5.0_preview_2.log"
