@@ -415,6 +415,34 @@ class TestDailySummary:
             assert "B LLM veto: 20.0%" in msg
             assert "D PnL/Open: $+0.00 / 0" in msg
 
+    async def test_omits_ablation_churn_line_when_metric_missing(
+        self, alert_with_context: AlertService
+    ) -> None:
+        ablation_summary = {
+            "recommendation": "insufficient_ablation_data",
+            "available_modes": ["D"],
+            "economic_summary": {
+                "D": {"mode": "no_trade", "net_pnl": 0.0, "opened_count": 0},
+            },
+            "churn_summary": {
+                "D": {"mode": "no_trade", "llm_veto_rate": None},
+            },
+        }
+
+        with patch.object(alert_with_context, "send", new_callable=AsyncMock) as mock:
+            mock.return_value = True
+            await alert_with_context.daily_summary(
+                "2026-02-16",
+                1,
+                0.0,
+                5000.0,
+                0.0,
+                ablation_summary=ablation_summary,
+            )
+            msg = mock.call_args[0][0]
+            assert "D PnL/Open: $+0.00 / 0" in msg
+            assert "D LLM veto" not in msg
+
 
 # ── Compliance & System Error (backward compat) ────────────────────────────
 
