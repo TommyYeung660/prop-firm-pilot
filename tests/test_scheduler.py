@@ -2958,6 +2958,140 @@ class TestDailySummaryLoop:
         assert kwargs["pnl"] == pytest.approx(163.68)
         assert kwargs["open_positions"] == 0
         assert kwargs["day_start_balance"] == pytest.approx(50000.0)
+        assert kwargs["ablation_summary"] is None
+
+    async def test_daily_summary_passes_rolling_ablation_summary(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        from src.monitor.trade_journal import TradeJournal
+
+        mock_alert = AsyncMock()
+        mock_alert.daily_summary = AsyncMock()
+        mock_alert.send = AsyncMock()
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        journal.log_event(
+            "TACTICAL_ENTRY_CALIBRATION_SNAPSHOT",
+            {
+                "timestamp": "2026-02-09T22:10:00+00:00",
+                "date": "2026-02-09",
+                "entry_funnel_mode": "scanner_tactical",
+                "net_pnl": 999.0,
+                "profit_factor": 9.9,
+                "max_drawdown": 1.0,
+                "scanner_candidates": 9,
+                "intents_created": 8,
+                "opened_count": 4,
+                "llm_vetoes": 0,
+                "llm_cancels": 0,
+                "tactical_waits": 1,
+                "tactical_expires": 0,
+                "no_trade_count": 1,
+            },
+        )
+        for snapshot in [
+            {
+                "timestamp": "2026-02-10T22:10:00+00:00",
+                "date": "2026-02-10",
+                "entry_funnel_mode": "scanner_tactical",
+                "net_pnl": 10.0,
+                "profit_factor": 1.1,
+                "max_drawdown": 20.0,
+                "scanner_candidates": 10,
+                "intents_created": 8,
+                "opened_count": 4,
+                "llm_vetoes": 0,
+                "llm_cancels": 0,
+                "tactical_waits": 1,
+                "tactical_expires": 0,
+                "no_trade_count": 1,
+            },
+            {
+                "timestamp": "2026-02-11T22:10:00+00:00",
+                "date": "2026-02-11",
+                "entry_funnel_mode": "scanner_llm_tactical",
+                "net_pnl": 20.0,
+                "profit_factor": 1.2,
+                "max_drawdown": 15.0,
+                "scanner_candidates": 10,
+                "intents_created": 6,
+                "opened_count": 3,
+                "llm_vetoes": 2,
+                "llm_cancels": 1,
+                "tactical_waits": 1,
+                "tactical_expires": 0,
+                "no_trade_count": 2,
+            },
+            {
+                "timestamp": "2026-02-12T22:10:00+00:00",
+                "date": "2026-02-12",
+                "entry_funnel_mode": "tactical_only",
+                "net_pnl": 15.0,
+                "profit_factor": 1.05,
+                "max_drawdown": 12.0,
+                "scanner_candidates": 0,
+                "intents_created": 2,
+                "opened_count": 2,
+                "llm_vetoes": 0,
+                "llm_cancels": 0,
+                "tactical_waits": 1,
+                "tactical_expires": 0,
+                "no_trade_count": 0,
+            },
+            {
+                "timestamp": "2026-02-13T22:10:00+00:00",
+                "date": "2026-02-13",
+                "entry_funnel_mode": "no_trade",
+                "net_pnl": 0.0,
+                "profit_factor": 1.0,
+                "max_drawdown": 0.0,
+                "scanner_candidates": 8,
+                "intents_created": 0,
+                "opened_count": 0,
+                "llm_vetoes": 0,
+                "llm_cancels": 0,
+                "tactical_waits": 0,
+                "tactical_expires": 0,
+                "no_trade_count": 8,
+            },
+        ]:
+            journal.log_event("TACTICAL_ENTRY_CALIBRATION_SNAPSHOT", snapshot)
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            alert_service=mock_alert,
+            trade_journal=journal,
+        )
+        mock_matchtrader.get_balance.return_value = MagicMock(
+            balance=50000.0,
+            equity=50000.0,
+            margin=0.0,
+            free_margin=50000.0,
+        )
+        mock_matchtrader.get_open_positions.return_value = []
+
+        await sched._send_daily_summary("2026-02-16")
+
+        kwargs = mock_alert.daily_summary.call_args.kwargs
+        ablation_summary = kwargs["ablation_summary"]
+        assert ablation_summary is not None
+        assert ablation_summary["available_modes"] == ["A", "B", "C", "D"]
+        assert ablation_summary["economic_summary"]["A"]["net_pnl"] == 10.0
+        assert ablation_summary["economic_summary"]["B"]["net_pnl"] == 20.0
+        assert ablation_summary["economic_summary"]["C"]["net_pnl"] == 15.0
+        assert ablation_summary["economic_summary"]["D"]["net_pnl"] == 0.0
 
     async def test_daily_summary_logs_tactical_entry_calibration_snapshot(
         self,

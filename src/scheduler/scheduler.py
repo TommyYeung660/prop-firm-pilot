@@ -56,6 +56,7 @@ from src.decision.tactical_exit_rules import TacticalExitSnapshot
 from src.decision.tactical_validator import TacticalData, TacticalResult, TacticalValidator
 from src.decision_store.janitor import Janitor
 from src.decision_store.sqlite_store import DecisionStore, InvalidTransitionError
+from src.diagnostics.analyze_entry_funnel_ablation import analyze_ablation
 from src.execution.engine import ExecutionEngine
 from src.execution.instrument_registry import InstrumentRegistry
 from src.execution.matchtrader_client import MatchTraderClient
@@ -3748,6 +3749,21 @@ class Scheduler:
                 else 0.0
             )
 
+            metrics_snapshot = self._build_metrics_snapshot()
+            calibration_snapshot: dict[str, Any] | None = None
+            ablation_summary: dict[str, Any] | None = None
+            if self._trade_journal is not None:
+                calibration_snapshot = build_daily_entry_calibration_snapshot(
+                    self._trade_journal,
+                    date_str,
+                    metrics_snapshot=metrics_snapshot,
+                )
+                ablation_summary = await asyncio.to_thread(
+                    self._build_rolling_ablation_summary,
+                    date_str,
+                    calibration_snapshot,
+                )
+
             max_dd_ref = self._hwm_tracker.high_water_mark if self._hwm_tracker else None
             await self._alert_service.daily_summary(
                 date=date_str,
@@ -3758,18 +3774,13 @@ class Scheduler:
                 open_positions=len(open_positions),
                 day_start_balance=day_start_balance,
                 max_dd_reference=max_dd_ref,
+                ablation_summary=ablation_summary,
             )
             logger.info("Daily summary sent for {}", date_str)
 
             # v1.3.9: Emit operational metrics snapshot (P3.11 + P3.12)
-            metrics_snapshot = self._build_metrics_snapshot()
             self._log_trade_event("METRICS_SNAPSHOT", metrics_snapshot)
-            if self._trade_journal is not None:
-                calibration_snapshot = build_daily_entry_calibration_snapshot(
-                    self._trade_journal,
-                    date_str,
-                    metrics_snapshot=metrics_snapshot,
-                )
+            if calibration_snapshot is not None:
                 self._log_trade_event(
                     "TACTICAL_ENTRY_CALIBRATION_SNAPSHOT",
                     calibration_snapshot,
@@ -3778,6 +3789,48 @@ class Scheduler:
         except Exception as e:
             logger.error("Failed to send daily summary: {}", e)
             await self._send_alert(f"⚠️ <b>Daily Summary Error</b>\n<code>{e}</code>")
+
+    def _build_rolling_ablation_summary(
+        self,
+        date_str: str,
+        current_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Build a 7-day ablation summary from journaled calibration snapshots."""
+        if self._trade_journal is None:
+            return None
+
+        end_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        window_dates = [
+            (end_date - timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)
+        ]
+        window_date_set = set(window_dates)
+        snapshots_by_date: dict[str, dict[str, Any]] = {}
+
+        for event in self._trade_journal.get_events("TACTICAL_ENTRY_CALIBRATION_SNAPSHOT"):
+            snapshot_date = str(event.get("date", "")).strip()
+            if snapshot_date not in window_date_set:
+                continue
+            existing = snapshots_by_date.get(snapshot_date)
+            existing_key = "" if existing is None else self._snapshot_sort_key(existing)
+            if self._snapshot_sort_key(event) >= existing_key:
+                snapshots_by_date[snapshot_date] = event
+
+        if current_snapshot is not None:
+            snapshot_date = str(current_snapshot.get("date", "")).strip()
+            if snapshot_date in window_date_set:
+                snapshots_by_date[snapshot_date] = current_snapshot
+
+        ordered_snapshots = [
+            snapshots_by_date[day] for day in window_dates if day in snapshots_by_date
+        ]
+        if not ordered_snapshots:
+            return None
+        return analyze_ablation(ordered_snapshots)
+
+    @staticmethod
+    def _snapshot_sort_key(snapshot: dict[str, Any]) -> str:
+        """Return a stable ordering key for snapshot deduplication by date."""
+        return str(snapshot.get("timestamp") or snapshot.get("generated_at") or "")
 
     # ── Weekend Market Closure ──────────────────────────────────────────
 
