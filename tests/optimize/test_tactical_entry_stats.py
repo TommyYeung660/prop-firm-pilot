@@ -140,3 +140,28 @@ def test_build_daily_entry_calibration_snapshot_includes_entry_funnel_fields(
     assert snapshot["no_trade_count"] == 2
     assert snapshot["no_trade_reasons"]["llm_veto"] == 1
     assert snapshot["llm_veto_rate"] == 0.2
+
+
+def test_build_daily_entry_calibration_snapshot_derives_economic_fields_from_trade_closes(
+    tmp_path: Path,
+) -> None:
+    journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+    for timestamp, pnl in [
+        ("2026-03-14T09:15:00+00:00", 50.0),
+        ("2026-03-14T10:30:00+00:00", -20.0),
+        ("2026-03-14T14:05:00+00:00", 10.0),
+    ]:
+        journal.log_event(
+            "TRADE_CLOSED",
+            {
+                "timestamp": timestamp,
+                "symbol": "EURUSD",
+                "pnl": pnl,
+            },
+        )
+
+    snapshot = build_daily_entry_calibration_snapshot(journal, "2026-03-14")
+
+    assert snapshot["net_pnl"] == 40.0
+    assert snapshot["profit_factor"] == 3.0
+    assert snapshot["max_drawdown"] == 20.0

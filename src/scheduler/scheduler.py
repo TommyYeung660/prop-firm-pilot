@@ -3810,6 +3810,7 @@ class Scheduler:
             snapshot_date = str(event.get("date", "")).strip()
             if snapshot_date not in window_date_set:
                 continue
+            event = self._enrich_ablation_snapshot(event)
             existing = snapshots_by_date.get(snapshot_date)
             existing_key = "" if existing is None else self._snapshot_sort_key(existing)
             if self._snapshot_sort_key(event) >= existing_key:
@@ -3818,7 +3819,7 @@ class Scheduler:
         if current_snapshot is not None:
             snapshot_date = str(current_snapshot.get("date", "")).strip()
             if snapshot_date in window_date_set:
-                snapshots_by_date[snapshot_date] = current_snapshot
+                snapshots_by_date[snapshot_date] = self._enrich_ablation_snapshot(current_snapshot)
 
         ordered_snapshots = [
             snapshots_by_date[day] for day in window_dates if day in snapshots_by_date
@@ -3831,6 +3832,33 @@ class Scheduler:
     def _snapshot_sort_key(snapshot: dict[str, Any]) -> str:
         """Return a stable ordering key for snapshot deduplication by date."""
         return str(snapshot.get("timestamp") or snapshot.get("generated_at") or "")
+
+    def _enrich_ablation_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Fill missing economic fields from the journal for legacy snapshots."""
+        if self._trade_journal is None:
+            return snapshot
+
+        enriched = dict(snapshot)
+        if all(
+            self._snapshot_metric_present(enriched.get(field))
+            for field in ("net_pnl", "profit_factor", "max_drawdown")
+        ):
+            return enriched
+
+        snapshot_date = str(enriched.get("date", "")).strip()
+        if not snapshot_date:
+            return enriched
+
+        recomputed = build_daily_entry_calibration_snapshot(self._trade_journal, snapshot_date)
+        for field in ("net_pnl", "profit_factor", "max_drawdown"):
+            if not self._snapshot_metric_present(enriched.get(field)):
+                enriched[field] = recomputed.get(field)
+        return enriched
+
+    @staticmethod
+    def _snapshot_metric_present(value: Any) -> bool:
+        """Return whether a snapshot metric is already a usable numeric value."""
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
 
     # ── Weekend Market Closure ──────────────────────────────────────────
 

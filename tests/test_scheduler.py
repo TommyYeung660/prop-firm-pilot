@@ -3093,6 +3093,79 @@ class TestDailySummaryLoop:
         assert ablation_summary["economic_summary"]["C"]["net_pnl"] == 15.0
         assert ablation_summary["economic_summary"]["D"]["net_pnl"] == 0.0
 
+    async def test_daily_summary_derives_ablation_economics_from_trade_closes(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        from src.monitor.trade_journal import TradeJournal
+
+        mock_alert = AsyncMock()
+        mock_alert.daily_summary = AsyncMock()
+        mock_alert.send = AsyncMock()
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        journal.log_event(
+            "TACTICAL_ENTRY_CALIBRATION_SNAPSHOT",
+            {
+                "timestamp": "2026-02-15T22:10:00+00:00",
+                "date": "2026-02-15",
+                "entry_funnel_mode": "scanner_tactical",
+                "scanner_candidates": 5,
+                "intents_created": 3,
+                "opened_count": 2,
+                "llm_vetoes": 0,
+                "llm_cancels": 0,
+                "tactical_waits": 1,
+                "tactical_expires": 0,
+                "no_trade_count": 1,
+            },
+        )
+        for timestamp, pnl in [
+            ("2026-02-15T09:15:00+00:00", 50.0),
+            ("2026-02-15T10:30:00+00:00", -20.0),
+            ("2026-02-15T14:05:00+00:00", 10.0),
+        ]:
+            journal.log_event(
+                "TRADE_CLOSED",
+                {
+                    "timestamp": timestamp,
+                    "symbol": "EURUSD",
+                    "pnl": pnl,
+                },
+            )
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            alert_service=mock_alert,
+            trade_journal=journal,
+        )
+        mock_matchtrader.get_balance.return_value = MagicMock(
+            balance=50000.0,
+            equity=50000.0,
+            margin=0.0,
+            free_margin=50000.0,
+        )
+        mock_matchtrader.get_open_positions.return_value = []
+
+        await sched._send_daily_summary("2026-02-16")
+
+        ablation_summary = mock_alert.daily_summary.call_args.kwargs["ablation_summary"]
+        assert ablation_summary is not None
+        assert ablation_summary["economic_summary"]["A"]["net_pnl"] == 40.0
+        assert ablation_summary["economic_summary"]["A"]["profit_factor"] == 3.0
+        assert ablation_summary["economic_summary"]["A"]["max_drawdown"] == 20.0
+
     async def test_daily_summary_logs_tactical_entry_calibration_snapshot(
         self,
         config: AppConfig,
