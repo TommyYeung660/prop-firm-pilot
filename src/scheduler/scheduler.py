@@ -1720,6 +1720,26 @@ class Scheduler:
         if retry_cfg.expire_action == "degrade" and self._tactical_wait_allows_degrade(
             last_wait_result
         ):
+            degraded_result = TacticalResult(
+                action="WAIT",
+                resolution="EXECUTE_DEGRADED",
+                hard_gates=list(last_wait_result.hard_gates),
+                soft_gates=list(last_wait_result.soft_gates),
+                soft_score=last_wait_result.soft_score,
+                soft_required=last_wait_result.soft_required,
+                detail=last_wait_result.detail,
+                summary_reason_code="tactical.degrade.retry_expired",
+                policy_hints=dict(last_wait_result.policy_hints),
+                provenance=dict(last_wait_result.provenance),
+                context=dict(last_wait_result.context),
+                retry_count=retry_cfg.max_retries,
+            )
+            await self._log_tactical_result(
+                intent,
+                side,
+                degraded_result,
+                retry_count=retry_cfg.max_retries,
+            )
             await asyncio.to_thread(self._store.mark_ready_for_exec_from_tactical, intent.id)
             self._log_trade_event(
                 "TACTICAL_DEGRADED",
@@ -1728,6 +1748,7 @@ class Scheduler:
                     "symbol": intent.symbol,
                     "side": side,
                     "retries": retry_cfg.max_retries,
+                    "detail": last_wait_result.detail,
                 },
             )
             logger.warning(

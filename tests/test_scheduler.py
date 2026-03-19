@@ -5329,9 +5329,11 @@ async def test_tactical_wait_degrades_to_ready_for_exec_on_retry_expiry(
     mock_agents: MagicMock,
     mock_engine: AsyncMock,
     mock_matchtrader: AsyncMock,
+    tmp_path,
 ):
     """Degrade mode should release intent to execution after retry budget is exhausted."""
     from src.decision.tactical_validator import TacticalResult
+    from src.monitor.trade_journal import TradeJournal
 
     config.tactical.enabled = True
     config.tactical.shadow_mode = False
@@ -5339,6 +5341,7 @@ async def test_tactical_wait_degrades_to_ready_for_exec_on_retry_expiry(
     config.tactical.retry.interval_seconds = 0
     config.tactical.retry.jitter_seconds = 0
     config.tactical.retry.expire_action = "degrade"
+    journal = TradeJournal(tmp_path / "trade_journal.jsonl")
 
     sched = Scheduler(
         config=config,
@@ -5347,6 +5350,7 @@ async def test_tactical_wait_degrades_to_ready_for_exec_on_retry_expiry(
         agents=mock_agents,
         engine=mock_engine,
         matchtrader=mock_matchtrader,
+        trade_journal=journal,
     )
 
     intent = TradeIntent(
@@ -5370,6 +5374,14 @@ async def test_tactical_wait_degrades_to_ready_for_exec_on_retry_expiry(
     final = store.get_intent(claimed.id)
     assert final.status == "ready_for_exec"
     assert mock_tac.await_count == 2
+    assert sched._metrics.get_summary()["tactical_degrade_count"] == 1
+
+    lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+    events = [json.loads(line) for line in lines]
+    assert any(
+        event["type"] == "TACTICAL_RESULT" and event["resolution"] == "EXECUTE_DEGRADED"
+        for event in events
+    )
 
 
 async def test_tactical_wait_from_market_data_insufficiency_times_out_on_retry_expiry(
