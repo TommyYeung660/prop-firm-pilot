@@ -379,6 +379,64 @@ class TestDailySummary:
             assert "Daily loss buffer" in msg
             assert "Max DD buffer" in msg
 
+    async def test_daily_summary_with_ablation_section_in_same_message(
+        self, alert_with_context: AlertService
+    ) -> None:
+        ablation_summary = {
+            "recommendation": "insufficient_ablation_data",
+            "available_modes": ["B", "D"],
+            "mode_results": {
+                "B": {
+                    "label": "B",
+                    "realized_pnl": 120.0,
+                    "trade_opened": 3,
+                    "llm_veto_rate": 0.2,
+                    "total_candidates": 5,
+                },
+                "D": {
+                    "label": "D",
+                    "realized_pnl": 0.0,
+                    "trade_opened": 0,
+                    "llm_veto_rate": 0.0,
+                    "total_candidates": 0,
+                },
+            },
+        }
+        with patch.object(alert_with_context, "send", new_callable=AsyncMock) as mock:
+            mock.return_value = True
+            await alert_with_context.daily_summary(
+                "2026-02-16",
+                5,
+                100.0,
+                5100.0,
+                0.1,
+                ablation_summary=ablation_summary,
+            )
+            msg = mock.call_args[0][0]
+            assert "<b>Ablation (7d)</b>" in msg
+            assert "• Recommendation: insufficient_ablation_data" in msg
+            assert "• Available modes: B, D" in msg
+            assert "• B PnL/Open: $+120.00 / 3" in msg
+            assert "• B LLM veto: 20.0%" in msg
+            assert "• D PnL/Open: $+0.00 / 0" in msg
+            assert msg.count("<b>Ablation (7d)</b>") == 1
+
+    async def test_daily_summary_without_ablation_summary_has_no_ablation_block(
+        self, alert_with_context: AlertService
+    ) -> None:
+        with patch.object(alert_with_context, "send", new_callable=AsyncMock) as mock:
+            mock.return_value = True
+            await alert_with_context.daily_summary(
+                "2026-02-16",
+                2,
+                -30.0,
+                4970.0,
+                0.3,
+                open_positions=1,
+            )
+            msg = mock.call_args[0][0]
+            assert "<b>Ablation (7d)</b>" not in msg
+
 
 # ── Compliance & System Error (backward compat) ────────────────────────────
 
