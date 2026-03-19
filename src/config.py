@@ -375,6 +375,25 @@ class SchedulerConfig(BaseModel):
         default="4h", description="Timeframe for TradingAgents entry analysis (4h recommended)"
     )
 
+    # v1.5.0: Entry-funnel ablation controls (scheduler-only runtime switches)
+    entry_funnel_mode: Literal[
+        "scanner_tactical",
+        "scanner_llm_tactical",
+        "tactical_only",
+        "no_trade",
+    ] = Field(
+        default="scanner_llm_tactical",
+        description="Runtime entry funnel routing (default mirrors production path).",
+    )
+    ablation_shadow_modes: list[str] = Field(
+        default_factory=list,
+        description="Additional entry-funnel modes to exercise in parallel for ablation.",
+    )
+    ablation_tag: str = Field(
+        default="control",
+        description="Label for tagging cohort when shadowing alternative entry funnel modes.",
+    )
+
 
 # ── Tactical Execution Config (v1.3.7) ──────────────────────────────────
 

@@ -274,6 +274,20 @@ class TestScannerLoop:
         assert intents[0].source == "scanner"
         assert intents[0].status == "pending"
 
+    async def test_scanner_loop_records_entry_funnel_candidate_and_intent_counts(
+        self,
+        scheduler: Scheduler,
+        mock_scanner: MagicMock,
+    ) -> None:
+        """Scanner loop should record raw funnel counts for ablation evidence."""
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("EURUSD")]
+
+        await _run_loop_once(scheduler, scheduler._scanner_loop())
+
+        snapshot = scheduler._metrics.snapshot()
+        assert snapshot["entry_funnel"]["scanner_candidates"] == 1
+        assert snapshot["entry_funnel"]["intents_created"] == 1
+
     async def test_creates_multiple_intents(
         self,
         scheduler: Scheduler,
@@ -1178,6 +1192,271 @@ class TestLLMWorkerLoop:
             await scheduler._llm_worker_loop("llm-0")
 
         assert len(sleep_calls) == 1
+        mock_agents.decide.assert_not_called()
+
+    async def test_scanner_tactical_mode_skips_llm_worker(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """scanner_tactical should bypass LLM and derive side from scanner signal."""
+        scheduler._config.scheduler.entry_funnel_mode = "scanner_tactical"
+        scheduler._config.tactical.enabled = False
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "ready_for_exec"
+        assert updated.suggested_side == "BUY"
+        mock_agents.decide.assert_not_called()
+
+    async def test_scanner_tactical_mode_cancels_when_scanner_side_missing(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """scanner_tactical should cancel safely when side is absent/invalid."""
+        scheduler._config.scheduler.entry_funnel_mode = "scanner_tactical"
+        scheduler._config.tactical.enabled = False
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side=None,
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+        assert updated.execution_error is not None
+        assert "scanner_side" in updated.execution_error
+        mock_agents.decide.assert_not_called()
+
+    async def test_scanner_tactical_mode_ignores_llm_pre_filter(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """scanner_tactical should not be cancelled by LLM pre-filter thresholds."""
+        scheduler._config.scheduler.entry_funnel_mode = "scanner_tactical"
+        scheduler._config.tactical.enabled = False
+        scheduler._config.scheduler.llm_threshold_override.enabled = True
+        scheduler._config.scheduler.llm_threshold_override.min_confidence = "high"
+        scheduler._config.scheduler.llm_threshold_override.min_blended_confidence = 0.95
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.20,
+            scanner_confidence="low",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "ready_for_exec"
+        assert updated.suggested_side == "BUY"
+        assert updated.execution_error != "LLM pre-filter: low confidence"
+        mock_agents.decide.assert_not_called()
+
+    async def test_scanner_tactical_mode_ignores_llm_post_filter(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """scanner_tactical should not be cancelled by LLM post-filter thresholds."""
+        scheduler._config.scheduler.entry_funnel_mode = "scanner_tactical"
+        scheduler._config.tactical.enabled = False
+        scheduler._config.scheduler.llm_threshold_override.enabled = True
+        scheduler._config.scheduler.llm_threshold_override.min_confidence = "low"
+        scheduler._config.scheduler.llm_threshold_override.min_blended_confidence = 0.9
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.95,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        with patch("src.scheduler.scheduler.format_decision") as mock_format:
+            mock_format.return_value = MagicMock(
+                confidence_score=0.1,
+                suggested_sl_pips=25.0,
+                suggested_tp_pips=50.0,
+            )
+            await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "ready_for_exec"
+        assert updated.suggested_side == "BUY"
+        assert updated.execution_error != "LLM post-filter: low confidence"
+        mock_agents.decide.assert_not_called()
+
+    async def test_scanner_llm_tactical_mode_keeps_current_path(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """scanner_llm_tactical should keep existing LLM decision flow."""
+        scheduler._config.scheduler.entry_funnel_mode = "scanner_llm_tactical"
+        scheduler._config.tactical.enabled = False
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "ready_for_exec"
+        mock_agents.decide.assert_called_once()
+
+    async def test_scanner_llm_tactical_hold_records_llm_veto_bucket(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """LLM HOLD should be counted as a veto/no-trade outcome for ablation."""
+        scheduler._config.scheduler.entry_funnel_mode = "scanner_llm_tactical"
+        scheduler._config.tactical.enabled = False
+        mock_agents.decide.return_value = AgentDecision(
+            symbol="EURUSD",
+            decision="HOLD",
+            final_state={"test": True},
+            risk_report="hold for now",
+        )
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        snapshot = scheduler._metrics.snapshot()
+        assert snapshot["entry_funnel"]["llm_vetoes"] == 1
+        assert snapshot["entry_funnel"]["no_trade_count"] == 1
+        assert snapshot["entry_funnel"]["no_trade_reasons"]["llm_veto"] == 1
+
+    async def test_no_trade_mode_never_marks_ready_for_exec(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+    ) -> None:
+        """no_trade should keep evidence but never transition to ready_for_exec."""
+        scheduler._config.scheduler.entry_funnel_mode = "no_trade"
+        scheduler._config.tactical.enabled = False
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        with patch.object(
+            store, "mark_ready_for_exec", wraps=store.mark_ready_for_exec
+        ) as mark_ready:
+            await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+        assert mark_ready.call_count == 0
+
+    async def test_no_trade_mode_skips_llm_decide(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """no_trade should not call AgentBridge.decide at all."""
+        scheduler._config.scheduler.entry_funnel_mode = "no_trade"
+        scheduler._config.tactical.enabled = False
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+        assert updated.execution_error is not None
+        assert "no_trade mode" in updated.execution_error
+        mock_agents.decide.assert_not_called()
+
+    async def test_tactical_only_mode_rejects_scanner_intents(
+        self,
+        scheduler: Scheduler,
+        mock_agents: MagicMock,
+        store: DecisionStore,
+    ) -> None:
+        """tactical_only should be conservatively gated until tactical source exists."""
+        scheduler._config.scheduler.entry_funnel_mode = "tactical_only"
+        scheduler._config.tactical.enabled = False
+        intent = TradeIntent(
+            trade_date=Scheduler._today_str(),
+            symbol="EURUSD",
+            scanner_score=0.82,
+            scanner_confidence="high",
+            scanner_schema_version="fx_signal_v2",
+            scanner_side="long",
+        )
+        store.insert_intent(intent)
+
+        await _run_loop_once(scheduler, scheduler._llm_worker_loop("llm-0"))
+
+        updated = store.get_intent(intent.id)
+        assert updated is not None
+        assert updated.status == "cancelled"
+        assert updated.execution_error is not None
+        assert "tactical_only" in updated.execution_error
         mock_agents.decide.assert_not_called()
 
 
@@ -2725,6 +3004,213 @@ class TestDailySummaryLoop:
         assert kwargs["pnl"] == pytest.approx(163.68)
         assert kwargs["open_positions"] == 0
         assert kwargs["day_start_balance"] == pytest.approx(50000.0)
+        assert kwargs["ablation_summary"] is None
+
+    async def test_daily_summary_passes_rolling_ablation_summary(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        from src.monitor.trade_journal import TradeJournal
+
+        mock_alert = AsyncMock()
+        mock_alert.daily_summary = AsyncMock()
+        mock_alert.send = AsyncMock()
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        journal.log_event(
+            "TACTICAL_ENTRY_CALIBRATION_SNAPSHOT",
+            {
+                "timestamp": "2026-02-09T22:10:00+00:00",
+                "date": "2026-02-09",
+                "entry_funnel_mode": "scanner_tactical",
+                "net_pnl": 999.0,
+                "profit_factor": 9.9,
+                "max_drawdown": 1.0,
+                "scanner_candidates": 9,
+                "intents_created": 8,
+                "opened_count": 4,
+                "llm_vetoes": 0,
+                "llm_cancels": 0,
+                "tactical_waits": 1,
+                "tactical_expires": 0,
+                "no_trade_count": 1,
+            },
+        )
+        for snapshot in [
+            {
+                "timestamp": "2026-02-10T22:10:00+00:00",
+                "date": "2026-02-10",
+                "entry_funnel_mode": "scanner_tactical",
+                "net_pnl": 10.0,
+                "profit_factor": 1.1,
+                "max_drawdown": 20.0,
+                "scanner_candidates": 10,
+                "intents_created": 8,
+                "opened_count": 4,
+                "llm_vetoes": 0,
+                "llm_cancels": 0,
+                "tactical_waits": 1,
+                "tactical_expires": 0,
+                "no_trade_count": 1,
+            },
+            {
+                "timestamp": "2026-02-11T22:10:00+00:00",
+                "date": "2026-02-11",
+                "entry_funnel_mode": "scanner_llm_tactical",
+                "net_pnl": 20.0,
+                "profit_factor": 1.2,
+                "max_drawdown": 15.0,
+                "scanner_candidates": 10,
+                "intents_created": 6,
+                "opened_count": 3,
+                "llm_vetoes": 2,
+                "llm_cancels": 1,
+                "tactical_waits": 1,
+                "tactical_expires": 0,
+                "no_trade_count": 2,
+            },
+            {
+                "timestamp": "2026-02-12T22:10:00+00:00",
+                "date": "2026-02-12",
+                "entry_funnel_mode": "tactical_only",
+                "net_pnl": 15.0,
+                "profit_factor": 1.05,
+                "max_drawdown": 12.0,
+                "scanner_candidates": 0,
+                "intents_created": 2,
+                "opened_count": 2,
+                "llm_vetoes": 0,
+                "llm_cancels": 0,
+                "tactical_waits": 1,
+                "tactical_expires": 0,
+                "no_trade_count": 0,
+            },
+            {
+                "timestamp": "2026-02-13T22:10:00+00:00",
+                "date": "2026-02-13",
+                "entry_funnel_mode": "no_trade",
+                "net_pnl": 0.0,
+                "profit_factor": 1.0,
+                "max_drawdown": 0.0,
+                "scanner_candidates": 8,
+                "intents_created": 0,
+                "opened_count": 0,
+                "llm_vetoes": 0,
+                "llm_cancels": 0,
+                "tactical_waits": 0,
+                "tactical_expires": 0,
+                "no_trade_count": 8,
+            },
+        ]:
+            journal.log_event("TACTICAL_ENTRY_CALIBRATION_SNAPSHOT", snapshot)
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            alert_service=mock_alert,
+            trade_journal=journal,
+        )
+        mock_matchtrader.get_balance.return_value = MagicMock(
+            balance=50000.0,
+            equity=50000.0,
+            margin=0.0,
+            free_margin=50000.0,
+        )
+        mock_matchtrader.get_open_positions.return_value = []
+
+        await sched._send_daily_summary("2026-02-16")
+
+        kwargs = mock_alert.daily_summary.call_args.kwargs
+        ablation_summary = kwargs["ablation_summary"]
+        assert ablation_summary is not None
+        assert ablation_summary["available_modes"] == ["A", "B", "C", "D"]
+        assert ablation_summary["economic_summary"]["A"]["net_pnl"] == 10.0
+        assert ablation_summary["economic_summary"]["B"]["net_pnl"] == 20.0
+        assert ablation_summary["economic_summary"]["C"]["net_pnl"] == 15.0
+        assert ablation_summary["economic_summary"]["D"]["net_pnl"] == 0.0
+
+    async def test_daily_summary_derives_ablation_economics_from_trade_closes(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        from src.monitor.trade_journal import TradeJournal
+
+        mock_alert = AsyncMock()
+        mock_alert.daily_summary = AsyncMock()
+        mock_alert.send = AsyncMock()
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        journal.log_event(
+            "TACTICAL_ENTRY_CALIBRATION_SNAPSHOT",
+            {
+                "timestamp": "2026-02-15T22:10:00+00:00",
+                "date": "2026-02-15",
+                "entry_funnel_mode": "scanner_tactical",
+                "scanner_candidates": 5,
+                "intents_created": 3,
+                "opened_count": 2,
+                "llm_vetoes": 0,
+                "llm_cancels": 0,
+                "tactical_waits": 1,
+                "tactical_expires": 0,
+                "no_trade_count": 1,
+            },
+        )
+        for timestamp, pnl in [
+            ("2026-02-15T09:15:00+00:00", 50.0),
+            ("2026-02-15T10:30:00+00:00", -20.0),
+            ("2026-02-15T14:05:00+00:00", 10.0),
+        ]:
+            journal.log_event(
+                "TRADE_CLOSED",
+                {
+                    "timestamp": timestamp,
+                    "symbol": "EURUSD",
+                    "pnl": pnl,
+                },
+            )
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            alert_service=mock_alert,
+            trade_journal=journal,
+        )
+        mock_matchtrader.get_balance.return_value = MagicMock(
+            balance=50000.0,
+            equity=50000.0,
+            margin=0.0,
+            free_margin=50000.0,
+        )
+        mock_matchtrader.get_open_positions.return_value = []
+
+        await sched._send_daily_summary("2026-02-16")
+
+        ablation_summary = mock_alert.daily_summary.call_args.kwargs["ablation_summary"]
+        assert ablation_summary is not None
+        assert ablation_summary["economic_summary"]["A"]["net_pnl"] == 40.0
+        assert ablation_summary["economic_summary"]["A"]["profit_factor"] == 3.0
+        assert ablation_summary["economic_summary"]["A"]["max_drawdown"] == 20.0
 
     async def test_daily_summary_logs_tactical_entry_calibration_snapshot(
         self,
@@ -2765,6 +3251,23 @@ class TestDailySummaryLoop:
             alert_service=mock_alert,
             trade_journal=journal,
         )
+        sched._config.scheduler.entry_funnel_mode = "scanner_tactical"
+        for _ in range(3):
+            sched._metrics.record_entry_funnel_event("scanner_candidate")
+        for _ in range(2):
+            sched._metrics.record_entry_funnel_event("intent_created")
+        sched._metrics.record_llm_veto()
+        sched._metrics.record_entry_funnel_event("llm_cancel")
+        sched._metrics.record_entry_funnel_event("tactical_wait")
+        sched._metrics.record_entry_funnel_event("tactical_expire")
+        journal.log_event(
+            "TRADE_OPENED",
+            {
+                "timestamp": "2026-02-16T10:00:00+00:00",
+                "symbol": "EURUSD",
+                "intent_id": "intent-opened",
+            },
+        )
 
         mock_matchtrader.get_balance.return_value = MagicMock(
             balance=50000.0,
@@ -2781,6 +3284,15 @@ class TestDailySummaryLoop:
         snapshot = next(e for e in events if e["type"] == "TACTICAL_ENTRY_CALIBRATION_SNAPSHOT")
         assert snapshot["date"] == "2026-02-16"
         assert snapshot["groups"][0]["symbol"] == "EURUSD"
+        assert snapshot["entry_funnel_mode"] == "scanner_tactical"
+        assert snapshot["scanner_candidates"] == 3
+        assert snapshot["intents_created"] == 2
+        assert snapshot["opened_count"] == 1
+        assert snapshot["llm_vetoes"] == 1
+        assert snapshot["llm_cancels"] == 1
+        assert snapshot["tactical_waits"] == 1
+        assert snapshot["tactical_expires"] == 1
+        assert snapshot["llm_veto_rate"] == 0.3333
 
 
 # ── Mock LLM Blocking Tests ──────────────────────────────────────────────────────
@@ -4905,6 +5417,10 @@ async def test_tactical_wait_with_timeout_resolution_marks_timed_out_immediately
     assert final is not None
     assert final.status == "timed_out"
     assert "Tactical gate WAIT" in (final.execution_error or "")
+    snapshot = sched._metrics.snapshot()
+    assert snapshot["entry_funnel"]["tactical_expires"] == 1
+    assert snapshot["entry_funnel"]["no_trade_count"] == 1
+    assert snapshot["entry_funnel"]["no_trade_reasons"]["tactical_expire"] == 1
     mock_retry.assert_not_awaited()
 
 
@@ -5635,6 +6151,8 @@ def test_build_metrics_snapshot_includes_market_data_feed_status(
         engine=mock_engine,
         matchtrader=mock_matchtrader,
     )
+    sched._config.scheduler.entry_funnel_mode = "scanner_tactical"
+    sched._metrics.record_entry_funnel_event("scanner_candidate")
     sched._market_data_ready = True
     sched._market_data_hub = MagicMock()
     sched._market_data_hub.feed_status.return_value = {
@@ -5647,6 +6165,8 @@ def test_build_metrics_snapshot_includes_market_data_feed_status(
 
     snapshot = sched._build_metrics_snapshot()
 
+    assert snapshot["entry_funnel_mode"] == "scanner_tactical"
+    assert snapshot["entry_funnel"]["scanner_candidates"] == 1
     assert snapshot["market_data"]["websocket"]["state"] == "degraded"
     assert snapshot["market_data"]["forced_stale_symbols"] == ["EURUSD"]
     assert snapshot["market_data"]["initialized_at"] == "2026-03-17T03:00:00+00:00"

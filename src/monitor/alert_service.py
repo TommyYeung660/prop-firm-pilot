@@ -430,48 +430,7 @@ class AlertService:
             lines.append(f"• Max DD buffer: ${max_buffer:,.2f}")
 
         if ablation_summary:
-            lines.append("")
-            lines.append("<b>Ablation (7d)</b>")
-
-            recommendation = ablation_summary.get("recommendation")
-            if isinstance(recommendation, str) and recommendation:
-                lines.append(f"• Recommendation: {recommendation}")
-
-            raw_available = ablation_summary.get("available_modes")
-            available_modes = [
-                mode for mode in raw_available if isinstance(mode, str) and mode
-            ] if isinstance(raw_available, list) else []
-
-            mode_results = ablation_summary.get("mode_results")
-            if not available_modes and isinstance(mode_results, dict):
-                available_modes = sorted(
-                    mode for mode in mode_results.keys() if isinstance(mode, str) and mode
-                )
-            if available_modes:
-                lines.append(f"• Available modes: {', '.join(available_modes)}")
-
-            if isinstance(mode_results, dict):
-                ordered_modes = [mode for mode in available_modes if mode in mode_results]
-                ordered_modes.extend(
-                    sorted(mode for mode in mode_results.keys() if mode not in ordered_modes)
-                )
-                max_modes = 4
-                for mode in ordered_modes[:max_modes]:
-                    stats = mode_results.get(mode)
-                    if not isinstance(stats, dict):
-                        continue
-                    pnl_value = float(stats.get("realized_pnl", 0.0) or 0.0)
-                    opened = int(stats.get("trade_opened", 0) or 0)
-                    lines.append(f"• {mode} PnL/Open: ${pnl_value:+.2f} / {opened}")
-
-                    veto_rate = stats.get("llm_veto_rate")
-                    total_candidates = int(stats.get("total_candidates", 0) or 0)
-                    if isinstance(veto_rate, int | float) and total_candidates > 0:
-                        lines.append(f"• {mode} LLM veto: {float(veto_rate):.1%}")
-
-                remaining_modes = len(ordered_modes) - max_modes
-                if remaining_modes > 0:
-                    lines.append(f"• ... {remaining_modes} more mode(s)")
+            self._append_ablation_summary(lines, ablation_summary)
 
         return await self.send("\n".join(lines))
 
@@ -592,6 +551,59 @@ class AlertService:
         if self._account_id:
             return f"[{self._account_id}] "
         return ""
+
+    def _append_ablation_summary(
+        self,
+        lines: list[str],
+        ablation_summary: dict[str, Any],
+    ) -> None:
+        """Append a compact 7-day ablation section to the daily summary."""
+        lines.append("")
+        lines.append("<b>Ablation (7d)</b>")
+
+        recommendation = ablation_summary.get("recommendation")
+        if isinstance(recommendation, str) and recommendation:
+            lines.append(f"• Recommendation: {recommendation}")
+
+        raw_modes = ablation_summary.get("available_modes")
+        available_modes = [
+            mode for mode in raw_modes if isinstance(mode, str) and mode
+        ] if isinstance(raw_modes, list) else []
+
+        economic_summary = ablation_summary.get("economic_summary")
+        churn_summary = ablation_summary.get("churn_summary")
+        if not isinstance(economic_summary, dict):
+            economic_summary = {}
+        if not isinstance(churn_summary, dict):
+            churn_summary = {}
+
+        if not available_modes:
+            available_modes = sorted(
+                mode for mode in economic_summary if isinstance(mode, str) and mode
+            )
+
+        if available_modes:
+            lines.append(f"• Available modes: {', '.join(available_modes[:4])}")
+
+        for mode in available_modes[:4]:
+            economic = economic_summary.get(mode)
+            if not isinstance(economic, dict):
+                continue
+
+            net_pnl = economic.get("net_pnl", 0.0)
+            if not isinstance(net_pnl, (int, float)) or isinstance(net_pnl, bool):
+                net_pnl = 0.0
+            opened_count = economic.get("opened_count", 0)
+            if not isinstance(opened_count, (int, float)) or isinstance(opened_count, bool):
+                opened_count = 0
+            lines.append(f"• {mode} PnL/Open: ${float(net_pnl):+.2f} / {int(opened_count)}")
+
+            churn = churn_summary.get(mode)
+            if not isinstance(churn, dict):
+                continue
+            llm_veto_rate = churn.get("llm_veto_rate")
+            if isinstance(llm_veto_rate, (int, float)) and not isinstance(llm_veto_rate, bool):
+                lines.append(f"• {mode} LLM veto: {float(llm_veto_rate):.1%}")
 
     def _progress_bar(self, pct: float, width: int = 20) -> str:
         """Return a text progress bar like [██████░░░░░░░░░░░░░░] 30.0%."""

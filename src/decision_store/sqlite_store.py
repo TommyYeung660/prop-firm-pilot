@@ -870,7 +870,7 @@ class DecisionStore:
                        executed_at = :now
                    WHERE status IN ('claimed', 'tactical_pending')
                      AND expires_at IS NOT NULL
-                     AND expires_at < :now""",
+                     AND expires_at <= :now""",
                 {"now": now_str},
             )
             count = cursor.rowcount

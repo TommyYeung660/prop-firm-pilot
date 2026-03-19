@@ -22,9 +22,75 @@ def _safe_rate(numerator: int, denominator: int) -> float:
     return round(numerator / denominator, 4)
 
 
+def _safe_count(value: Any, default: int = 0) -> int:
+    """Normalize snapshot counters to non-negative integers."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return max(value, 0)
+    return default
+
+
+def _safe_pnl(value: Any) -> float | None:
+    """Normalize journal PnL values while ignoring invalid payloads."""
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _closed_trade_pnls(journal: TradeJournal, date_str: str) -> list[float]:
+    """Return realized PnL values from TRADE_CLOSED events for one day."""
+    events = sorted(
+        journal.get_events("TRADE_CLOSED", date_str=date_str),
+        key=lambda event: str(event.get("timestamp", "")),
+    )
+    pnls: list[float] = []
+    for event in events:
+        pnl = _safe_pnl(event.get("pnl"))
+        if pnl is not None:
+            pnls.append(pnl)
+    return pnls
+
+
+def _profit_factor_from_pnls(pnls: list[float]) -> float:
+    """Approximate profit factor from daily realized close events."""
+    gross_profit = sum(pnl for pnl in pnls if pnl > 0)
+    gross_loss = abs(sum(pnl for pnl in pnls if pnl < 0))
+    if gross_loss > 0:
+        return round(gross_profit / gross_loss, 4)
+    if gross_profit > 0:
+        return round(gross_profit, 4)
+    return 1.0
+
+
+def _max_drawdown_from_pnls(pnls: list[float]) -> float:
+    """Approximate realized max drawdown from cumulative close-event PnL."""
+    cumulative = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for pnl in pnls:
+        cumulative += pnl
+        peak = max(peak, cumulative)
+        max_drawdown = max(max_drawdown, peak - cumulative)
+    return round(max_drawdown, 4)
+
+
+def _latest_metrics_snapshot(journal: TradeJournal, date_str: str) -> dict[str, Any]:
+    """Return the latest METRICS_SNAPSHOT event for the date if present."""
+    events = journal.get_events("METRICS_SNAPSHOT", date_str=date_str)
+    if not events:
+        return {}
+    ordered_events = sorted(events, key=lambda event: str(event.get("timestamp", "")))
+    latest = ordered_events[-1]
+    return latest if isinstance(latest, dict) else {}
+
+
 def build_daily_entry_calibration_snapshot(
     journal: TradeJournal,
     date_str: str,
+    metrics_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate daily tactical entry verdicts by symbol, session, and regime."""
     events = journal.get_events("TACTICAL_RESULT", date_str=date_str)
@@ -120,9 +186,44 @@ def build_daily_entry_calibration_snapshot(
             }
         )
 
+    metrics_snapshot = metrics_snapshot or _latest_metrics_snapshot(journal, date_str)
+    entry_funnel = metrics_snapshot.get("entry_funnel", {})
+    if not isinstance(entry_funnel, dict):
+        entry_funnel = {}
+
+    scanner_candidates = _safe_count(entry_funnel.get("scanner_candidates"))
+    intents_created = _safe_count(
+        entry_funnel.get("intents_created"),
+        default=len(journal.get_events("INTENT_CREATED", date_str=date_str)),
+    )
+    llm_vetoes = _safe_count(entry_funnel.get("llm_vetoes"))
+    llm_cancels = _safe_count(entry_funnel.get("llm_cancels"))
+    tactical_waits = _safe_count(entry_funnel.get("tactical_waits"))
+    tactical_expires = _safe_count(entry_funnel.get("tactical_expires"))
+    no_trade_count = _safe_count(entry_funnel.get("no_trade_count"))
+    no_trade_reasons = entry_funnel.get("no_trade_reasons", {})
+    if not isinstance(no_trade_reasons, dict):
+        no_trade_reasons = {}
+    opened_count = len(journal.get_events("TRADE_OPENED", date_str=date_str))
+    closed_trade_pnls = _closed_trade_pnls(journal, date_str)
+
     return {
         "date": date_str,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "entry_funnel_mode": str(metrics_snapshot.get("entry_funnel_mode", "unknown")),
+        "scanner_candidates": scanner_candidates,
+        "intents_created": intents_created,
+        "opened_count": opened_count,
+        "llm_vetoes": llm_vetoes,
+        "llm_cancels": llm_cancels,
+        "tactical_waits": tactical_waits,
+        "tactical_expires": tactical_expires,
+        "no_trade_count": no_trade_count,
+        "no_trade_reasons": no_trade_reasons,
+        "llm_veto_rate": _safe_rate(llm_vetoes, scanner_candidates),
+        "net_pnl": round(sum(closed_trade_pnls), 4),
+        "profit_factor": _profit_factor_from_pnls(closed_trade_pnls),
+        "max_drawdown": _max_drawdown_from_pnls(closed_trade_pnls),
         "group_count": len(groups),
         "total_verdicts": len(events),
         "groups": groups,
