@@ -16,6 +16,17 @@ Versioning: [Semantic Versioning](https://semver.org/).
 > **Status**: `v1.5.0_preview` 已於 `2026-03-18` 對齊目前 `main` 的最新 preview 實作基線：bounded capital utilization uplift、preview incident remediation、side-aware scanner live activation，以及 first-batch JPY cross rollout（`EURJPY`、`AUDJPY`、`CADJPY` + dynamic JPY pip-value live sizing）
 > **Reason**: 當前主線的 `v1.5.0_preview` 已不再只是 uplift preview lane；它同時承載了 `prod_logs_20260318_v1.5.0_preview` 暴露出的 correctness remediation，以及 side-aware / JPY cross 兩輪 live-path productization。stable acceptance 必須建立在這個整合後的 preview baseline 上，而不是只驗收其中單一子項
 
+### In Progress: v1.5.0_preview_2 Runtime Repair
+
+#### Fixed
+- stale / previous-day intraday bars 現在會在 scanner admission fail closed，不再被誤當成 startup retryable
+- tactical retry expiry 對 `atr.fail.insufficient_1h_data`、freshness 類 wait 不再 degrade 到 execution
+- retry-expiry degrade 現在會寫出標準化 `TACTICAL_RESULT resolution=EXECUTE_DEGRADED`，讓 metrics snapshot 與 prod bundle summary 對齊
+
+#### Changed
+- project version identity 將從 `1.5.0_preview` / `1.5.0rc0` 升到 `1.5.0_preview_2` / `1.5.0rc1`
+- `src/diagnostics/analyze_preview_bundle.py` 的主 log 選擇將跟隨 shared release tag，不再硬編碼 `v1.5.0_preview`
+
 ### Implemented: v1.5.0_preview Incident Remediation Baseline
 
 #### Fixed
