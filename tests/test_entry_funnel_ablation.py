@@ -216,3 +216,43 @@ def test_analyze_entry_funnel_ablation_recommends_no_trade_shadow_mode_when_all_
     result = analyze_ablation(snapshots)
 
     assert result["recommendation"] == "return_to_no_trade_shadow_mode"
+
+
+def test_analyze_entry_funnel_ablation_marks_insufficient_data_when_modes_incomplete() -> None:
+    snapshots = [
+        {
+            "entry_funnel_mode": "scanner_llm_tactical",
+            "date": "2026-03-14",
+            "net_pnl": 60.0,
+            "profit_factor": 1.2,
+            "max_drawdown": 30.0,
+            "scanner_candidates": 7,
+            "intents_created": 5,
+            "opened_count": 3,
+            "llm_vetoes": 1,
+            "llm_cancels": 1,
+            "tactical_waits": 2,
+            "tactical_expires": 1,
+            "no_trade_count": 2,
+        },
+        {
+            "entry_funnel_mode": "no_trade",
+            "date": "2026-03-14",
+            "net_pnl": 0.0,
+            "profit_factor": 1.0,
+            "max_drawdown": 0.0,
+            "scanner_candidates": 7,
+            "intents_created": 0,
+            "opened_count": 0,
+            "llm_vetoes": 0,
+            "llm_cancels": 0,
+            "tactical_waits": 0,
+            "tactical_expires": 0,
+            "no_trade_count": 7,
+        },
+    ]
+
+    result = analyze_ablation(snapshots)
+
+    assert result["recommendation"] == "insufficient_ablation_data"
+    assert result["available_modes"] == ["B", "D"]
