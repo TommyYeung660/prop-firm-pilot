@@ -397,6 +397,7 @@ class AlertService:
         open_positions: int = 0,
         day_start_balance: float | None = None,
         max_dd_reference: float | None = None,
+        ablation_summary: dict[str, Any] | None = None,
     ) -> bool:
         """Send end-of-day summary with profit target progress and risk status."""
         emoji = "📊" if pnl >= 0 else "📉"
@@ -427,6 +428,50 @@ class AlertService:
             max_loss = max(0.0, ref - equity)
             max_buffer = dd_limit - max_loss
             lines.append(f"• Max DD buffer: ${max_buffer:,.2f}")
+
+        if ablation_summary:
+            lines.append("")
+            lines.append("<b>Ablation (7d)</b>")
+
+            recommendation = ablation_summary.get("recommendation")
+            if isinstance(recommendation, str) and recommendation:
+                lines.append(f"• Recommendation: {recommendation}")
+
+            raw_available = ablation_summary.get("available_modes")
+            available_modes = [
+                mode for mode in raw_available if isinstance(mode, str) and mode
+            ] if isinstance(raw_available, list) else []
+
+            mode_results = ablation_summary.get("mode_results")
+            if not available_modes and isinstance(mode_results, dict):
+                available_modes = sorted(
+                    mode for mode in mode_results.keys() if isinstance(mode, str) and mode
+                )
+            if available_modes:
+                lines.append(f"• Available modes: {', '.join(available_modes)}")
+
+            if isinstance(mode_results, dict):
+                ordered_modes = [mode for mode in available_modes if mode in mode_results]
+                ordered_modes.extend(
+                    sorted(mode for mode in mode_results.keys() if mode not in ordered_modes)
+                )
+                max_modes = 4
+                for mode in ordered_modes[:max_modes]:
+                    stats = mode_results.get(mode)
+                    if not isinstance(stats, dict):
+                        continue
+                    pnl_value = float(stats.get("realized_pnl", 0.0) or 0.0)
+                    opened = int(stats.get("trade_opened", 0) or 0)
+                    lines.append(f"• {mode} PnL/Open: ${pnl_value:+.2f} / {opened}")
+
+                    veto_rate = stats.get("llm_veto_rate")
+                    total_candidates = int(stats.get("total_candidates", 0) or 0)
+                    if isinstance(veto_rate, int | float) and total_candidates > 0:
+                        lines.append(f"• {mode} LLM veto: {float(veto_rate):.1%}")
+
+                remaining_modes = len(ordered_modes) - max_modes
+                if remaining_modes > 0:
+                    lines.append(f"• ... {remaining_modes} more mode(s)")
 
         return await self.send("\n".join(lines))
 
