@@ -54,6 +54,38 @@ def _closed_trade_pnls(journal: TradeJournal, date_str: str) -> list[float]:
     return pnls
 
 
+def _closed_trade_attribution(
+    journal: TradeJournal,
+    date_str: str,
+) -> tuple[dict[str, int], dict[str, int], int]:
+    """Return close-path attribution counts from TRADE_CLOSED events for one day."""
+    events = sorted(
+        journal.get_events("TRADE_CLOSED", date_str=date_str),
+        key=lambda event: str(event.get("timestamp", "")),
+    )
+    trigger_source_counts: defaultdict[str, int] = defaultdict(int)
+    close_reason_counts: defaultdict[str, int] = defaultdict(int)
+    tactical_exit_close_count = 0
+
+    for event in events:
+        trigger_source = str(event.get("trigger_source", "") or "")
+        final_close_reason = str(
+            event.get("final_close_reason", event.get("reason", event.get("exit_reason", ""))) or ""
+        )
+        if trigger_source:
+            trigger_source_counts[trigger_source] += 1
+            if trigger_source == "tactical_exit":
+                tactical_exit_close_count += 1
+        if final_close_reason:
+            close_reason_counts[final_close_reason] += 1
+
+    return (
+        dict(trigger_source_counts),
+        dict(close_reason_counts),
+        tactical_exit_close_count,
+    )
+
+
 def _profit_factor_from_pnls(pnls: list[float]) -> float:
     """Approximate profit factor from daily realized close events."""
     gross_profit = sum(pnl for pnl in pnls if pnl > 0)
@@ -206,6 +238,14 @@ def build_daily_entry_calibration_snapshot(
         no_trade_reasons = {}
     opened_count = len(journal.get_events("TRADE_OPENED", date_str=date_str))
     closed_trade_pnls = _closed_trade_pnls(journal, date_str)
+    close_trigger_source_counts, close_reason_counts, tactical_exit_close_count = (
+        _closed_trade_attribution(journal, date_str)
+    )
+    degrade_to_exec_count = sum(
+        1
+        for event in events
+        if str(event.get("resolution", "")) == "EXECUTE_DEGRADED"
+    )
 
     return {
         "date": date_str,
@@ -224,6 +264,10 @@ def build_daily_entry_calibration_snapshot(
         "net_pnl": round(sum(closed_trade_pnls), 4),
         "profit_factor": _profit_factor_from_pnls(closed_trade_pnls),
         "max_drawdown": _max_drawdown_from_pnls(closed_trade_pnls),
+        "degrade_to_exec_count": degrade_to_exec_count,
+        "tactical_exit_close_count": tactical_exit_close_count,
+        "close_trigger_source_counts": close_trigger_source_counts,
+        "close_reason_counts": close_reason_counts,
         "group_count": len(groups),
         "total_verdicts": len(events),
         "groups": groups,

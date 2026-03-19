@@ -33,6 +33,25 @@ def test_build_decisions_fallback_summary_reports_cooldown_and_follow_up() -> No
     assert "12.50" in summary
 
 
+def test_build_decisions_fallback_summary_surfaces_close_trigger_and_final_reason() -> None:
+    trade_content = "\n".join(
+        [
+            '{"type":"SCANNER_SKIP","symbol":"USDCAD","reason":"market_data_entry_block","timestamp":"2026-03-11T01:02:00+00:00"}',
+            '{"type":"TRADE_OPENED","symbol":"USDCAD","intent_id":"i2","timestamp":"2026-03-11T03:00:00+00:00"}',
+            (
+                '{"type":"TRADE_CLOSED","symbol":"USDCAD","intent_id":"i2","pnl":0.83,'
+                '"reason":"tp_hit","trigger_source":"tactical_exit",'
+                '"final_close_reason":"tp_hit","timestamp":"2026-03-11T05:00:00+00:00"}'
+            ),
+        ]
+    )
+
+    summary = pack_prod_logs._build_decisions_fallback_summary(trade_content)
+
+    assert "tactical_exit=1" in summary
+    assert "tp_hit=1" in summary
+
+
 def test_collect_summary_listing_only_includes_existing_files(tmp_path: Path) -> None:
     summary_dir = tmp_path / "summary"
     summary_dir.mkdir()
