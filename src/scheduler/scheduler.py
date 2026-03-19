@@ -1641,6 +1641,7 @@ class Scheduler:
             },
         )
 
+        last_wait_result = initial_result
         for retry_count in range(1, retry_cfg.max_retries + 1):
             jitter = (
                 random.uniform(-retry_cfg.jitter_seconds, retry_cfg.jitter_seconds)
@@ -1665,6 +1666,8 @@ class Scheduler:
                 tactical_result,
                 retry_count=retry_count,
             )
+            if tactical_result.resolution == "RETRY_PENDING":
+                last_wait_result = tactical_result
 
             if tactical_result.resolution == "EXECUTE_NOW":
                 await asyncio.to_thread(self._store.mark_ready_for_exec_from_tactical, intent.id)
@@ -1714,7 +1717,9 @@ class Scheduler:
                 )
                 return False
 
-        if retry_cfg.expire_action == "degrade":
+        if retry_cfg.expire_action == "degrade" and self._tactical_wait_allows_degrade(
+            last_wait_result
+        ):
             await asyncio.to_thread(self._store.mark_ready_for_exec_from_tactical, intent.id)
             self._log_trade_event(
                 "TACTICAL_DEGRADED",
@@ -1735,10 +1740,39 @@ class Scheduler:
         await self._timeout_intent_safe(
             worker_id=worker_id,
             intent_id=intent.id,
-            reason=f"Tactical gate WAIT: {initial_result.detail}",
-            context="tactical_retry_expired",
+            reason=f"Tactical gate WAIT: {last_wait_result.detail}",
+            context=(
+                "tactical_retry_expired_market_data"
+                if not self._tactical_wait_allows_degrade(last_wait_result)
+                else "tactical_retry_expired"
+            ),
         )
         return False
+
+    @staticmethod
+    def _tactical_wait_allows_degrade(result: TacticalResult) -> bool:
+        """Return whether a retry-pending tactical result may degrade into execution."""
+        policy_hints = result.policy_hints if isinstance(result.policy_hints, dict) else {}
+        degrade_allowed = policy_hints.get("degrade_allowed")
+        if degrade_allowed is False:
+            return False
+
+        codes: list[str] = []
+        if isinstance(result.summary_reason_code, str) and result.summary_reason_code:
+            codes.append(result.summary_reason_code)
+        for gate in result.hard_gates:
+            if not gate.passed and gate.reason_code:
+                codes.append(gate.reason_code)
+
+        for code in codes:
+            if (
+                code.startswith("market_data.")
+                or code.startswith("data.reject.")
+                or code.startswith("freshness.")
+                or code == "atr.fail.insufficient_1h_data"
+            ):
+                return False
+        return True
 
     async def _run_tactical_validation(self, intent: TradeIntent, side: str) -> TacticalResult:
         """Fetch tactical data and run Hard/Soft gate validation.

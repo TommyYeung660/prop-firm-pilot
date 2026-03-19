@@ -283,6 +283,21 @@ class TacticalValidator:
                 return gate.reason_code
         return fallback
 
+    def _hard_gate_wait_allows_degrade(self, gate_results: list[GateResult]) -> bool:
+        """Return whether a hard-gate WAIT may safely degrade into execution."""
+        for gate in gate_results:
+            if gate.passed:
+                continue
+            reason_code = gate.reason_code or ""
+            if (
+                reason_code.startswith("market_data.")
+                or reason_code.startswith("data.reject.")
+                or reason_code.startswith("freshness.")
+                or reason_code == "atr.fail.insufficient_1h_data"
+            ):
+                return False
+        return True
+
     # ── Hard Gates ─────────────────────────────────────────────────────
 
     def _check_spread_gate(self, current_spread: float, typical_spread: float) -> GateResult:
@@ -640,7 +655,10 @@ class TacticalValidator:
                     hard_results,
                     fallback="hard.wait.gate_failed",
                 ),
-                policy_hints=self._default_policy_hints(retryable=True, degrade_allowed=True),
+                policy_hints=self._default_policy_hints(
+                    retryable=True,
+                    degrade_allowed=self._hard_gate_wait_allows_degrade(hard_results),
+                ),
                 provenance=self._build_provenance(data),
             )
 

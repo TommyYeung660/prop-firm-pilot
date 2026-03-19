@@ -589,3 +589,50 @@ class TestTacticalVerdictSchema:
         assert result.resolution == "RETRY_PENDING"
         assert result.summary_reason_code == "market_data.startup_5m_bar_pending"
         assert result.policy_hints["retryable"] is True
+
+    def test_hard_gate_wait_from_insufficient_1h_data_disallows_degrade(self) -> None:
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        now = datetime.now(timezone.utc)
+        bars_1h = pd.DataFrame(
+            [
+                {
+                    "datetime": now - timedelta(hours=10 - idx),
+                    "open": 1.1000,
+                    "high": 1.1010,
+                    "low": 1.0990,
+                    "close": 1.1005,
+                }
+                for idx in range(10)
+            ]
+        )
+        data = TacticalData(
+            bars_5min=pd.DataFrame(
+                [
+                    {
+                        "datetime": now - timedelta(minutes=10 - idx),
+                        "open": 1.1000,
+                        "high": 1.1010,
+                        "low": 1.0990,
+                        "close": 1.1005,
+                    }
+                    for idx in range(10)
+                ]
+            ),
+            bars_1h=bars_1h,
+            current_spread=0.00015,
+            typical_spread=0.00015,
+            latest_bar_time=now - timedelta(seconds=20),
+            quote_source="rest_fallback",
+            bars_5min_source="rest_fallback",
+            bars_1h_source="warmup_cache",
+            data_source="rest_fallback",
+        )
+
+        result = validator.evaluate(side="BUY", data=data)
+
+        assert result.action == "WAIT"
+        assert result.resolution == "RETRY_PENDING"
+        assert result.summary_reason_code == "atr.fail.insufficient_1h_data"
+        assert result.policy_hints["retryable"] is True
+        assert result.policy_hints["degrade_allowed"] is False
