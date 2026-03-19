@@ -188,11 +188,27 @@ def _build_report_sections(
     return economic_summary, funnel_summary, churn_summary
 
 
+def _available_mode_labels(grouped_rows: dict[str, list[dict[str, Any]]]) -> list[str]:
+    """Return available A/B/C/D labels in canonical order."""
+    labels: list[str] = []
+    for code, mode, _ in MODE_ORDER:
+        if grouped_rows.get(mode):
+            labels.append(code)
+    return labels
+
+
 def _recommendation(
     economic_summary: dict[str, Any],
     churn_summary: dict[str, Any],
+    available_modes: list[str],
 ) -> tuple[str, str]:
     """Return the deterministic recommendation and short reason."""
+    if len(available_modes) < len(MODE_ORDER):
+        return (
+            "insufficient_ablation_data",
+            "A/B/C/D mode coverage is incomplete in the current snapshot window.",
+        )
+
     a_economic = economic_summary["A"]
     b_economic = economic_summary["B"]
     c_economic = economic_summary["C"]
@@ -236,10 +252,12 @@ def _recommendation(
 def analyze_ablation(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate mode snapshots into a deterministic ablation report."""
     grouped_rows = _group_rows_by_mode(snapshots)
+    available_modes = _available_mode_labels(grouped_rows)
     economic_summary, funnel_summary, churn_summary = _build_report_sections(grouped_rows)
     recommendation, recommendation_reason = _recommendation(
         economic_summary,
         churn_summary,
+        available_modes,
     )
 
     return {
@@ -247,6 +265,7 @@ def analyze_ablation(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
             code: {"mode": mode, "description": description}
             for code, mode, description in MODE_ORDER
         },
+        "available_modes": available_modes,
         "economic_summary": economic_summary,
         "funnel_summary": funnel_summary,
         "churn_summary": churn_summary,
