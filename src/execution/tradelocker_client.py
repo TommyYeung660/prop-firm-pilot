@@ -106,13 +106,18 @@ class TradeLockerClient:
                 "server": self._server,
             },
             authenticated=False,
+            allow_reauth=False,
         )
         self._access_token = str(token_data.get("accessToken", token_data.get("access", "")))
         self._refresh_token = str(token_data.get("refreshToken", token_data.get("refresh", "")))
         if not self._access_token:
             raise RuntimeError("TradeLocker login failed: missing access token.")
 
-        accounts_payload = await self._request("GET", "/auth/jwt/all-accounts")
+        accounts_payload = await self._request(
+            "GET",
+            "/auth/jwt/all-accounts",
+            allow_reauth=False,
+        )
         accounts = self._extract_list(accounts_payload, ["accounts"])
         if not accounts:
             raise RuntimeError("No TradeLocker account returned for the credentials.")
@@ -496,18 +501,31 @@ class TradeLockerClient:
         json: dict[str, Any] | None = None,
         authenticated: bool = True,
         account_scoped: bool = False,
+        allow_reauth: bool = True,
     ) -> Any:
-        if self._client is None:
-            self._client = httpx.AsyncClient(base_url=self._api_url, timeout=self._timeout_seconds)
-
-        headers = self._build_headers(authenticated=authenticated, account_scoped=account_scoped)
-        response = await self._client.request(
-            method=method,
-            url=path,
+        response = await self._send_request(
+            method,
+            path,
             params=params,
             json=json,
-            headers=headers,
+            authenticated=authenticated,
+            account_scoped=account_scoped,
         )
+        if response.status_code == 401 and authenticated and allow_reauth:
+            logger.warning(
+                "TradeLocker: auth failed for {} {}, re-logging in and retrying once",
+                method,
+                path,
+            )
+            await self.login(_quiet=True)
+            response = await self._send_request(
+                method,
+                path,
+                params=params,
+                json=json,
+                authenticated=authenticated,
+                account_scoped=account_scoped,
+            )
         if response.status_code == 401:
             raise TradeLockerAuthError("TradeLocker authentication failed (401).")
         if response.status_code >= 400:
@@ -519,6 +537,28 @@ class TradeLockerClient:
             return response.json()
         except ValueError:
             return {}
+
+    async def _send_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        authenticated: bool = True,
+        account_scoped: bool = False,
+    ) -> httpx.Response:
+        if self._client is None:
+            self._client = httpx.AsyncClient(base_url=self._api_url, timeout=self._timeout_seconds)
+
+        headers = self._build_headers(authenticated=authenticated, account_scoped=account_scoped)
+        return await self._client.request(
+            method=method,
+            url=path,
+            params=params,
+            json=json,
+            headers=headers,
+        )
 
     def _build_headers(self, *, authenticated: bool, account_scoped: bool) -> dict[str, str]:
         headers = {

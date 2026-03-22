@@ -6,7 +6,9 @@ These tests lock the stable broker-neutral surface for TradeLocker.
 
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+import respx
 
 from src.execution.broker_models import (
     BrokerClosedPosition,
@@ -62,6 +64,46 @@ async def test_account_selection_fails_when_account_not_found(client: TradeLocke
 
     with pytest.raises(RuntimeError, match="Account ACC-2 not found"):
         await client.login()
+
+
+async def test_account_request_reauths_on_401_and_retries_once(client: TradeLockerClient) -> None:
+    async def fake_relogin(*, _quiet: bool = False) -> dict[str, str]:
+        _ = _quiet
+        client._access_token = "fresh-token"
+        client._refresh_token = "fresh-refresh-token"
+        client._account_id = "ACC-2"
+        client._acc_num = "10002"
+        return {
+            "accessToken": client._access_token,
+            "refreshToken": client._refresh_token,
+        }
+
+    client._access_token = "stale-token"
+    client._refresh_token = "stale-refresh-token"
+    client._account_id = "ACC-2"
+    client._acc_num = "10002"
+    client.login = AsyncMock(side_effect=fake_relogin)
+
+    async with client:
+        with respx.mock(assert_all_called=True) as router:
+            state_route = router.get(
+                "https://demo.tradelocker.com/backend-api/trade/accounts/ACC-2/state"
+            ).mock(
+                side_effect=[
+                    httpx.Response(401, json={"message": "expired"}),
+                    httpx.Response(200, json={"balance": "1000.0"}),
+                ]
+            )
+
+            payload = await client._account_request("GET", "/trade/accounts/ACC-2/state")
+
+    assert payload == {"balance": "1000.0"}
+    assert client.login.await_count == 1
+    assert state_route.call_count == 2
+    assert state_route.calls[0].request.headers["Authorization"] == "Bearer stale-token"
+    assert state_route.calls[1].request.headers["Authorization"] == "Bearer fresh-token"
+    assert state_route.calls[0].request.headers["accNum"] == "10002"
+    assert state_route.calls[1].request.headers["accNum"] == "10002"
 
 
 async def test_quote_parsing_returns_broker_model(client: TradeLockerClient) -> None:
