@@ -6,9 +6,14 @@
 系統要求 Python 3.10 並使用 uv 套件管理器進行依賴管理。
 
 必須在 `.env` 檔案中設置以下變數：
-* `MATCHTRADER_API_URL` : MatchTrader REST API 基礎網址
-* `MATCHTRADER_USERNAME` : 經紀商帳號電子郵件
-* `MATCHTRADER_PASSWORD` : 經紀商帳號密碼
+* `MATCHTRADER_API_URL` : MatchTrader REST API 基礎網址（`execution.broker_backend = matchtrader` 時需要）
+* `MATCHTRADER_USERNAME` : 經紀商帳號電子郵件（`execution.broker_backend = matchtrader` 時需要）
+* `MATCHTRADER_PASSWORD` : 經紀商帳號密碼（`execution.broker_backend = matchtrader` 時需要）
+* `TRADELOCKER_API_URL` : TradeLocker API 基礎網址（建議使用 `.../backend-api`，`execution.broker_backend = tradelocker` 時需要）
+* `TRADELOCKER_EMAIL` : TradeLocker 登入帳號（`execution.broker_backend = tradelocker` 時需要）
+* `TRADELOCKER_PASSWORD` : TradeLocker 登入密碼（`execution.broker_backend = tradelocker` 時需要）
+* `TRADELOCKER_SERVER` : TradeLocker server 名稱（例如 `demo`，`execution.broker_backend = tradelocker` 時需要）
+* `TRADELOCKER_ACCOUNT_ID` : TradeLocker 帳號 ID（E8 Signature 建議明確設定）
 * `ITICK_API_KEY` : iTick FX 數據供應商金鑰
 * `TRADERMADE_API_KEY` : TraderMade FX 數據供應商金鑰
 * `TELEGRAM_BOT_TOKEN` : Telegram 機器人 API 權杖，用於發送警報
@@ -24,12 +29,29 @@
 
 啟動時系統執行以下程序：
 1. 加載配置與環境變數。
-2. 登入 MatchTrader API 建立連線。
+2. 依 `execution.broker_backend` 建立 broker client（`matchtrader` 或 `tradelocker`）並登入。
 3. 執行 `recover_stale_claims()`，將前次當機遺留的 `claimed` 狀態意圖重新回收。
 4. 啟動 5 個非同步工作程序：掃描器 (Scanner, 每 4 小時)、LLM 工人 (Poll, 每 30 秒)、執行引擎 (Execution, 每 10 秒)、清理工 (Janitor, 每 10 分鐘)、權益監控 (Equity, 每 60 秒)。
 
 傳統每日循環模式：`python -m src.main --config config/e8_signature_50k.yaml`
 僅監控模式（不開新倉）：`python -m src.main --config config/e8_signature_50k.yaml --monitor-only`
+
+### 2.1 E8 Signature / TradeLocker-first 快速配置
+在 account YAML（例如 `config/e8_signature_50k.yaml`）明確設定：
+
+```yaml
+execution:
+  broker_backend: tradelocker
+```
+
+TradeLocker-first 的最小 `.env` 組合：
+* `TRADELOCKER_API_URL=https://demo.tradelocker.com/backend-api`
+* `TRADELOCKER_EMAIL=...`
+* `TRADELOCKER_PASSWORD=...`
+* `TRADELOCKER_SERVER=demo`
+* `TRADELOCKER_ACCOUNT_ID=...`
+
+macOS server 仍使用相同啟動命令與 Python/uv 流程，無需改 platform-specific runner。
 
 ### 3. Stopping the Scheduler (Graceful Shutdown)
 請發送 `SIGINT` (Ctrl+C) 或 `SIGTERM` 信號。調度器會觸發 `stop()` 流程。
@@ -139,6 +161,11 @@ d) **MatchTrader 登入失敗**
 * 確認 API 網址可連通。
 * 檢查經紀商是否有維護視窗。
 
+g) **TradeLocker 登入或 account scope 失敗**
+* 檢查 `TRADELOCKER_API_URL` 是否包含正確 base path（建議 `.../backend-api`）。
+* 檢查 `TRADELOCKER_SERVER`、`TRADELOCKER_ACCOUNT_ID` 是否與帳號匹配。
+* 若返回 401，系統會嘗試 re-login；若持續失敗需檢查憑證與服務狀態。
+
 e) **掃描器子程序超時**
 * 徵兆：日誌顯示錯誤並發送警報。
 * 檢查 `../../qlib_market_scanner` 是否存在，且 `uv run` 可正常執行。
@@ -171,6 +198,11 @@ Janitor 會自動刪除超過 7 天的終端狀態意圖。
 | 單日获利上限 | 獲利目標 40% ($1,600) | $1,360 | 單日獲利不可超過此金額 |
 | API 請求 | 每日 2000 次 | 預留 50 次備用 | 由 SQLite 持久化計數並限制 |
 | 反高頻交易 | 持倉小於 1 分鐘佔比 < 50% | 不適用 | 套用隨機延遲開倉 |
+
+### 10.1 Known Limitations (`v1.5.0_stable` 前)
+* `TradeLocker-first` 已接上 runtime startup，但 production hardening 仍以 MatchTrader 路徑累積較多歷史樣本。
+* `execution.broker_backend: tradelocker` 目前只覆蓋單一 backend 切換，不包含多 broker 同時運行。
+* 若 `TRADELOCKER_API_URL` 配置錯誤（缺少 `/backend-api`），API 端點會無法命中。
 
 ### 11. Log Files
 * **路徑** : `logs/prop_firm_pilot.log`

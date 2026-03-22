@@ -1,9 +1,17 @@
 """Tests for configuration defaults and validation."""
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
 from src.config import AppConfig, ScannerConfig, SchedulerConfig
+
+
+def _read_repo_file(relative_path: str) -> str:
+    """Read a repository file as UTF-8 text for docs regression checks."""
+    repo_root = Path(__file__).resolve().parents[1]
+    return (repo_root / relative_path).read_text(encoding="utf-8")
 
 
 def test_scheduler_config_llm_worker_count_default():
@@ -279,3 +287,40 @@ def test_app_config_loads_tradelocker_env_fields(monkeypatch: pytest.MonkeyPatch
     assert config.tradelocker.password == "secret"
     assert config.tradelocker.server == "demo"
     assert config.tradelocker.account_id == "acct-001"
+
+
+def test_ops_runbook_covers_tradelocker_env_and_backend_startup() -> None:
+    content = _read_repo_file("docs/ops_runbook.md")
+    normalized = content.lower()
+
+    for env_var in [
+        "TRADELOCKER_API_URL",
+        "TRADELOCKER_EMAIL",
+        "TRADELOCKER_PASSWORD",
+        "TRADELOCKER_SERVER",
+        "TRADELOCKER_ACCOUNT_ID",
+    ]:
+        assert env_var in content
+
+    assert "execution.broker_backend: tradelocker" in normalized
+    assert "tradeLocker-first".lower() in normalized
+    assert "known limitations" in normalized
+
+
+def test_readme_mentions_backend_selection_and_tradelocker_path() -> None:
+    content = _read_repo_file("README.md")
+    normalized = content.lower()
+
+    assert "broker_backend" in normalized
+    assert "tradelocker" in normalized
+    assert "matchtrader" in normalized
+    assert "e8 signature" in normalized
+
+
+def test_v150_roadmap_marks_tradelocker_runtime_integration_status() -> None:
+    content = _read_repo_file("docs/PropFirmPilot_v1.5.0_road_map.md")
+    normalized = content.lower()
+
+    assert "tradelocker-first" in normalized
+    assert "runtime startup" in normalized
+    assert "task 5" in normalized

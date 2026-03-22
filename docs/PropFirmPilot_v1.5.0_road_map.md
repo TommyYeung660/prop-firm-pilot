@@ -102,6 +102,21 @@
 - `spread.fail.ratio_too_wide = 72`
 - `atr.fail.insufficient_1h_data = 133`
 
+### 2.3.1 Broker backend runtime status (`Task 5`)
+
+`Task 5` 已完成 runtime startup 接線：
+
+- `main.py` 的 daily cycle、monitor-only、scheduler 三個入口，已改為統一走 broker factory。
+- runtime startup 依 `execution.broker_backend` 建立 broker client，不再在入口層硬編碼 `MatchTraderClient(...)`。
+- `scheduler` 與 `execution engine` 已沿用 broker-neutral 依賴邊界，保留既有 `matchtrader` 相容路徑。
+
+目前主線定位：
+
+- `tradelocker-first`：作為 `E8 Signature` 目標路徑。
+- `matchtrader`：仍為兼容與回退路徑。
+
+這代表 `tradelocker-first` 已經不是僅限 config/factory 層，而是已進入 `runtime startup` 實際可執行路徑。
+
 ### 2.4 屬於 `v1.5.0 stable` 必須完成
 
 以下項目若未完成，`v1.5.0` 只能停留在 beta integration baseline，不能保守地稱為 stable：

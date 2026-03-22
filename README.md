@@ -18,6 +18,27 @@
 - `entry funnel ablation / reality check` 屬於 `v1.5.x` validation accumulation，不是 `v1.5.0 stable` 的 minimum gate。
 - 現行 bounded live default 仍以 `scanner -> LLM -> tactical` 為主線；`tactical-only` 只屬實驗模式，不是新的預設架構。
 
+## Runtime Broker Backend
+
+`v1.5.0_stable` 路徑支援 broker backend 切換，配置鍵為 `execution.broker_backend`：
+
+- `matchtrader`：維持既有路徑（預設值）
+- `tradelocker`：`E8 Signature` 建議路徑（TradeLocker-first）
+
+範例：
+
+```yaml
+execution:
+  broker_backend: tradelocker
+```
+
+對應環境變數：
+
+- `matchtrader`: `MATCHTRADER_API_URL`, `MATCHTRADER_USERNAME`, `MATCHTRADER_PASSWORD`
+- `tradelocker`: `TRADELOCKER_API_URL`, `TRADELOCKER_EMAIL`, `TRADELOCKER_PASSWORD`, `TRADELOCKER_SERVER`, `TRADELOCKER_ACCOUNT_ID`
+
+目前兩條路徑都保留支援；macOS server 啟動方式不變。
+
 ## v1.5.0 Scanner Contract
 
 PropFirmPilot 在 live ingest 前預期 scanner bundle 至少包含以下 artifact：
