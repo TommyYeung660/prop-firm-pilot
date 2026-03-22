@@ -1,5 +1,6 @@
 """Tests for configuration defaults and validation."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -305,6 +306,18 @@ def test_ops_runbook_covers_tradelocker_env_and_backend_startup() -> None:
     assert "execution.broker_backend: tradelocker" in normalized
     assert "tradeLocker-first".lower() in normalized
     assert "known limitations" in normalized
+
+
+def test_runbook_does_not_reference_nonexistent_literal_config_files() -> None:
+    content = _read_repo_file("docs/ops_runbook.md")
+    repo_root = Path(__file__).resolve().parents[1]
+    referenced_paths = re.findall(r"config/[A-Za-z0-9_./-]+\.ya?ml", content)
+    missing = [
+        relative_path
+        for relative_path in referenced_paths
+        if not (repo_root / relative_path).exists()
+    ]
+    assert not missing, f"runbook references missing config file(s): {missing}"
 
 
 def test_readme_mentions_backend_selection_and_tradelocker_path() -> None:

@@ -21,11 +21,11 @@
 * TradingAgents LLM 設定在 `../../TradingAgents/.env`（`RIGHTCODE_*`, `VOLCENGINE_*`, `AIHUBMIX_*`, `LLM_*`）
 * `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN` : 用於 Dropbox 同步
 
-配置文件路徑為 `config/default.yaml`，運行時會與 `config/e8_signature_50k.yaml` 合併。
+配置文件路徑為 `config/default.yaml`，運行時會與你指定的 account YAML（例如 `config/e8_one_5k_challenge.yaml`）合併。
 
 ### 2. Starting the Scheduler
 使用以下指令啟動 24/7 調度器模式：
-`python -m src.main --config config/e8_signature_50k.yaml --scheduler`
+`python -m src.main --config config/<account_config>.yaml --scheduler`
 
 啟動時系統執行以下程序：
 1. 加載配置與環境變數。
@@ -33,11 +33,11 @@
 3. 執行 `recover_stale_claims()`，將前次當機遺留的 `claimed` 狀態意圖重新回收。
 4. 啟動 5 個非同步工作程序：掃描器 (Scanner, 每 4 小時)、LLM 工人 (Poll, 每 30 秒)、執行引擎 (Execution, 每 10 秒)、清理工 (Janitor, 每 10 分鐘)、權益監控 (Equity, 每 60 秒)。
 
-傳統每日循環模式：`python -m src.main --config config/e8_signature_50k.yaml`
-僅監控模式（不開新倉）：`python -m src.main --config config/e8_signature_50k.yaml --monitor-only`
+傳統每日循環模式：`python -m src.main --config config/<account_config>.yaml`
+僅監控模式（不開新倉）：`python -m src.main --config config/<account_config>.yaml --monitor-only`
 
 ### 2.1 E8 Signature / TradeLocker-first 快速配置
-在 account YAML（例如 `config/e8_signature_50k.yaml`）明確設定：
+在 account YAML（例如 `config/e8_one_5k_challenge.yaml`）明確設定：
 
 ```yaml
 execution:
@@ -220,13 +220,13 @@ Janitor 會自動刪除超過 7 天的終端狀態意圖。
 ### 12. Quick Reference Commands
 ```bash
 # 啟動 24/7 調度器
-python -m src.main --config config/e8_signature_50k.yaml --scheduler
+python -m src.main --config config/<account_config>.yaml --scheduler
 
 # 啟動單次每日循環
-python -m src.main --config config/e8_signature_50k.yaml
+python -m src.main --config config/<account_config>.yaml
 
 # 僅監控模式
-python -m src.main --config config/e8_signature_50k.yaml --monitor-only
+python -m src.main --config config/<account_config>.yaml --monitor-only
 
 # 執行測試
 uv run pytest -v
