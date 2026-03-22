@@ -20,7 +20,16 @@ from typing import Any, Literal
 
 from curl_cffi.requests import AsyncSession
 from loguru import logger
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import BaseModel, Field
+
+from src.execution.broker_models import (
+    BrokerBalanceInfo,
+    BrokerClosedPosition,
+    BrokerInstrumentInfo,
+    BrokerOrderResult,
+    BrokerPositionInfo,
+    BrokerQuoteInfo,
+)
 
 # ── Response Models ─────────────────────────────────────────────────────────
 
@@ -33,167 +42,13 @@ class AuthTokens(BaseModel):
     system_uuid: str = Field(description="Account system UUID for API paths")
 
 
-class BalanceInfo(BaseModel):
-    """Account balance snapshot from MatchTrader."""
-
-    balance: float = 0.0
-    equity: float = 0.0
-    margin: float = 0.0
-    free_margin: float = Field(default=0.0, alias="freeMargin")
-    currency: str = "USD"
-
-    model_config = {"populate_by_name": True}
-
-
-class PositionInfo(BaseModel):
-    """Open position details."""
-
-    position_id: str = Field(
-        validation_alias=AliasChoices("positionId", "id"),
-        serialization_alias="positionId",
-    )
-    symbol: str = ""
-    side: str = ""
-    volume: float = 0.0
-    open_price: float = Field(default=0.0, alias="openPrice")
-    current_price: float = Field(default=0.0, alias="currentPrice")
-    profit: float = 0.0
-    sl_price: float | None = Field(
-        default=None,
-        validation_alias=AliasChoices("stopLoss", "slPrice"),
-        serialization_alias="slPrice",
-    )
-    tp_price: float | None = Field(
-        default=None,
-        validation_alias=AliasChoices("takeProfit", "tpPrice"),
-        serialization_alias="tpPrice",
-    )
-    open_time: str = Field(default="", alias="openTime")
-
-    model_config = {"populate_by_name": True}
-
-
-class OrderResult(BaseModel):
-    """Result from opening/closing/modifying a position."""
-
-    success: bool = False
-    position_id: str = ""
-    message: str = ""
-    raw_response: dict[str, Any] = {}
-
-
-class ClosedPosition(BaseModel):
-    """Historical closed position."""
-
-    position_id: str = Field(default="", alias="positionId")
-    symbol: str = ""
-    side: str = ""
-    volume: float = 0.0
-    open_price: float = Field(default=0.0, alias="openPrice")
-    close_price: float = Field(default=0.0, alias="closePrice")
-    profit: float = 0.0
-    open_time: str = Field(default="", alias="openTime")
-    close_time: str = Field(default="", alias="closeTime")
-    close_reason: str = Field(default="", alias="closeReason")
-
-    model_config = {"populate_by_name": True}
-
-
-class QuoteInfo(BaseModel):
-    """Real-time bid/ask quote from MatchTrader Market Watch.
-
-    Used for pre-trade price validation to prevent buying at inflated prices.
-
-    Usage:
-        quote = await client.get_quote("EURUSD.")
-        print(f"bid={quote.bid}, ask={quote.ask}")
-    """
-
-    symbol: str = ""
-    bid: float = 0.0
-    ask: float = 0.0
-    high: float = 0.0
-    low: float = 0.0
-    timestamp_ms: int = Field(default=0, alias="timestampMs")
-
-    model_config = {"populate_by_name": True}
-
-
-class TradingHours(BaseModel):
-    """Single trading session window for an instrument."""
-
-    day_number: int = Field(alias="dayNumber", description="Day of week (0=Sunday, 1=Monday...)")
-    open_hours: int = Field(default=0, alias="openHours")
-    open_minutes: int = Field(default=0, alias="openMinutes")
-    open_seconds: int = Field(default=0, alias="openSeconds")
-    close_hours: int = Field(default=0, alias="closeHours")
-    close_minutes: int = Field(default=0, alias="closeMinutes")
-    close_seconds: int = Field(default=0, alias="closeSeconds")
-
-    model_config = {"populate_by_name": True}
-
-
-class InstrumentInfo(BaseModel):
-    """Effective instrument details from MatchTrader.
-
-    Contains trading parameters, session hours, and contract specifications
-    for instruments available on the account.
-
-    Usage:
-        instruments = await client.get_effective_instruments()
-        eurusd = next(i for i in instruments if i.symbol == "EURUSD.")
-        print(f"Min lot: {eurusd.volume_min}, Spread markup: {eurusd.ask_markup}")
-    """
-
-    symbol: str = ""
-    alias: str = ""
-    description: str = ""
-    type: str = ""
-    base_currency: str = Field(default="", alias="baseCurrency")
-    quote_currency: str = Field(default="", alias="quoteCurrency")
-
-    # Session & availability
-    session_open: bool = Field(default=False, alias="sessionOpen")
-    trading_hours: list[TradingHours] = Field(default_factory=list, alias="tradingHours")
-
-    # Volume constraints
-    volume_min: float = Field(default=0.01, alias="volumeMin")
-    volume_max: float = Field(default=50.0, alias="volumeMax")
-    volume_step: float = Field(default=0.01, alias="volumeStep")
-    volume_precision: int = Field(default=2, alias="volumePrecision")
-
-    # Pricing
-    price_precision: int = Field(default=5, alias="pricePrecision")
-    size_of_one_point: float = Field(default=0.0, alias="sizeOfOnePoint")
-    contract_size: float = Field(default=100000, alias="contractSize")
-    ask_markup: float = Field(default=0.0, alias="askMarkup")
-    bid_markup: float = Field(default=0.0, alias="bidMarkup")
-
-    # Leverage & margin
-    leverage: float = 0.0
-    fixed_leverage: bool = Field(default=False, alias="fixedLeverage")
-    multiplier: float = 0.0
-    multiplier_currency: str = Field(default="", alias="multiplierCurrency")
-    divider: int = 1
-
-    # Swaps
-    swap_type: str = Field(default="PIPS", alias="swapType")
-    swap_buy: float = Field(default=0.0, alias="swapBuy")
-    swap_sell: float = Field(default=0.0, alias="swapSell")
-
-    # Stops
-    freeze_level: int = Field(default=0, alias="freezeLevel")
-    stops_level: int = Field(default=0, alias="stopsLevel")
-
-    # Termination
-    termination_type: str = Field(default="UNDEFINED", alias="terminationType")
-    termination_date: str | None = Field(default=None, alias="terminationDate")
-    termination_date_iso: str | None = Field(default=None, alias="terminationDateIso")
-
-    # Tags
-    tags: list[str] = Field(default_factory=list)
-
-    model_config = {"populate_by_name": True}
+# Backward-compatible aliases for existing MatchTrader imports.
+BalanceInfo = BrokerBalanceInfo
+PositionInfo = BrokerPositionInfo
+OrderResult = BrokerOrderResult
+ClosedPosition = BrokerClosedPosition
+QuoteInfo = BrokerQuoteInfo
+InstrumentInfo = BrokerInstrumentInfo
 
 
 # ── Rate Limiter ────────────────────────────────────────────────────────────
@@ -472,11 +327,11 @@ class MatchTraderClient:
 
     # ── Account Info ────────────────────────────────────────────────────
 
-    async def get_balance(self) -> BalanceInfo:
+    async def get_balance(self) -> BrokerBalanceInfo:
         """Get current account balance, equity, margin."""
         await self._ensure_auth()
         response = await self._api_request("GET", f"/mtr-api/{self.system_uuid}/balance")
-        return BalanceInfo(**response.json())
+        return BrokerBalanceInfo(**response.json())
 
     async def get_account_details(self) -> dict[str, Any]:
         """Get account details (leverage, offer name, etc.)."""
@@ -484,7 +339,7 @@ class MatchTraderClient:
         response = await self._api_request("GET", f"/mtr-api/{self.system_uuid}/account-details")
         return response.json()
 
-    async def get_effective_instruments(self) -> list[InstrumentInfo]:
+    async def get_effective_instruments(self) -> list[BrokerInstrumentInfo]:
         """Get tradeable instruments for this account.
 
         Returns only instruments available on the current account/offer.
@@ -501,13 +356,13 @@ class MatchTraderClient:
         )
         data = response.json()
         instruments_raw = data if isinstance(data, list) else data.get("instruments", [])
-        instruments = [InstrumentInfo(**item) for item in instruments_raw]
+        instruments = [BrokerInstrumentInfo(**item) for item in instruments_raw]
         logger.info("MatchTrader: loaded {} effective instruments", len(instruments))
         return instruments
 
     # ── Market Watch ────────────────────────────────────────────────────
 
-    async def get_quote(self, symbol: str) -> QuoteInfo:
+    async def get_quote(self, symbol: str) -> BrokerQuoteInfo:
         """Get real-time bid/ask quote for an instrument.
 
         Calls the Market Watch /quotations endpoint to retrieve the
@@ -517,7 +372,7 @@ class MatchTraderClient:
             symbol: Broker symbol (e.g. "EURUSD." with dot suffix).
 
         Returns:
-            QuoteInfo with bid, ask, high, low, and timestamp.
+            BrokerQuoteInfo with bid, ask, high, low, and timestamp.
 
         Raises:
             MatchTraderError: If quote cannot be retrieved.
@@ -537,7 +392,7 @@ class MatchTraderClient:
         # Match the requested symbol (first match)
         for q in quotes:
             if q.get("symbol", "") == symbol:
-                return QuoteInfo(
+                return BrokerQuoteInfo(
                     symbol=q.get("symbol", ""),
                     bid=float(q.get("bid", 0)),
                     ask=float(q.get("ask", 0)),
@@ -548,7 +403,7 @@ class MatchTraderClient:
 
         # Fallback: use first quote if symbol doesn't match exactly
         q = quotes[0]
-        return QuoteInfo(
+        return BrokerQuoteInfo(
             symbol=q.get("symbol", ""),
             bid=float(q.get("bid", 0)),
             ask=float(q.get("ask", 0)),
@@ -559,7 +414,7 @@ class MatchTraderClient:
 
     # ── Position Queries ────────────────────────────────────────────────
 
-    async def get_open_positions(self) -> list[PositionInfo]:
+    async def get_open_positions(self) -> list[BrokerPositionInfo]:
         """Get all currently open positions."""
         await self._ensure_auth()
         response = await self._api_request("GET", f"/mtr-api/{self.system_uuid}/open-positions")
@@ -567,13 +422,13 @@ class MatchTraderClient:
 
         # API may return list directly or wrapped in a key
         positions_raw = data if isinstance(data, list) else data.get("positions", [])
-        return [PositionInfo(**p) for p in positions_raw]
+        return [BrokerPositionInfo(**p) for p in positions_raw]
 
     async def get_closed_positions(
         self,
         from_ts: int,
         to_ts: int,
-    ) -> list[ClosedPosition]:
+    ) -> list[BrokerClosedPosition]:
         """Get closed positions within a time range.
 
         Args:
@@ -588,7 +443,7 @@ class MatchTraderClient:
         )
         data = response.json()
         positions_raw = data if isinstance(data, list) else data.get("operations", [])
-        return [ClosedPosition(**p) for p in positions_raw]
+        return [BrokerClosedPosition(**p) for p in positions_raw]
 
     # ── Trading Operations ──────────────────────────────────────────────
 
@@ -599,7 +454,7 @@ class MatchTraderClient:
         volume: float,
         sl: float | None = None,
         tp: float | None = None,
-    ) -> OrderResult:
+    ) -> BrokerOrderResult:
         """Open a new trading position.
 
         Args:
@@ -645,7 +500,7 @@ class MatchTraderClient:
                 json=body,
             )
             data = response.json()
-            return OrderResult(
+            return BrokerOrderResult(
                 success=True,
                 position_id=str(data.get("orderId", data.get("positionId", data.get("id", "")))),
                 message="Position opened successfully",
@@ -653,7 +508,7 @@ class MatchTraderClient:
             )
         except MatchTraderError as e:
             logger.error("MatchTrader: failed to open position: {}", e)
-            return OrderResult(
+            return BrokerOrderResult(
                 success=False,
                 message=str(e),
                 raw_response={"error": str(e)},
@@ -665,7 +520,7 @@ class MatchTraderClient:
         symbol: str,
         side: str,
         volume: float,
-    ) -> OrderResult:
+    ) -> BrokerOrderResult:
         """Close an existing position.
 
         Args:
@@ -698,7 +553,7 @@ class MatchTraderClient:
                 json=body,
             )
             data = response.json()
-            return OrderResult(
+            return BrokerOrderResult(
                 success=True,
                 position_id=position_id,
                 message="Position closed successfully",
@@ -706,14 +561,14 @@ class MatchTraderClient:
             )
         except MatchTraderError as e:
             logger.error("MatchTrader: failed to close position {}: {}", position_id, e)
-            return OrderResult(
+            return BrokerOrderResult(
                 success=False,
                 position_id=position_id,
                 message=str(e),
                 raw_response={"error": str(e)},
             )
 
-    async def close_all_positions(self) -> list[OrderResult]:
+    async def close_all_positions(self) -> list[BrokerOrderResult]:
         """Emergency: close ALL open positions."""
         logger.warning("MatchTrader: CLOSING ALL POSITIONS (emergency)")
         positions = await self.get_open_positions()
@@ -740,7 +595,7 @@ class MatchTraderClient:
         volume: float,
         sl: float | None = None,
         tp: float | None = None,
-    ) -> OrderResult:
+    ) -> BrokerOrderResult:
         """Modify stop loss and/or take profit of an existing position.
         The MatchTrader editPosition endpoint requires the full position context
         (id, instrument, orderSide, volume) even when only updating SL/TP.
@@ -791,7 +646,7 @@ class MatchTraderClient:
                     error_msg,
                     data,
                 )
-                return OrderResult(
+                return BrokerOrderResult(
                     success=False,
                     position_id=position_id,
                     message=f"API returned status={api_status}: {error_msg}",
@@ -804,7 +659,7 @@ class MatchTraderClient:
                 sl,
                 tp,
             )
-            return OrderResult(
+            return BrokerOrderResult(
                 success=True,
                 position_id=position_id,
                 message="Position modified successfully",
@@ -812,7 +667,7 @@ class MatchTraderClient:
             )
         except MatchTraderError as e:
             logger.error("MatchTrader: failed to modify position {}: {}", position_id, e)
-            return OrderResult(
+            return BrokerOrderResult(
                 success=False,
                 position_id=position_id,
                 message=str(e),

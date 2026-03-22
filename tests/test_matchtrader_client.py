@@ -15,13 +15,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.execution.broker_models import (
+    BrokerBalanceInfo,
+    BrokerInstrumentInfo,
+    BrokerOrderResult,
+    BrokerPositionInfo,
+    BrokerQuoteInfo,
+)
 from src.execution.matchtrader_client import (
     AuthTokens,
     BalanceInfo,
+    InstrumentInfo,
     MatchTraderAuthError,
     MatchTraderClient,
     MatchTraderError,
     MatchTraderRateLimitError,
+    OrderResult,
+    PositionInfo,
     QuoteInfo,
     RateLimiter,
 )
@@ -805,6 +815,7 @@ class TestTradingOperations:
                 balance = await client.get_balance()
 
                 assert isinstance(balance, BalanceInfo)
+                assert isinstance(balance, BrokerBalanceInfo)
                 assert balance.balance == 5000.0
                 assert balance.equity == 5100.0
                 assert balance.margin == 100.0
@@ -855,6 +866,7 @@ class TestTradingOperations:
                 positions = await client.get_open_positions()
 
                 assert len(positions) == 2
+                assert isinstance(positions[0], BrokerPositionInfo)
                 assert positions[0].position_id == "pos-001"
                 assert positions[0].symbol == "EURUSD."
                 assert positions[0].side == "BUY"
@@ -887,6 +899,7 @@ class TestTradingOperations:
                 )
 
                 assert result.success is True
+                assert isinstance(result, BrokerOrderResult)
                 assert result.position_id == "new-order-123"
                 assert "opened successfully" in result.message
 
@@ -1103,11 +1116,26 @@ class TestInstrumentInfo:
                 instruments = await client.get_effective_instruments()
 
                 assert len(instruments) == 2
+                assert isinstance(instruments[0], BrokerInstrumentInfo)
                 assert instruments[0].symbol == "EURUSD."
                 assert instruments[0].volume_min == 0.01
                 assert instruments[0].contract_size == 100000
                 assert instruments[1].symbol == "GBPUSD."
                 assert instruments[1].price_precision == 5
+
+
+# ── Broker Model Compatibility Tests ───────────────────────────────────────
+
+
+class TestBrokerModelCompatibility:
+    """Ensure MatchTrader client/model exports satisfy broker-neutral shapes."""
+
+    def test_matchtrader_model_aliases_to_broker_models(self) -> None:
+        assert BalanceInfo is BrokerBalanceInfo
+        assert PositionInfo is BrokerPositionInfo
+        assert OrderResult is BrokerOrderResult
+        assert QuoteInfo is BrokerQuoteInfo
+        assert InstrumentInfo is BrokerInstrumentInfo
 
 
 # ── QuoteInfo Model Tests ───────────────────────────────────────────────────
