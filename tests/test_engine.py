@@ -181,6 +181,69 @@ def _make_closed_intent_today(
     return closed
 
 
+def _make_opened_intent_with_execution_risk(
+    store: DecisionStore,
+    *,
+    symbol: str,
+    side: str,
+    position_id: str,
+    risk_pct: float,
+) -> TradeIntent:
+    """Create an opened intent and persist execution_meta.risk_pct for risk guard tests."""
+    intent = TradeIntent(
+        trade_date="2026-02-16",
+        symbol=symbol,
+        scanner_score=0.80,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-opened")
+    assert claimed is not None
+    store.update_intent_decision(
+        intent.id,
+        side=side,
+        sl_pips=40.0,
+        tp_pips=80.0,
+        risk_report="opened test",
+        state_json="{}",
+    )
+    store.mark_ready_for_exec(intent.id)
+    store.mark_executing(intent.id)
+    store.mark_opened(intent.id, position_id=position_id)
+    execution_meta = ExecutionEngine._build_execution_meta(
+        fill_price=None,
+        volume=0.10,
+        side=side,
+        sl_price=None,
+        tp_price=None,
+        sl_pips=40.0,
+        tp_pips=80.0,
+        pre_trade_bid=None,
+        pre_trade_ask=None,
+        slippage_pips=None,
+        execution_latency_ms=None,
+        random_delay_seconds=0.0,
+        compliance_passed=True,
+        order_raw_response={"positionId": position_id},
+        risk_pct=risk_pct,
+    )
+    store.update_execution_meta(intent.id, execution_meta)
+    opened = store.get_intent(intent.id)
+    assert opened is not None
+    return opened
+
+
+def _get_execution_meta(store: DecisionStore, intent_id: str) -> dict[str, object]:
+    """Read execution_meta JSON from decision row."""
+    row = store._conn.execute(
+        "SELECT execution_meta FROM decisions WHERE intent_id = ?",
+        (intent_id,),
+    ).fetchone()
+    assert row is not None
+    raw = row["execution_meta"] or "{}"
+    return json.loads(raw)
+
+
 # ── Execution Pipeline Tests ───────────────────────────────────────────────
 
 
@@ -574,6 +637,106 @@ class TestPositionSizing:
         risk_call = mock_sizer.calculate_risk_amount.call_args
         assert risk_call.args == ("EURJPY", 0.10, 40.0)
         assert risk_call.kwargs["pip_value_override"] == pytest.approx(6.6667, abs=0.0001)
+
+
+class TestPortfolioRiskExecutionGate:
+    """Tests for execution-side portfolio risk guard integration."""
+
+    async def test_execute_ready_intents_rejects_when_portfolio_risk_guard_blocks(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Execution should reject when projected total open risk exceeds budget."""
+        _make_opened_intent_with_execution_risk(
+            store,
+            symbol="GBPUSD",
+            side="BUY",
+            position_id="pos_existing_1",
+            risk_pct=0.02,
+        )
+        ready = _make_ready_intent(store, symbol="EURUSD", side="BUY", scanner_confidence="high")
+
+        mock_matchtrader.get_open_positions.return_value = [
+            MagicMock(position_id="pos_existing_1", symbol="GBPUSD", side="BUY", profit=10.0),
+        ]
+
+        result = await engine.execute_ready_intents()
+        assert result == 1
+
+        updated = store.get_intent(ready.id)
+        assert updated is not None
+        assert updated.status == "rejected"
+        assert updated.execution_error == "portfolio_risk.total_open_risk_exceeded"
+        mock_matchtrader.open_position.assert_not_called()
+
+    async def test_portfolio_risk_rejection_reason_and_meta_are_deterministic(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Rejection reason should be stable and metadata should include guard payload."""
+        _make_opened_intent_with_execution_risk(
+            store,
+            symbol="GBPUSD",
+            side="BUY",
+            position_id="pos_existing_1",
+            risk_pct=0.02,
+        )
+        ready = _make_ready_intent(store, symbol="EURUSD", side="BUY", scanner_confidence="high")
+        mock_matchtrader.get_open_positions.return_value = [
+            MagicMock(position_id="pos_existing_1", symbol="GBPUSD", side="BUY", profit=10.0),
+        ]
+
+        await engine.execute_ready_intents()
+
+        updated = store.get_intent(ready.id)
+        assert updated is not None
+        assert updated.execution_error == "portfolio_risk.total_open_risk_exceeded"
+        meta = _get_execution_meta(store, ready.id)
+        assert meta["compliance_passed"] is False
+        assert meta["portfolio_risk"]["allowed"] is False
+        assert meta["portfolio_risk"]["reason_code"] == updated.execution_error
+
+    async def test_open_risk_within_budget_allows_bounded_uplift_execution(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+        mock_sizer: MagicMock,
+    ) -> None:
+        """High-confidence entries should still execute when portfolio risk stays within budget."""
+        _make_opened_intent_with_execution_risk(
+            store,
+            symbol="GBPUSD",
+            side="SELL",
+            position_id="pos_existing_1",
+            risk_pct=0.005,
+        )
+        ready = _make_ready_intent(store, symbol="EURUSD", side="BUY", scanner_confidence="high")
+        mock_matchtrader.get_open_positions.return_value = [
+            MagicMock(position_id="pos_existing_1", symbol="GBPUSD", side="SELL", profit=5.0),
+        ]
+
+        result = await engine.execute_ready_intents()
+        assert result == 1
+
+        updated = store.get_intent(ready.id)
+        assert updated is not None
+        assert updated.status == "opened"
+        mock_matchtrader.open_position.assert_called_once()
+        mock_sizer.calculate_volume.assert_called_once_with(
+            "EURUSD",
+            50000.0,
+            40.0,
+            risk_pct_override=pytest.approx(0.015),
+        )
+
+        meta = _get_execution_meta(store, ready.id)
+        assert meta["portfolio_risk"]["allowed"] is True
+        assert meta["portfolio_risk"]["reason_code"] == "portfolio_risk.allowed"
 
 
 # ── Account Snapshot Tests ──────────────────────────────────────────────────
