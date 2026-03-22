@@ -131,6 +131,11 @@ def test_broker_instrument_info_exposes_leverage_field() -> None:
     assert instrument.leverage == 100.0
 
 
+def test_broker_instrument_info_exposes_session_open_field() -> None:
+    instrument = BrokerInstrumentInfo(symbol="EURUSD", sessionOpen=True)
+    assert instrument.session_open is True
+
+
 def test_broker_instrument_model_trading_hours_parses_to_objects() -> None:
     instrument = BrokerInstrumentInfo(
         symbol="EURUSD",

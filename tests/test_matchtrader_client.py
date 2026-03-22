@@ -1199,6 +1199,7 @@ class TestBrokerModelResponseShape:
                     "volumeMin": 0.01,
                     "volumeMax": 50.0,
                     "leverage": 100.0,
+                    "sessionOpen": True,
                 }
             ]
         )
@@ -1222,6 +1223,7 @@ class TestBrokerModelResponseShape:
                 assert len(instruments) == 1
                 assert isinstance(instruments[0], BrokerInstrumentInfo)
                 assert instruments[0].leverage == 100.0
+                assert instruments[0].session_open is True
 
 
 # ── Instrument Info Tests ──────────────────────────────────────────────────
@@ -1285,8 +1287,10 @@ class TestInstrumentInfo:
                 assert instruments[0].symbol == "EURUSD."
                 assert instruments[0].volume_min == 0.01
                 assert instruments[0].contract_size == 100000
+                assert instruments[0].session_open is True
                 assert instruments[1].symbol == "GBPUSD."
                 assert instruments[1].price_precision == 5
+                assert instruments[1].session_open is True
 
 
 # ── Broker Model Compatibility Tests ───────────────────────────────────────
