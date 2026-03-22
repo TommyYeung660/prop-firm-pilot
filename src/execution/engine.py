@@ -168,7 +168,8 @@ class ExecutionEngine:
 
         # Step 2: Build account snapshot
         try:
-            account_snapshot = await self._get_account_snapshot()
+            broker_positions = await self._matchtrader.get_open_positions()
+            account_snapshot = await self._get_account_snapshot(broker_positions=broker_positions)
         except Exception as e:
             logger.error(
                 "ExecutionEngine: failed to build account snapshot for {}: {}",
@@ -232,6 +233,7 @@ class ExecutionEngine:
             intent=intent,
             side=side,
             next_risk_pct=allocation.effective_risk_pct,
+            broker_positions=broker_positions,
         )
         portfolio_risk_payload = portfolio_risk_decision.to_dict()
 
@@ -304,10 +306,30 @@ class ExecutionEngine:
                 intent_id,
                 compliance_result.reason,
             )
+            execution_meta = self._build_execution_meta(
+                fill_price=None,
+                volume=trade_plan.volume,
+                side=side,
+                sl_price=None,
+                tp_price=None,
+                sl_pips=trade_plan.stop_loss,
+                tp_pips=trade_plan.take_profit,
+                pre_trade_bid=None,
+                pre_trade_ask=None,
+                slippage_pips=None,
+                execution_latency_ms=None,
+                random_delay_seconds=0.0,
+                compliance_passed=False,
+                order_raw_response={},
+                risk_pct=allocation.effective_risk_pct,
+                capital_allocation_meta=allocation.to_dict(),
+                portfolio_risk_meta=portfolio_risk_payload,
+            )
             # Store compliance snapshot before rejecting
             await asyncio.to_thread(
                 self._update_compliance_snapshot, intent_id, compliance_snapshot
             )
+            await asyncio.to_thread(self._store.update_execution_meta, intent_id, execution_meta)
             await asyncio.to_thread(self._store.mark_rejected, intent_id, compliance_result.reason)
             await self._send_alert_rejection(symbol, side, compliance_result.reason)
             self._log_trade_event(
@@ -632,14 +654,21 @@ class ExecutionEngine:
         )
         return resolved
 
-    async def _get_account_snapshot(self) -> AccountSnapshot:
+    async def _get_account_snapshot(
+        self,
+        broker_positions: list[Any] | None = None,
+    ) -> AccountSnapshot:
         """Fetch current account state from MatchTrader for compliance checks.
 
         Returns:
             AccountSnapshot with balance, equity, margin, and position count.
         """
         balance_info = await self._matchtrader.get_balance()
-        positions = await self._matchtrader.get_open_positions()
+        positions = (
+            broker_positions
+            if broker_positions is not None
+            else await self._matchtrader.get_open_positions()
+        )
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         today_intents = self._store.get_intents_by_date(today)
@@ -766,10 +795,11 @@ class ExecutionEngine:
         intent: TradeIntent,
         side: Literal["BUY", "SELL"],
         next_risk_pct: float,
+        broker_positions: list[Any],
     ) -> PortfolioRiskDecision:
         """Evaluate portfolio risk for the next entry; fail closed on any error."""
         try:
-            open_snapshots = await self._build_open_position_risk_snapshots()
+            open_snapshots = await self._build_open_position_risk_snapshots(broker_positions)
             return self._portfolio_risk_guard.evaluate_next_entry(
                 next_symbol=intent.symbol,
                 next_side=side,
@@ -793,9 +823,11 @@ class ExecutionEngine:
                 },
             )
 
-    async def _build_open_position_risk_snapshots(self) -> list[OpenPositionRiskSnapshot]:
+    async def _build_open_position_risk_snapshots(
+        self,
+        broker_positions: list[Any],
+    ) -> list[OpenPositionRiskSnapshot]:
         """Map current broker open positions into risk snapshots for guard evaluation."""
-        broker_positions = await self._matchtrader.get_open_positions()
         active_intents = self._store.get_active_positions()
         intents_by_position_id: dict[str, TradeIntent] = {
             str(intent.position_id): intent
@@ -820,14 +852,10 @@ class ExecutionEngine:
             )
             side = raw_side.strip().upper()
             if not symbol or side not in {"BUY", "SELL"}:
-                logger.debug(
-                    "ExecutionEngine: skipping risk snapshot for unmapped broker position {} "
-                    "(symbol='{}', side='{}')",
-                    position_id,
-                    symbol,
-                    side,
+                raise ValueError(
+                    "unmapped_broker_position:"
+                    f"{position_id}:symbol={symbol or '<missing>'}:side={side or '<missing>'}"
                 )
-                continue
 
             open_risk_pct = self._extract_execution_risk_pct(matched_intent)
             if open_risk_pct is None:
