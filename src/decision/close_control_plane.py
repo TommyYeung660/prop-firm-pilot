@@ -10,9 +10,9 @@ Usage:
 """
 
 from collections.abc import Callable
-from typing import Any
 
 from src.decision.close_models import CloseIntent, CloseOutcome
+from src.execution.broker_protocol import BrokerClientProtocol
 
 
 class CloseControlPlane:
@@ -20,11 +20,15 @@ class CloseControlPlane:
 
     def __init__(
         self,
-        matchtrader: Any,
         normalize_price: Callable[[str, float | None], float | None],
         price_precision_resolver: Callable[[str], int | None],
+        broker: BrokerClientProtocol | None = None,
+        matchtrader: BrokerClientProtocol | None = None,
     ) -> None:
-        self._matchtrader = matchtrader
+        selected_broker = broker if broker is not None else matchtrader
+        if selected_broker is None:
+            raise ValueError("CloseControlPlane requires a broker client")
+        self._matchtrader = selected_broker
         self._normalize_price = normalize_price
         self._price_precision_resolver = price_precision_resolver
         self._pending_close_actions: dict[str, CloseOutcome] = {}

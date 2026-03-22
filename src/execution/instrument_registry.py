@@ -1,5 +1,5 @@
 """
-Instrument registry — maps config symbols to MatchTrader broker symbols.
+Instrument registry — maps config symbols to broker symbols.
 
 E8 Markets account 950552 uses dot-suffix symbols (e.g. "EURUSD." instead
 of "EURUSD"). This registry is built at startup from get_effective_instruments()
@@ -10,7 +10,7 @@ Also validates that all configured trading symbols are actually tradeable
 on the connected account.
 
 Usage:
-    registry = await InstrumentRegistry.from_matchtrader(client, config_symbols)
+    registry = await InstrumentRegistry.from_broker(broker, config_symbols)
     broker_sym = registry.to_broker("EURUSD")      # → "EURUSD."
     config_sym = registry.to_config("EURUSD.")      # → "EURUSD"
     info = registry.get_info("EURUSD")               # → InstrumentInfo
@@ -18,7 +18,8 @@ Usage:
 
 from loguru import logger
 
-from src.execution.matchtrader_client import InstrumentInfo, MatchTraderClient
+from src.execution.broker_models import BrokerInstrumentInfo
+from src.execution.broker_protocol import BrokerClientProtocol
 
 
 class InstrumentRegistryError(Exception):
@@ -26,13 +27,13 @@ class InstrumentRegistryError(Exception):
 
 
 class InstrumentRegistry:
-    """Bidirectional symbol mapper between config and MatchTrader broker symbols.
+    """Bidirectional symbol mapper between config and broker symbols.
 
     Built at startup from the broker's effective instruments list. Validates
     that all configured symbols are tradeable before the scheduler starts.
 
     Usage:
-        registry = await InstrumentRegistry.from_matchtrader(client, ["EURUSD", "GBPUSD"])
+        registry = await InstrumentRegistry.from_broker(broker, ["EURUSD", "GBPUSD"])
         broker_sym = registry.to_broker("EURUSD")  # → "EURUSD."
     """
 
@@ -40,7 +41,7 @@ class InstrumentRegistry:
         self,
         config_to_broker: dict[str, str],
         broker_to_config: dict[str, str],
-        instruments: dict[str, InstrumentInfo],
+        instruments: dict[str, BrokerInstrumentInfo],
         untradeable: list[str],
     ) -> None:
         self._config_to_broker = config_to_broker
@@ -53,27 +54,36 @@ class InstrumentRegistry:
     @classmethod
     async def from_matchtrader(
         cls,
-        client: MatchTraderClient,
+        client: BrokerClientProtocol,
         config_symbols: list[str],
     ) -> "InstrumentRegistry":
-        """Build registry from live MatchTrader effective instruments.
+        """Backward-compatible alias for from_broker()."""
+        return await cls.from_broker(client, config_symbols)
+
+    @classmethod
+    async def from_broker(
+        cls,
+        broker: BrokerClientProtocol,
+        config_symbols: list[str],
+    ) -> "InstrumentRegistry":
+        """Build registry from live broker effective instruments.
 
         Fetches the account's effective instruments, matches each config symbol
         to its broker counterpart (exact match or dot-suffix), and logs any
         symbols that cannot be traded.
 
         Args:
-            client: Authenticated MatchTraderClient.
+            broker: Authenticated broker client implementing BrokerClientProtocol.
             config_symbols: Symbols from AppConfig.symbols (e.g. ["EURUSD", "GBPUSD"]).
 
         Returns:
             InstrumentRegistry ready for bidirectional lookups.
         """
-        effective = await client.get_effective_instruments()
+        effective = await broker.get_effective_instruments()
 
         # Build lookup: strip trailing dots/suffixes for matching
         # Broker symbols may be "EURUSD.", "EURUSD", or other patterns
-        broker_lookup: dict[str, InstrumentInfo] = {}
+        broker_lookup: dict[str, BrokerInstrumentInfo] = {}
         for inst in effective:
             broker_lookup[inst.symbol] = inst
             # Also index by stripped version for fuzzy matching
@@ -83,7 +93,7 @@ class InstrumentRegistry:
 
         config_to_broker: dict[str, str] = {}
         broker_to_config: dict[str, str] = {}
-        instruments: dict[str, InstrumentInfo] = {}
+        instruments: dict[str, BrokerInstrumentInfo] = {}
         untradeable: list[str] = []
 
         for config_sym in config_symbols:
@@ -186,14 +196,14 @@ class InstrumentRegistry:
             return self._broker_to_config[broker_symbol]
         return broker_symbol.rstrip(".")
 
-    def get_info(self, config_symbol: str) -> InstrumentInfo | None:
-        """Get full InstrumentInfo for a config symbol.
+    def get_info(self, config_symbol: str) -> BrokerInstrumentInfo | None:
+        """Get full broker instrument info for a config symbol.
 
         Args:
             config_symbol: Symbol from config (e.g. "EURUSD").
 
         Returns:
-            InstrumentInfo from MatchTrader, or None if not found.
+            BrokerInstrumentInfo from the broker, or None if not found.
         """
         return self._instruments.get(config_symbol)
 

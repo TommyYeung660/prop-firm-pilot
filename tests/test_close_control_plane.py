@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.decision.close_models import CloseIntent
+from src.execution.broker_models import BrokerOrderResult
 from src.execution.matchtrader_client import OrderResult
 
 
@@ -127,3 +128,61 @@ async def test_duplicate_full_close_is_suppressed_before_second_broker_write() -
     assert second.execution_status == "skipped"
     assert second.readback_status == "not_needed"
     assert broker.close_position.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_close_control_plane_broker_protocol_paths_are_preserved() -> None:
+    from src.decision.close_control_plane import CloseControlPlane
+
+    broker = AsyncMock()
+    broker.modify_position.return_value = BrokerOrderResult(
+        success=True,
+        position_id="POS-MOD",
+        message="OK",
+        raw_response={},
+    )
+    broker.verify_sl_tp.return_value = True
+    broker.close_position.return_value = BrokerOrderResult(
+        success=True,
+        position_id="POS-CLOSE",
+        message="OK",
+        raw_response={},
+    )
+
+    control = CloseControlPlane(
+        broker=broker,
+        normalize_price=_normalize_price,
+        price_precision_resolver=_resolve_precision,
+    )
+
+    modify_outcome = await control.execute(
+        CloseIntent(
+            trigger_source="tactical_exit",
+            action_kind="modify_only",
+            position_id="POS-MOD",
+            intent_id="INT-MOD",
+            symbol="EURUSD",
+            side="BUY",
+            requested_sl=1.10111,
+            requested_tp=1.10999,
+            reason_code="breakeven_threshold_reached",
+        )
+    )
+    close_outcome = await control.execute(
+        CloseIntent(
+            trigger_source="reeval_close",
+            action_kind="full_close",
+            position_id="POS-CLOSE",
+            intent_id="INT-CLOSE",
+            symbol="EURUSD",
+            side="BUY",
+            requested_volume=0.10,
+            reason_code="reverse_signal_close",
+        )
+    )
+
+    assert modify_outcome.execution_status == "accepted"
+    assert close_outcome.execution_status == "submitted"
+    broker.modify_position.assert_awaited_once()
+    broker.verify_sl_tp.assert_awaited_once()
+    broker.close_position.assert_awaited_once()

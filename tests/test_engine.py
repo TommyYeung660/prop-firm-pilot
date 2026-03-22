@@ -22,6 +22,7 @@ from src.config import (
 )
 from src.decision.schemas import TradeIntent
 from src.decision_store.sqlite_store import DecisionStore
+from src.execution.broker_models import BrokerBalanceInfo, BrokerOrderResult
 from src.execution.engine import ExecutionEngine
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -92,6 +93,33 @@ def mock_sizer() -> MagicMock:
     sizer.calculate_volume.return_value = 0.10
     sizer.calculate_risk_amount.return_value = 40.0
     return sizer
+
+
+@pytest.fixture
+def fake_broker_protocol() -> AsyncMock:
+    """Mock broker client that only relies on broker protocol contracts."""
+    broker = AsyncMock()
+    broker.get_balance.return_value = BrokerBalanceInfo(
+        balance=50000.0,
+        equity=50000.0,
+        margin=0.0,
+        free_margin=50000.0,
+    )
+    broker.get_open_positions.return_value = []
+    broker.open_position.return_value = BrokerOrderResult(
+        success=True,
+        position_id="pos_123",
+        message="Position opened successfully",
+        raw_response={"openPrice": "1.10000"},
+    )
+    broker.modify_position.return_value = BrokerOrderResult(
+        success=True,
+        position_id="pos_123",
+        message="Position modified successfully",
+        raw_response={},
+    )
+    broker.get_quote.return_value = MagicMock(bid=1.0999, ask=1.1001)
+    return broker
 
 
 @pytest.fixture
@@ -905,6 +933,36 @@ class TestInstrumentRegistry:
 
         # Verify registry.to_broker() was called (and raised)
         mock_registry.to_broker.assert_called_once_with("UNKNOWN")
+
+
+class TestBrokerProtocolExecution:
+    """Regression tests for broker-protocol execution boundary."""
+
+    async def test_execution_engine_accepts_broker_protocol_client(
+        self,
+        store: DecisionStore,
+        config: AppConfig,
+        mock_guard: MagicMock,
+        mock_sizer: MagicMock,
+        fake_broker_protocol: AsyncMock,
+    ) -> None:
+        """ExecutionEngine should accept broker-protocol client dependency."""
+        engine = ExecutionEngine(
+            store=store,
+            guard=mock_guard,
+            broker=fake_broker_protocol,
+            sizer=mock_sizer,
+            config=config,
+        )
+
+        _make_ready_intent(store, symbol="EURUSD")
+        await engine.execute_ready_intents()
+
+        fake_broker_protocol.open_position.assert_awaited_once_with(
+            symbol="EURUSD",
+            side="BUY",
+            volume=0.10,
+        )
 
 
 # ── SL/TP Price Conversion Tests ─────────────────────────────────────────────

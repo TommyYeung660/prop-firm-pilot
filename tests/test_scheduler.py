@@ -28,6 +28,7 @@ from src.config import (
 from src.decision.agent_bridge import AgentDecision
 from src.decision.schemas import TradeIntent
 from src.decision_store.sqlite_store import DecisionStore, InvalidTransitionError
+from src.execution.broker_models import BrokerInstrumentInfo
 from src.optimize.optimization_state import OptimizationState, Thresholds
 from src.scheduler.scheduler import Scheduler
 
@@ -92,6 +93,16 @@ def mock_engine() -> AsyncMock:
     engine = AsyncMock()
     engine.execute_ready_intents.return_value = 0
     return engine
+
+
+@pytest.fixture
+def fake_broker_protocol() -> AsyncMock:
+    """Mock broker protocol for instrument-registry construction tests."""
+    broker = AsyncMock()
+    broker.get_effective_instruments.return_value = [
+        BrokerInstrumentInfo(symbol="EURUSD"),
+    ]
+    return broker
 
 
 @pytest.fixture
@@ -190,6 +201,18 @@ async def _run_loop_once(scheduler: Scheduler, loop_coro) -> None:
     ):
         scheduler._running = True
         await loop_coro
+
+
+@pytest.mark.asyncio
+async def test_instrument_registry_builds_from_broker_protocol(
+    fake_broker_protocol: AsyncMock,
+) -> None:
+    """InstrumentRegistry should build from broker-neutral client protocol."""
+    from src.execution.instrument_registry import InstrumentRegistry
+
+    registry = await InstrumentRegistry.from_broker(fake_broker_protocol, ["EURUSD"])
+
+    assert registry.to_broker("EURUSD") == "EURUSD"
 
 
 # ── Scanner Loop Tests ──────────────────────────────────────────────────────

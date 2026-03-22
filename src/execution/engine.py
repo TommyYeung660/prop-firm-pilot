@@ -31,12 +31,12 @@ from src.config import AppConfig
 from src.decision.decision_formatter import DEFAULT_SL_TP
 from src.decision.schemas import TradeIntent
 from src.decision_store.sqlite_store import DecisionStore
+from src.execution.broker_protocol import BrokerClientProtocol
 from src.execution.capital_allocator import (
     BoundedCapitalAllocator,
     CapitalAllocationDecision,
 )
 from src.execution.instrument_registry import InstrumentRegistry
-from src.execution.matchtrader_client import MatchTraderClient
 from src.execution.pip_value_resolver import (
     quote_to_reference_price,
     resolve_usd_pip_value_for_symbol,
@@ -78,16 +78,25 @@ class ExecutionEngine:
         self,
         store: DecisionStore,
         guard: PropFirmGuard,
-        matchtrader: MatchTraderClient,
-        sizer: PositionSizer,
-        config: AppConfig,
+        matchtrader: BrokerClientProtocol | None = None,
+        sizer: PositionSizer | None = None,
+        config: AppConfig | None = None,
         alert_service: AlertService | None = None,
         instrument_registry: InstrumentRegistry | None = None,
         trade_journal: TradeJournal | None = None,
+        broker: BrokerClientProtocol | None = None,
     ) -> None:
+        selected_broker = broker if broker is not None else matchtrader
+        if selected_broker is None:
+            raise ValueError("ExecutionEngine requires a broker client")
+        if sizer is None:
+            raise ValueError("ExecutionEngine requires PositionSizer")
+        if config is None:
+            raise ValueError("ExecutionEngine requires AppConfig")
+
         self._store = store
         self._guard = guard
-        self._matchtrader = matchtrader
+        self._matchtrader = selected_broker
         self._sizer = sizer
         self._config = config
         self._capital_allocator = BoundedCapitalAllocator(config.execution)
