@@ -106,6 +106,37 @@ async def test_account_request_reauths_on_401_and_retries_once(client: TradeLock
     assert state_route.calls[1].request.headers["accNum"] == "10002"
 
 
+async def test_get_balance_auto_login_uses_resolved_account_path(client: TradeLockerClient) -> None:
+    async def fake_login(*, _quiet: bool = False) -> dict[str, str]:
+        _ = _quiet
+        client._access_token = "fresh-token"
+        client._refresh_token = "fresh-refresh-token"
+        client._account_id = "ACC-2"
+        client._acc_num = "10002"
+        return {
+            "accessToken": client._access_token,
+            "refreshToken": client._refresh_token,
+        }
+
+    client.login = AsyncMock(side_effect=fake_login)
+    client._request = AsyncMock(
+        return_value={
+            "balance": "1000.0",
+            "equity": "1005.0",
+            "margin": "10.0",
+            "freeMargin": "995.0",
+            "currency": "USD",
+        }
+    )
+
+    balance = await client.get_balance()
+
+    assert balance.balance == 1000.0
+    assert balance.equity == 1005.0
+    assert client.login.await_count == 1
+    assert client._request.await_args.args == ("GET", "/trade/accounts/ACC-2/state")
+
+
 async def test_quote_parsing_returns_broker_model(client: TradeLockerClient) -> None:
     client._ensure_auth = AsyncMock()
     client._resolve_symbol_meta = AsyncMock(

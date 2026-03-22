@@ -161,7 +161,7 @@ class TradeLockerClient:
     # ── Read APIs ───────────────────────────────────────────────────────
 
     async def get_balance(self) -> BrokerBalanceInfo:
-        payload = await self._account_request("GET", f"/trade/accounts/{self.account_id}/state")
+        payload = await self._account_request("GET", "/trade/accounts/{account_id}/state")
         state = payload if isinstance(payload, dict) else {}
         return BrokerBalanceInfo(
             balance=self._as_float(state.get("balance")),
@@ -174,7 +174,7 @@ class TradeLockerClient:
     async def get_effective_instruments(self) -> list[BrokerInstrumentInfo]:
         payload = await self._account_request(
             "GET",
-            f"/trade/accounts/{self.account_id}/instruments",
+            "/trade/accounts/{account_id}/instruments",
         )
         rows = self._extract_list(payload, ["instruments", "data"])
 
@@ -241,7 +241,7 @@ class TradeLockerClient:
         )
 
     async def get_open_positions(self) -> list[BrokerPositionInfo]:
-        payload = await self._account_request("GET", f"/trade/accounts/{self.account_id}/positions")
+        payload = await self._account_request("GET", "/trade/accounts/{account_id}/positions")
         rows = self._extract_list(payload, ["positions", "data"])
 
         positions: list[BrokerPositionInfo] = []
@@ -268,7 +268,7 @@ class TradeLockerClient:
     async def get_closed_positions(self, from_ts: int, to_ts: int) -> list[BrokerClosedPosition]:
         payload = await self._account_request(
             "GET",
-            f"/trade/accounts/{self.account_id}/ordersHistory",
+            "/trade/accounts/{account_id}/ordersHistory",
             params={"from": from_ts, "to": to_ts},
         )
         rows = self._extract_list(payload, ["orders", "data"])
@@ -320,7 +320,7 @@ class TradeLockerClient:
 
             payload = await self._account_request(
                 "POST",
-                f"/trade/accounts/{self.account_id}/orders",
+                "/trade/accounts/{account_id}/orders",
                 json=body,
             )
             response_raw = payload if isinstance(payload, dict) else {"data": payload}
@@ -483,9 +483,10 @@ class TradeLockerClient:
         json: dict[str, Any] | None = None,
     ) -> Any:
         await self._ensure_auth()
+        resolved_path = path.format(account_id=self.account_id)
         return await self._request(
             method,
-            path,
+            resolved_path,
             params=params,
             json=json,
             authenticated=True,
