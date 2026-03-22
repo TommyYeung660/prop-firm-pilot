@@ -102,10 +102,22 @@ class ExecutionConfig(BaseModel):
     max_positions: int = 3
     default_risk_pct: float = 0.01
     max_risk_pct: float = 0.02
-    max_total_open_risk_pct: float = 0.03
-    max_same_direction_positions: int = 2
-    max_currency_exposure_per_ccy: int = 3
-    reserve_risk_for_open_positions: bool = True
+    max_total_open_risk_pct: float = Field(
+        default=0.03,
+        description="Portfolio open-risk cap for existing + next entry risk (fraction of equity)",
+    )
+    max_same_direction_positions: int = Field(
+        default=2,
+        description="Maximum allowed positions in the same direction after admitting next entry",
+    )
+    max_currency_exposure_per_ccy: int = Field(
+        default=3,
+        description="Maximum number of open exposures referencing the same currency code",
+    )
+    reserve_risk_for_open_positions: bool = Field(
+        default=True,
+        description="Whether existing open risk consumes budget before admitting new entries",
+    )
     random_delay_min: float = 0.5
     random_delay_max: float = 3.0
     position_offset_pct: float = 0.10

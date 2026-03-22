@@ -14,6 +14,7 @@ Usage:
     )
 """
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -74,8 +75,8 @@ class PortfolioRiskGuard:
                 details={"error": "invalid_next_side", "next_side": next_side},
             )
 
-        safe_next_risk_pct = float(next_risk_pct)
-        if safe_next_risk_pct <= 0.0:
+        safe_next_risk_pct = self._to_finite_float(next_risk_pct)
+        if safe_next_risk_pct is None or safe_next_risk_pct <= 0.0:
             return self._reject(
                 reason_code=REASON_INVALID_INPUT,
                 projected_total_open_risk_pct=0.0,
@@ -101,14 +102,15 @@ class PortfolioRiskGuard:
                     projected_same_direction_positions=0,
                     details={"error": "invalid_open_position_side", "side": position.side},
                 )
-            if position.open_risk_pct < 0.0:
+            safe_open_risk_pct = self._to_finite_float(position.open_risk_pct)
+            if safe_open_risk_pct is None or safe_open_risk_pct < 0.0:
                 return self._reject(
                     reason_code=REASON_INVALID_INPUT,
                     projected_total_open_risk_pct=0.0,
                     projected_same_direction_positions=0,
                     details={
                         "error": "invalid_open_position_risk_pct",
-                        "open_risk_pct": position.open_risk_pct,
+                        "open_risk_pct": safe_open_risk_pct,
                     },
                 )
             if self._extract_currency_pair(position.symbol) is None:
@@ -118,7 +120,13 @@ class PortfolioRiskGuard:
                     projected_same_direction_positions=0,
                     details={"error": "invalid_open_position_symbol", "symbol": position.symbol},
                 )
-            normalized_open_positions.append(position)
+            normalized_open_positions.append(
+                OpenPositionRiskSnapshot(
+                    symbol=position.symbol,
+                    side=position.side,
+                    open_risk_pct=safe_open_risk_pct,
+                )
+            )
 
         existing_open_risk_pct = (
             sum(position.open_risk_pct for position in normalized_open_positions)
@@ -193,6 +201,16 @@ class PortfolioRiskGuard:
         if len(sanitized) < 6:
             return None
         return sanitized[:3], sanitized[3:6]
+
+    @staticmethod
+    def _to_finite_float(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed):
+            return None
+        return parsed
 
     @staticmethod
     def _reject(

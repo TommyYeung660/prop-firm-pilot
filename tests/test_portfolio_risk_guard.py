@@ -1,5 +1,9 @@
 """Tests for execution-side portfolio risk guard primitives."""
 
+import math
+
+import pytest
+
 from src.config import ExecutionConfig
 from src.execution.portfolio_risk_guard import OpenPositionRiskSnapshot, PortfolioRiskGuard
 
@@ -81,6 +85,65 @@ def test_portfolio_risk_guard_reject_reason_codes_are_deterministic() -> None:
     assert second.allowed is False
     assert first.reason_code == "portfolio_risk.total_open_risk_exceeded"
     assert second.reason_code == "portfolio_risk.total_open_risk_exceeded"
+
+
+@pytest.mark.parametrize("invalid_risk", [math.nan, math.inf, -math.inf])
+def test_portfolio_risk_guard_blocks_when_next_risk_is_not_finite(invalid_risk: float) -> None:
+    config = ExecutionConfig()
+    guard = PortfolioRiskGuard(config)
+
+    decision = guard.evaluate_next_entry(
+        next_symbol="EURUSD",
+        next_side="BUY",
+        next_risk_pct=invalid_risk,
+        open_positions=[],
+    )
+
+    assert decision.allowed is False
+    assert decision.reason_code == "portfolio_risk.invalid_input"
+
+
+@pytest.mark.parametrize("invalid_open_risk", [math.nan, math.inf, -math.inf])
+def test_portfolio_risk_guard_blocks_when_open_risk_is_not_finite(
+    invalid_open_risk: float,
+) -> None:
+    config = ExecutionConfig()
+    guard = PortfolioRiskGuard(config)
+
+    decision = guard.evaluate_next_entry(
+        next_symbol="EURUSD",
+        next_side="BUY",
+        next_risk_pct=0.005,
+        open_positions=[
+            OpenPositionRiskSnapshot(symbol="GBPUSD", side="SELL", open_risk_pct=invalid_open_risk),
+        ],
+    )
+
+    assert decision.allowed is False
+    assert decision.reason_code == "portfolio_risk.invalid_input"
+
+
+def test_portfolio_risk_guard_allows_reasonable_entry() -> None:
+    config = ExecutionConfig(
+        max_total_open_risk_pct=0.03,
+        max_same_direction_positions=2,
+        max_currency_exposure_per_ccy=3,
+        reserve_risk_for_open_positions=True,
+    )
+    guard = PortfolioRiskGuard(config)
+
+    decision = guard.evaluate_next_entry(
+        next_symbol="USDJPY",
+        next_side="SELL",
+        next_risk_pct=0.005,
+        open_positions=[
+            OpenPositionRiskSnapshot(symbol="EURUSD", side="BUY", open_risk_pct=0.007),
+            OpenPositionRiskSnapshot(symbol="GBPUSD", side="SELL", open_risk_pct=0.006),
+        ],
+    )
+
+    assert decision.allowed is True
+    assert decision.reason_code == "portfolio_risk.allowed"
 
 
 def test_portfolio_risk_guard_treats_zero_same_direction_limit_as_fail_closed() -> None:
