@@ -247,3 +247,35 @@ def test_e8_one_5k_first_batch_jpy_crosses_are_enabled_everywhere():
     assert config.instruments["EURJPY"].pip_size == 0.01
     assert config.instruments["AUDJPY"].pip_size == 0.01
     assert config.instruments["CADJPY"].pip_size == 0.01
+
+
+@pytest.mark.parametrize("backend", ["matchtrader", "tradelocker"])
+def test_execution_config_accepts_supported_broker_backend(backend: str) -> None:
+    from src.config import ExecutionConfig
+
+    config = ExecutionConfig(broker_backend=backend)
+    assert config.broker_backend == backend
+
+
+def test_execution_config_broker_backend_defaults_to_matchtrader() -> None:
+    from src.config import ExecutionConfig
+
+    config = ExecutionConfig()
+    assert config.broker_backend == "matchtrader"
+
+
+def test_app_config_loads_tradelocker_env_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRADELOCKER_API_URL", "https://api.test-tradelocker.com")
+    monkeypatch.setenv("TRADELOCKER_EMAIL", "tester@example.com")
+    monkeypatch.setenv("TRADELOCKER_PASSWORD", "secret")
+    monkeypatch.setenv("TRADELOCKER_SERVER", "demo")
+    monkeypatch.setenv("TRADELOCKER_ACCOUNT_ID", "acct-001")
+
+    from src.config import AppConfig
+
+    config = AppConfig()
+    assert config.tradelocker.api_url == "https://api.test-tradelocker.com"
+    assert config.tradelocker.email == "tester@example.com"
+    assert config.tradelocker.password == "secret"
+    assert config.tradelocker.server == "demo"
+    assert config.tradelocker.account_id == "acct-001"

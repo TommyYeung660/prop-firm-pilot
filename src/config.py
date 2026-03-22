@@ -7,6 +7,7 @@ Usage:
     config = load_config("config/e8_signature_50k.yaml")
 """
 
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -99,6 +100,7 @@ class AgentsConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     """Trade execution parameters."""
 
+    broker_backend: Literal["matchtrader", "tradelocker"] = "matchtrader"
     max_positions: int = 3
     default_risk_pct: float = 0.01
     max_risk_pct: float = 0.02
@@ -120,6 +122,16 @@ class MonitorConfig(BaseModel):
     )
     trade_journal_path: str = "data/trade_journal.jsonl"
     memory_dir: str = "MEMORY"
+
+
+class TradeLockerConfig(BaseModel):
+    """TradeLocker connection settings."""
+
+    api_url: str = Field(default_factory=lambda: os.getenv("TRADELOCKER_API_URL", ""))
+    email: str = Field(default_factory=lambda: os.getenv("TRADELOCKER_EMAIL", ""))
+    password: str = Field(default_factory=lambda: os.getenv("TRADELOCKER_PASSWORD", ""))
+    server: str = Field(default_factory=lambda: os.getenv("TRADELOCKER_SERVER", ""))
+    account_id: str = Field(default_factory=lambda: os.getenv("TRADELOCKER_ACCOUNT_ID", ""))
 
 
 class OptimizationConfig(BaseModel):
@@ -594,6 +606,7 @@ class AppConfig(BaseModel):
     scanner: ScannerConfig = ScannerConfig()
     agents: AgentsConfig = AgentsConfig()
     execution: ExecutionConfig = ExecutionConfig()
+    tradelocker: TradeLockerConfig = Field(default_factory=TradeLockerConfig)
     monitor: MonitorConfig = MonitorConfig()
     optimization: OptimizationConfig = OptimizationConfig()
     logging: LoggingConfig = LoggingConfig()
