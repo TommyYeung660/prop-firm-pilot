@@ -29,6 +29,7 @@ from src.execution.broker_models import (
     BrokerOrderResult,
     BrokerPositionInfo,
     BrokerQuoteInfo,
+    BrokerTradingHours,
 )
 
 # ── Response Models ─────────────────────────────────────────────────────────
@@ -48,6 +49,7 @@ PositionInfo = BrokerPositionInfo
 OrderResult = BrokerOrderResult
 ClosedPosition = BrokerClosedPosition
 QuoteInfo = BrokerQuoteInfo
+TradingHours = BrokerTradingHours
 InstrumentInfo = BrokerInstrumentInfo
 
 

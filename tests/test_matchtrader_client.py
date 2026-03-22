@@ -17,6 +17,7 @@ import pytest
 
 from src.execution.broker_models import (
     BrokerBalanceInfo,
+    BrokerClosedPosition,
     BrokerInstrumentInfo,
     BrokerOrderResult,
     BrokerPositionInfo,
@@ -1057,6 +1058,170 @@ class TestTradingOperations:
         )
 
         assert verified is True
+
+
+# ── Broker Model Response-Shape Tests ──────────────────────────────────────
+
+
+class TestBrokerModelResponseShape:
+    """Verify MatchTrader client responses preserve broker-neutral model shapes."""
+
+    async def test_broker_model_get_quote_response_shape(
+        self, client_config: dict, mock_response: AsyncMock
+    ) -> None:
+        mock_response.json = MagicMock(
+            return_value=[
+                {
+                    "symbol": "EURUSD.",
+                    "bid": 1.10873,
+                    "ask": 1.10877,
+                    "high": 1.10901,
+                    "low": 1.10775,
+                    "timestampMs": 1726200032067,
+                }
+            ]
+        )
+
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
+            mock_session = AsyncMock()
+            mock_session.request = AsyncMock(return_value=mock_response)
+            mock_session.close = AsyncMock()
+            mock_session_cls.return_value = mock_session
+
+            async with MatchTraderClient(**client_config) as client:
+                client._tokens = AuthTokens(
+                    trading_api_token="jwt",
+                    refresh_token="rt",
+                    system_uuid="sys-123",
+                )
+                client._last_auth_time = 9999999999.0
+
+                quote = await client.get_quote("EURUSD.")
+
+                assert isinstance(quote, BrokerQuoteInfo)
+                assert quote.symbol == "EURUSD."
+                assert quote.bid == 1.10873
+                assert quote.ask == 1.10877
+                assert quote.timestamp_ms == 1726200032067
+
+    async def test_broker_model_get_closed_positions_response_shape(
+        self, client_config: dict, mock_response: AsyncMock
+    ) -> None:
+        mock_response.json = MagicMock(
+            return_value={
+                "operations": [
+                    {
+                        "positionId": "closed-1",
+                        "symbol": "EURUSD.",
+                        "side": "SELL",
+                        "volume": 0.2,
+                        "openPrice": 1.101,
+                        "closePrice": 1.1,
+                        "profit": 20.0,
+                    }
+                ]
+            }
+        )
+
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
+            mock_session = AsyncMock()
+            mock_session.request = AsyncMock(return_value=mock_response)
+            mock_session.close = AsyncMock()
+            mock_session_cls.return_value = mock_session
+
+            async with MatchTraderClient(**client_config) as client:
+                client._tokens = AuthTokens(
+                    trading_api_token="jwt",
+                    refresh_token="rt",
+                    system_uuid="sys-123",
+                )
+                client._last_auth_time = 9999999999.0
+
+                positions = await client.get_closed_positions(
+                    from_ts=1726200000000,
+                    to_ts=1726286400000,
+                )
+
+                assert len(positions) == 1
+                assert isinstance(positions[0], BrokerClosedPosition)
+                assert positions[0].position_id == "closed-1"
+                assert positions[0].volume == 0.2
+                assert positions[0].open_price == 1.101
+
+    async def test_broker_model_get_open_positions_includes_sl_tp_fields(
+        self, client_config: dict, mock_response: AsyncMock
+    ) -> None:
+        mock_response.json = MagicMock(
+            return_value=[
+                {
+                    "positionId": "pos-777",
+                    "symbol": "EURUSD.",
+                    "side": "BUY",
+                    "volume": 0.1,
+                    "openPrice": 1.085,
+                    "currentPrice": 1.086,
+                    "profit": 10.0,
+                    "slPrice": 1.08,
+                    "tpPrice": 1.09,
+                }
+            ]
+        )
+
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
+            mock_session = AsyncMock()
+            mock_session.request = AsyncMock(return_value=mock_response)
+            mock_session.close = AsyncMock()
+            mock_session_cls.return_value = mock_session
+
+            async with MatchTraderClient(**client_config) as client:
+                client._tokens = AuthTokens(
+                    trading_api_token="jwt",
+                    refresh_token="rt",
+                    system_uuid="sys-123",
+                )
+                client._last_auth_time = 9999999999.0
+
+                positions = await client.get_open_positions()
+
+                assert len(positions) == 1
+                assert isinstance(positions[0], BrokerPositionInfo)
+                assert positions[0].sl_price == 1.08
+                assert positions[0].tp_price == 1.09
+
+    async def test_broker_model_get_effective_instruments_includes_leverage(
+        self, client_config: dict, mock_response: AsyncMock
+    ) -> None:
+        mock_response.json = MagicMock(
+            return_value=[
+                {
+                    "symbol": "EURUSD.",
+                    "pricePrecision": 5,
+                    "volumeMin": 0.01,
+                    "volumeMax": 50.0,
+                    "leverage": 100.0,
+                }
+            ]
+        )
+
+        with patch("src.execution.matchtrader_client.AsyncSession") as mock_session_cls:
+            mock_session = AsyncMock()
+            mock_session.request = AsyncMock(return_value=mock_response)
+            mock_session.close = AsyncMock()
+            mock_session_cls.return_value = mock_session
+
+            async with MatchTraderClient(**client_config) as client:
+                client._tokens = AuthTokens(
+                    trading_api_token="jwt",
+                    refresh_token="rt",
+                    system_uuid="sys-123",
+                )
+                client._last_auth_time = 9999999999.0
+
+                instruments = await client.get_effective_instruments()
+
+                assert len(instruments) == 1
+                assert isinstance(instruments[0], BrokerInstrumentInfo)
+                assert instruments[0].leverage == 100.0
 
 
 # ── Instrument Info Tests ──────────────────────────────────────────────────

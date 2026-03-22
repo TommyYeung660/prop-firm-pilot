@@ -84,6 +84,20 @@ class BrokerQuoteInfo(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class BrokerTradingHours(BaseModel):
+    """Single trading session window for an instrument."""
+
+    day_number: int = Field(alias="dayNumber", description="Day of week (0=Sunday, 1=Monday...)")
+    open_hours: int = Field(default=0, alias="openHours")
+    open_minutes: int = Field(default=0, alias="openMinutes")
+    open_seconds: int = Field(default=0, alias="openSeconds")
+    close_hours: int = Field(default=0, alias="closeHours")
+    close_minutes: int = Field(default=0, alias="closeMinutes")
+    close_seconds: int = Field(default=0, alias="closeSeconds")
+
+    model_config = {"populate_by_name": True}
+
+
 class BrokerInstrumentInfo(BaseModel):
     """Tradeable instrument details in broker-neutral format."""
 
@@ -96,7 +110,7 @@ class BrokerInstrumentInfo(BaseModel):
 
     # Session & availability
     session_open: bool = Field(default=False, alias="sessionOpen")
-    trading_hours: list[dict[str, Any]] = Field(default_factory=list, alias="tradingHours")
+    trading_hours: list[BrokerTradingHours] = Field(default_factory=list, alias="tradingHours")
 
     # Volume constraints
     volume_min: float = Field(default=0.01, alias="volumeMin")

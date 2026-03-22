@@ -14,6 +14,7 @@ from src.execution.broker_models import (
     BrokerOrderResult,
     BrokerPositionInfo,
     BrokerQuoteInfo,
+    BrokerTradingHours,
 )
 from src.execution.broker_protocol import BrokerClientProtocol
 
@@ -35,6 +36,22 @@ def test_broker_position_info_exposes_execution_fields() -> None:
     assert position.open_price == 1.1
     assert position.current_price == 1.101
     assert position.profit == 10.0
+
+
+def test_broker_position_info_exposes_sl_tp_fields_for_scheduler() -> None:
+    position = BrokerPositionInfo(
+        position_id="POS-10",
+        symbol="EURUSD",
+        side="BUY",
+        volume=0.1,
+        open_price=1.1,
+        current_price=1.101,
+        profit=10.0,
+        sl_price=1.09,
+        tp_price=1.12,
+    )
+    assert position.sl_price == 1.09
+    assert position.tp_price == 1.12
 
 
 def test_broker_balance_info_exposes_execution_fields() -> None:
@@ -93,6 +110,48 @@ def test_broker_closed_position_quote_instrument_order_fields() -> None:
     assert result.success is True
     assert result.position_id == "POS-1"
     assert result.raw_response["orderId"] == "POS-1"
+
+
+def test_broker_closed_position_exposes_open_price_and_volume_fields() -> None:
+    closed = BrokerClosedPosition(
+        position_id="POS-20",
+        symbol="XAUUSD",
+        side="SELL",
+        volume=0.3,
+        open_price=3000.5,
+        close_price=2998.0,
+        profit=75.0,
+    )
+    assert closed.volume == 0.3
+    assert closed.open_price == 3000.5
+
+
+def test_broker_instrument_info_exposes_leverage_field() -> None:
+    instrument = BrokerInstrumentInfo(symbol="EURUSD", leverage=100.0)
+    assert instrument.leverage == 100.0
+
+
+def test_broker_instrument_model_trading_hours_parses_to_objects() -> None:
+    instrument = BrokerInstrumentInfo(
+        symbol="EURUSD",
+        tradingHours=[
+            {
+                "dayNumber": 1,
+                "openHours": 7,
+                "openMinutes": 0,
+                "openSeconds": 0,
+                "closeHours": 23,
+                "closeMinutes": 0,
+                "closeSeconds": 0,
+            }
+        ],
+    )
+    session = instrument.trading_hours[0]
+    assert isinstance(session, BrokerTradingHours)
+    assert hasattr(session, "day_number")
+    assert session.day_number == 1
+    assert session.open_hours == 7
+    assert session.close_hours == 23
 
 
 def test_broker_protocol_exposes_required_methods() -> None:
