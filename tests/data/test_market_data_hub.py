@@ -689,6 +689,51 @@ async def test_entry_readiness_blocks_when_1h_bars_are_stale_even_with_fresh_quo
 
 
 @pytest.mark.asyncio
+async def test_entry_readiness_blocks_when_non_websocket_quote_has_no_5m_bars() -> None:
+    now = datetime(2026, 3, 19, 0, 15, tzinfo=timezone.utc)
+    tick_time = datetime(2026, 3, 19, 0, 14, 50, tzinfo=timezone.utc)
+    hub = MarketDataHub(
+        aggregator=FXTickAggregator(),
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=DummyProvider([]),
+        symbols=["EURUSD"],
+        now_provider=lambda: now,
+        broker_quote_provider=AsyncMock(
+            return_value={
+                "bid": 1.1001,
+                "ask": 1.1003,
+                "timestampMs": int(tick_time.timestamp() * 1000),
+            }
+        ),
+    )
+    hub._warm_cache[("EURUSD", "1h")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-19T00:00:00Z"),
+                "open": 1.0980,
+                "high": 1.1010,
+                "low": 1.0970,
+                "close": 1.0995,
+                "volume": 0,
+            }
+        ]
+    )
+
+    readiness = await hub.get_entry_readiness("EURUSD")
+
+    assert readiness.entry_safe is False
+    assert readiness.block_reason == "market_data.bars_5m_stale"
+    assert readiness.requires_tactical_retry is False
+    assert readiness.pending_reason == ""
+    assert readiness.quote_source == "broker_quote"
+    assert readiness.quote_available is True
+    assert readiness.bars_5m_source == "rest_fallback"
+    assert readiness.bars_5m_fresh is False
+    assert readiness.bars_1h_source == "warmup_cache"
+    assert readiness.bars_1h_fresh is True
+
+
+@pytest.mark.asyncio
 async def test_entry_readiness_blocks_when_latest_5m_bar_is_from_previous_utc_day() -> None:
     now = datetime(2026, 3, 19, 0, 10, tzinfo=timezone.utc)
     tick_time = datetime(2026, 3, 19, 0, 9, 50, tzinfo=timezone.utc)

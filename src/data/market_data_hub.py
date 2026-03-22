@@ -344,8 +344,12 @@ class MarketDataHub:
         elif not bars_1h_fresh:
             block_reason = "market_data.bars_1h_stale"
         elif bars_5m_result.bars.empty:
-            requires_tactical_retry = True
-            pending_reason = "market_data.startup_5m_bar_pending"
+            # Only websocket-startup warmup is retryable; all other empty-tail cases fail closed.
+            if quote_result.source == "websocket_cache":
+                requires_tactical_retry = True
+                pending_reason = "market_data.startup_5m_bar_pending"
+            else:
+                block_reason = "market_data.bars_5m_stale"
         elif not bars_5m_fresh:
             if bars_5m_close_at is not None and bars_5m_close_at.date() < current_trade_date:
                 block_reason = "market_data.trade_date_not_ready"

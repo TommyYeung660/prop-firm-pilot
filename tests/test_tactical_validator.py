@@ -6,6 +6,7 @@ The tactical layer is the "soldier" — it decides WHEN to execute, never WHAT d
 """
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -590,6 +591,42 @@ class TestTacticalVerdictSchema:
         assert result.summary_reason_code == "market_data.startup_5m_bar_pending"
         assert result.policy_hints["retryable"] is True
 
+    def test_stale_filtered_5m_bars_are_not_treated_as_startup_pending(self) -> None:
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        now = datetime.now(timezone.utc)
+        bars_1h = pd.DataFrame(
+            [
+                {
+                    "datetime": now - timedelta(hours=30 - idx),
+                    "open": 1.1000,
+                    "high": 1.1008,
+                    "low": 1.0992,
+                    "close": 1.1001,
+                }
+                for idx in range(30)
+            ]
+        )
+        data = TacticalData(
+            bars_5min=pd.DataFrame(),
+            bars_1h=bars_1h,
+            current_spread=0.00015,
+            typical_spread=0.00015,
+            latest_bar_time=now - timedelta(seconds=20),
+            quote_source="websocket_cache",
+            bars_1h_source="rest_fallback",
+            data_source="mixed",
+            bars_5min_stale_filtered=True,
+        )
+
+        result = validator.evaluate(side="BUY", data=data)
+
+        assert result.action == "WAIT"
+        assert result.resolution == "RETRY_PENDING"
+        assert result.summary_reason_code == "market_data.bars_5m_stale"
+        assert result.policy_hints["retryable"] is True
+        assert result.policy_hints["degrade_allowed"] is False
+
     def test_hard_gate_wait_from_insufficient_1h_data_disallows_degrade(self) -> None:
         config = TacticalConfig()
         validator = TacticalValidator(config)
@@ -636,3 +673,178 @@ class TestTacticalVerdictSchema:
         assert result.summary_reason_code == "atr.fail.insufficient_1h_data"
         assert result.policy_hints["retryable"] is True
         assert result.policy_hints["degrade_allowed"] is False
+
+    def test_market_data_reason_code_taxonomy_distinguishes_startup_pending_and_stale_wait(
+        self,
+    ) -> None:
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        now = datetime.now(timezone.utc)
+
+        startup_pending = validator.evaluate(
+            side="BUY",
+            data=TacticalData(
+                bars_5min=pd.DataFrame(),
+                bars_1h=pd.DataFrame(),
+                current_spread=0.0,
+                typical_spread=0.00015,
+                latest_bar_time=now - timedelta(seconds=15),
+                quote_source="websocket_cache",
+                bars_5min_source="websocket_cache",
+                bars_1h_source="warmup_cache",
+                data_source="websocket_cache",
+            ),
+        )
+
+        bars_5min = pd.DataFrame(
+            [
+                {
+                    "datetime": now - timedelta(minutes=30 - idx),
+                    "open": 1.1000,
+                    "high": 1.1005,
+                    "low": 1.0995,
+                    "close": 1.1002,
+                }
+                for idx in range(40)
+            ]
+        )
+        bars_1h = pd.DataFrame(
+            [
+                {
+                    "datetime": now - timedelta(hours=30 - idx),
+                    "open": 1.1000,
+                    "high": 1.1008,
+                    "low": 1.0992,
+                    "close": 1.1001,
+                }
+                for idx in range(30)
+            ]
+        )
+        stale_wait = validator.evaluate(
+            side="BUY",
+            data=TacticalData(
+                bars_5min=bars_5min,
+                bars_1h=bars_1h,
+                current_spread=0.00015,
+                typical_spread=0.00015,
+                latest_bar_time=now - timedelta(hours=2),
+                quote_source="rest_fallback",
+                bars_5min_source="rest_fallback",
+                bars_1h_source="rest_fallback",
+                data_source="rest_fallback",
+            ),
+        )
+
+        assert startup_pending.resolution == "RETRY_PENDING"
+        assert startup_pending.summary_reason_code == "market_data.startup_5m_bar_pending"
+        assert startup_pending.provenance["freshness_state"] == "fresh"
+        assert stale_wait.resolution == "RETRY_PENDING"
+        assert stale_wait.summary_reason_code == "freshness.wait.quote_stale_retryable"
+        assert stale_wait.provenance["freshness_state"] == "stale"
+
+    def test_reason_code_verdict_provenance_includes_freshness_state(self) -> None:
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        now = datetime.now(timezone.utc)
+        bars_5min = pd.DataFrame(
+            [
+                {
+                    "datetime": now - timedelta(minutes=10 - idx),
+                    "open": 1.1000,
+                    "high": 1.1004,
+                    "low": 1.0996,
+                    "close": 1.1001,
+                }
+                for idx in range(40)
+            ]
+        )
+        bars_1h = pd.DataFrame(
+            [
+                {
+                    "datetime": now - timedelta(hours=30 - idx),
+                    "open": 1.1000,
+                    "high": 1.1008,
+                    "low": 1.0992,
+                    "close": 1.1001,
+                }
+                for idx in range(30)
+            ]
+        )
+
+        result = validator.evaluate(
+            side="BUY",
+            data=TacticalData(
+                bars_5min=bars_5min,
+                bars_1h=bars_1h,
+                current_spread=0.00015,
+                typical_spread=0.00015,
+                latest_bar_time=now - timedelta(seconds=20),
+                quote_source="websocket_cache",
+                bars_5min_source="websocket_cache",
+                bars_1h_source="rest_fallback",
+                data_source="hybrid",
+            ),
+        )
+
+        assert result.provenance["quote_source"] == "websocket_cache"
+        assert result.provenance["bars_5min_source"] == "websocket_cache"
+        assert result.provenance["bars_1h_source"] == "rest_fallback"
+        assert result.provenance["freshness_state"] == "fresh"
+
+    def test_freshness_provenance_matches_authoritative_gate_at_ttl_boundary(self) -> None:
+        config = TacticalConfig()
+        config.hard_gates.data_max_age_seconds = 60
+        validator = TacticalValidator(config)
+        boundary_now = datetime(2026, 3, 17, 12, 0, tzinfo=timezone.utc)
+        bars_5min = pd.DataFrame(
+            [
+                {
+                    "datetime": boundary_now - timedelta(minutes=10 - idx),
+                    "open": 1.1000,
+                    "high": 1.1004,
+                    "low": 1.0996,
+                    "close": 1.1001,
+                }
+                for idx in range(40)
+            ]
+        )
+        bars_1h = pd.DataFrame(
+            [
+                {
+                    "datetime": boundary_now - timedelta(hours=30 - idx),
+                    "open": 1.1000,
+                    "high": 1.1008,
+                    "low": 1.0992,
+                    "close": 1.1001,
+                }
+                for idx in range(30)
+            ]
+        )
+
+        with patch("src.decision.tactical_validator.datetime") as mock_datetime:
+            mock_datetime.now.side_effect = [
+                boundary_now - timedelta(microseconds=1),
+                boundary_now - timedelta(microseconds=1),
+                boundary_now - timedelta(microseconds=1),
+                boundary_now + timedelta(microseconds=1),
+            ]
+            result = validator.evaluate(
+                side="BUY",
+                data=TacticalData(
+                    bars_5min=bars_5min,
+                    bars_1h=bars_1h,
+                    current_spread=0.00015,
+                    typical_spread=0.00015,
+                    latest_bar_time=boundary_now - timedelta(seconds=60),
+                    quote_source="websocket_cache",
+                    bars_5min_source="websocket_cache",
+                    bars_1h_source="rest_fallback",
+                    data_source="hybrid",
+                ),
+            )
+
+        freshness_gate = next(
+            gate for gate in result.hard_gates if gate.gate_name == "data_freshness"
+        )
+        assert freshness_gate.reason_code == "freshness.pass.quote_fresh"
+        assert result.provenance["freshness_state"] == "fresh"

@@ -66,6 +66,7 @@ class TacticalData:
     latest_bar_time: datetime | None = None
     quote_source: str = ""
     bars_5min_source: str = ""
+    bars_5min_stale_filtered: bool = False
     bars_1h_source: str = ""
     data_source: str = ""
 
@@ -242,17 +243,50 @@ class TacticalValidator:
     def __init__(self, config: TacticalConfig) -> None:
         self._config = config
 
-    def _build_provenance(self, data: TacticalData) -> dict[str, Any]:
+    def _resolve_authoritative_freshness_time(
+        self, data: TacticalData
+    ) -> tuple[str, datetime | None]:
+        """Return the canonical freshness basis and timestamp for one tactical snapshot."""
+        latest_5min_time = self._latest_dataframe_time(data.bars_5min)
+        latest_1h_time = self._latest_dataframe_time(data.bars_1h)
+
+        if data.latest_bar_time is not None:
+            return "quote", data.latest_bar_time
+        if latest_5min_time is not None:
+            return "5min", latest_5min_time
+        if latest_1h_time is not None:
+            return "1h", latest_1h_time
+        return "", None
+
+    def _build_provenance(
+        self,
+        data: TacticalData,
+        *,
+        evaluation_now: datetime | None = None,
+    ) -> dict[str, Any]:
         """Build the journal-first provenance bundle for one tactical evaluation."""
+        current_time = evaluation_now or datetime.now(timezone.utc)
+        freshness_basis, authoritative_time = self._resolve_authoritative_freshness_time(data)
+        if authoritative_time is None:
+            freshness_state = "missing"
+        else:
+            age_seconds = (current_time - authoritative_time).total_seconds()
+            freshness_state = (
+                "fresh"
+                if age_seconds < self._config.hard_gates.data_max_age_seconds
+                else "stale"
+            )
         return {
             "quote_source": data.quote_source,
             "bars_5min_source": data.bars_5min_source,
+            "bars_5min_stale_filtered": data.bars_5min_stale_filtered,
             "bars_1h_source": data.bars_1h_source,
             "data_source": data.data_source,
             "quote_timestamp": (
                 data.latest_bar_time.isoformat() if data.latest_bar_time is not None else ""
             ),
-            "freshness_basis": "quote" if data.latest_bar_time is not None else "",
+            "freshness_basis": freshness_basis,
+            "freshness_state": freshness_state,
         }
 
     def _default_policy_hints(
@@ -339,9 +373,11 @@ class TacticalValidator:
         self,
         latest_bar_time: datetime,
         label: str = "data",
+        *,
+        evaluation_now: datetime | None = None,
     ) -> GateResult:
         """Check if latest market data is recent enough."""
-        now = datetime.now(timezone.utc)
+        now = evaluation_now or datetime.now(timezone.utc)
         age_seconds = (now - latest_bar_time).total_seconds()
         max_age = self._config.hard_gates.data_max_age_seconds
         passed = age_seconds < max_age
@@ -368,22 +404,18 @@ class TacticalValidator:
             return latest_ts.replace(tzinfo=timezone.utc)
         return latest_ts.astimezone(timezone.utc)
 
-    def _build_data_freshness_gate(self, data: TacticalData) -> GateResult:
+    def _build_data_freshness_gate(
+        self,
+        data: TacticalData,
+        *,
+        evaluation_now: datetime | None = None,
+    ) -> GateResult:
         """Build one authoritative freshness gate with optional diagnostic ages."""
+        current_time = evaluation_now or datetime.now(timezone.utc)
         latest_5min_time = self._latest_dataframe_time(data.bars_5min)
         latest_1h_time = self._latest_dataframe_time(data.bars_1h)
 
-        authoritative_label = ""
-        authoritative_time: datetime | None = None
-        if data.latest_bar_time is not None:
-            authoritative_label = "quote"
-            authoritative_time = data.latest_bar_time
-        elif latest_5min_time is not None:
-            authoritative_label = "5min"
-            authoritative_time = latest_5min_time
-        elif latest_1h_time is not None:
-            authoritative_label = "1h"
-            authoritative_time = latest_1h_time
+        authoritative_label, authoritative_time = self._resolve_authoritative_freshness_time(data)
 
         if authoritative_time is None:
             return GateResult(
@@ -397,17 +429,23 @@ class TacticalValidator:
         freshness_result = self._check_data_freshness_gate(
             latest_bar_time=authoritative_time,
             label=authoritative_label,
+            evaluation_now=current_time,
         )
         detail_parts = [freshness_result.detail]
         for label, latest_time in (("5min", latest_5min_time), ("1h", latest_1h_time)):
             if latest_time is None:
                 continue
-            age_seconds = (datetime.now(timezone.utc) - latest_time).total_seconds()
+            age_seconds = (current_time - latest_time).total_seconds()
             detail_parts.append(f"{label}_age={age_seconds:.0f}s")
         freshness_result.detail = ", ".join(detail_parts)
         return freshness_result
 
-    def check_hard_gates(self, data: TacticalData) -> list[GateResult]:
+    def check_hard_gates(
+        self,
+        data: TacticalData,
+        *,
+        evaluation_now: datetime | None = None,
+    ) -> list[GateResult]:
         """Run all hard gate checks. ALL must pass.
 
         Args:
@@ -470,7 +508,7 @@ class TacticalValidator:
             )
 
         # 3. Data freshness gate
-        results.append(self._build_data_freshness_gate(data))
+        results.append(self._build_data_freshness_gate(data, evaluation_now=evaluation_now))
 
         return results
 
@@ -614,6 +652,8 @@ class TacticalValidator:
         Returns:
             TacticalResult with action (PASS/WAIT/REJECT) and gate details.
         """
+        evaluation_now = datetime.now(timezone.utc)
+
         # ── No-data guard: reject when ALL tactical signals are missing ──
         has_spread = data.current_spread > 0 or data.typical_spread > 0
         has_bars = not data.bars_5min.empty or not data.bars_1h.empty
@@ -626,7 +666,18 @@ class TacticalValidator:
                 detail="No tactical data available — spread, bars, and freshness all missing",
                 summary_reason_code="data.reject.no_tactical_inputs",
                 policy_hints=self._default_policy_hints(retryable=False),
-                provenance=self._build_provenance(data),
+                provenance=self._build_provenance(data, evaluation_now=evaluation_now),
+            )
+
+        if data.bars_5min_stale_filtered:
+            logger.debug("Tactical WAIT: stale 5m bars were filtered before validation")
+            return TacticalResult(
+                action="WAIT",
+                resolution="RETRY_PENDING",
+                detail="Latest 5m bars are stale after tactical freshness sanitization",
+                summary_reason_code="market_data.bars_5m_stale",
+                policy_hints=self._default_policy_hints(retryable=True, degrade_allowed=False),
+                provenance=self._build_provenance(data, evaluation_now=evaluation_now),
             )
 
         if data.quote_source == "websocket_cache" and data.bars_5min.empty:
@@ -636,11 +687,11 @@ class TacticalValidator:
                 resolution="RETRY_PENDING",
                 detail="Awaiting first websocket 5m closed bar after startup",
                 summary_reason_code="market_data.startup_5m_bar_pending",
-                policy_hints=self._default_policy_hints(retryable=True, degrade_allowed=True),
-                provenance=self._build_provenance(data),
+                policy_hints=self._default_policy_hints(retryable=True, degrade_allowed=False),
+                provenance=self._build_provenance(data, evaluation_now=evaluation_now),
             )
 
-        hard_results = self.check_hard_gates(data)
+        hard_results = self.check_hard_gates(data, evaluation_now=evaluation_now)
         hard_passed = all(r.passed for r in hard_results)
 
         if not hard_passed:
@@ -659,7 +710,7 @@ class TacticalValidator:
                     retryable=True,
                     degrade_allowed=self._hard_gate_wait_allows_degrade(hard_results),
                 ),
-                provenance=self._build_provenance(data),
+                provenance=self._build_provenance(data, evaluation_now=evaluation_now),
             )
 
         soft_results = self.check_soft_gates(side, data)
@@ -680,7 +731,7 @@ class TacticalValidator:
                 ),
                 summary_reason_code="tactical.pass.all_gates_aligned",
                 policy_hints=self._default_policy_hints(retryable=False),
-                provenance=self._build_provenance(data),
+                provenance=self._build_provenance(data, evaluation_now=evaluation_now),
             )
         else:
             return TacticalResult(
@@ -693,5 +744,5 @@ class TacticalValidator:
                 detail=(f"Soft score {soft_score}/{len(soft_results)} < {soft_required}"),
                 summary_reason_code="soft.wait.score_below_threshold",
                 policy_hints=self._default_policy_hints(retryable=True, degrade_allowed=True),
-                provenance=self._build_provenance(data),
+                provenance=self._build_provenance(data, evaluation_now=evaluation_now),
             )
