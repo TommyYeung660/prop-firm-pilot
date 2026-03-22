@@ -186,3 +186,36 @@ async def test_close_control_plane_broker_protocol_paths_are_preserved() -> None
     broker.modify_position.assert_awaited_once()
     broker.verify_sl_tp.assert_awaited_once()
     broker.close_position.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_close_control_plane_positional_matchtrader_call_remains_supported() -> None:
+    from src.decision.close_control_plane import CloseControlPlane
+
+    broker = AsyncMock()
+    broker.modify_position.return_value = OrderResult(
+        success=True,
+        position_id="POS-LEGACY",
+        message="OK",
+    )
+    broker.verify_sl_tp.return_value = True
+
+    control = CloseControlPlane(broker, _normalize_price, _resolve_precision)
+
+    outcome = await control.execute(
+        CloseIntent(
+            trigger_source="tactical_exit",
+            action_kind="modify_only",
+            position_id="POS-LEGACY",
+            intent_id="INT-LEGACY",
+            symbol="EURUSD",
+            side="BUY",
+            requested_sl=1.10123,
+            requested_tp=1.10987,
+            reason_code="breakeven_threshold_reached",
+        )
+    )
+
+    assert outcome.execution_status == "accepted"
+    broker.modify_position.assert_awaited_once()
+    broker.verify_sl_tp.assert_awaited_once()

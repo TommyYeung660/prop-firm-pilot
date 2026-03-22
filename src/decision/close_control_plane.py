@@ -6,6 +6,11 @@ typed close outcomes for later reconciliation.
 
 Usage:
     control = CloseControlPlane(matchtrader, normalize_price, resolve_precision)
+    control = CloseControlPlane(
+        broker=broker,
+        normalize_price=normalize_price,
+        price_precision_resolver=resolve_precision,
+    )
     outcome = await control.execute(intent)
 """
 
@@ -20,14 +25,19 @@ class CloseControlPlane:
 
     def __init__(
         self,
-        normalize_price: Callable[[str, float | None], float | None],
-        price_precision_resolver: Callable[[str], int | None],
-        broker: BrokerClientProtocol | None = None,
         matchtrader: BrokerClientProtocol | None = None,
+        normalize_price: Callable[[str, float | None], float | None] | None = None,
+        price_precision_resolver: Callable[[str], int | None] | None = None,
+        *,
+        broker: BrokerClientProtocol | None = None,
     ) -> None:
         selected_broker = broker if broker is not None else matchtrader
         if selected_broker is None:
             raise ValueError("CloseControlPlane requires a broker client")
+        if normalize_price is None:
+            raise ValueError("CloseControlPlane requires normalize_price")
+        if price_precision_resolver is None:
+            raise ValueError("CloseControlPlane requires price_precision_resolver")
         self._matchtrader = selected_broker
         self._normalize_price = normalize_price
         self._price_precision_resolver = price_precision_resolver
