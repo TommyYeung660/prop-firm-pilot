@@ -351,12 +351,13 @@ class TradeLockerClient:
         side: str,
         volume: float,
     ) -> BrokerOrderResult:
-        _ = (symbol, side, volume)
+        _ = (symbol, side)
+        qty = volume if volume > 0 else 0
         try:
             payload = await self._account_request(
                 "DELETE",
                 f"/trade/positions/{position_id}",
-                params={"qty": 0},
+                params={"qty": qty},
             )
             response_raw = payload if isinstance(payload, dict) else {"data": payload}
             return BrokerOrderResult(
@@ -383,7 +384,7 @@ class TradeLockerClient:
                     position_id=position.position_id,
                     symbol=position.symbol,
                     side=position.side,
-                    volume=position.volume,
+                    volume=0.0,
                 )
             )
         return results

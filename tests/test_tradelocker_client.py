@@ -217,14 +217,14 @@ async def test_market_order_open_builds_provider_payload(client: TradeLockerClie
     assert body["takeProfit"] == 1.09
 
 
-async def test_close_position_uses_delete_route(client: TradeLockerClient) -> None:
+async def test_close_position_full_close_uses_qty_zero(client: TradeLockerClient) -> None:
     client._account_request = AsyncMock(return_value={"status": "ok"})
 
     result = await client.close_position(
         position_id="POS-1",
         symbol="EURUSD",
         side="BUY",
-        volume=0.1,
+        volume=0.0,
     )
 
     assert isinstance(result, BrokerOrderResult)
@@ -232,6 +232,23 @@ async def test_close_position_uses_delete_route(client: TradeLockerClient) -> No
     assert result.position_id == "POS-1"
     assert client._account_request.await_args.args == ("DELETE", "/trade/positions/POS-1")
     assert client._account_request.await_args.kwargs["params"] == {"qty": 0}
+
+
+async def test_close_position_partial_close_uses_volume(client: TradeLockerClient) -> None:
+    client._account_request = AsyncMock(return_value={"status": "ok"})
+
+    result = await client.close_position(
+        position_id="POS-1",
+        symbol="EURUSD",
+        side="BUY",
+        volume=0.03,
+    )
+
+    assert isinstance(result, BrokerOrderResult)
+    assert result.success is True
+    assert result.position_id == "POS-1"
+    assert client._account_request.await_args.args == ("DELETE", "/trade/positions/POS-1")
+    assert client._account_request.await_args.kwargs["params"] == {"qty": 0.03}
 
 
 async def test_modify_position_uses_patch_route(client: TradeLockerClient) -> None:
