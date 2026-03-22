@@ -11,6 +11,7 @@ import json
 import time
 import unittest.mock
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -2735,6 +2736,30 @@ def _advance_intent_to_closed(
 
 class TestPositionMonitorLoop:
     """Tests for Scheduler._position_monitor_loop()."""
+
+    async def test_does_not_crash_when_broker_has_no_private_rate_limiter(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+    ) -> None:
+        """Position monitor should tolerate brokers that do not expose `_rate_limiter`."""
+        broker_without_limiter = SimpleNamespace()
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            broker=broker_without_limiter,
+        )
+        sched._market_hours = MagicMock()
+        sched._market_hours.should_force_close.return_value = False
+        sched._market_hours.is_market_open.return_value = False
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
 
     async def test_detects_closed_position(
         self,

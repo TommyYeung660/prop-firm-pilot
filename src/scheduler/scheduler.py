@@ -2415,7 +2415,11 @@ class Scheduler:
             try:
                 # Auto-throttle: increase sleep when API budget is low
                 base_interval = self._position_monitor_base_interval_seconds()
-                limiter = self._matchtrader._rate_limiter
+                limiter = getattr(
+                    self._matchtrader,
+                    "rate_limiter",
+                    getattr(self._matchtrader, "_rate_limiter", None),
+                )
                 remaining = self._coerce_numeric(
                     getattr(limiter, "write_remaining", getattr(limiter, "remaining", 0)),
                     fallback=0.0,
