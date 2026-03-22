@@ -11,7 +11,7 @@ import pytest
 
 from src.config import AppConfig, ExecutionConfig, InstrumentConfig, ScannerConfig
 from src.decision.agent_bridge import AgentDecision
-from src.main import PropFirmPilot
+from src.main import PropFirmPilot, _run_scheduler
 from src.signal.scanner_bridge import ScannerSignal
 
 
@@ -104,7 +104,7 @@ async def test_run_daily_cycle_sorts_side_aware_candidates_by_directional_qualit
         final_state={"summary": "side-aware short"},
     )
 
-    with patch("src.main.MatchTraderClient", return_value=matchtrader_client):
+    with patch("src.main.build_broker_client", return_value=matchtrader_client):
         await pilot.run_daily_cycle(date_override="2026-03-17")
 
     pilot.agents.decide.assert_called_once()
@@ -127,7 +127,7 @@ async def test_run_daily_cycle_skips_short_signal_when_agent_reverses_to_buy(
         final_state={"summary": "reverse long"},
     )
 
-    with patch("src.main.MatchTraderClient", return_value=matchtrader_client):
+    with patch("src.main.build_broker_client", return_value=matchtrader_client):
         await pilot.run_daily_cycle(date_override="2026-03-17")
 
     pilot._execute_trade.assert_not_awaited()
@@ -150,7 +150,7 @@ async def test_run_daily_cycle_keeps_only_best_side_per_symbol(
         final_state={"summary": "best side only"},
     )
 
-    with patch("src.main.MatchTraderClient", return_value=matchtrader_client):
+    with patch("src.main.build_broker_client", return_value=matchtrader_client):
         await pilot.run_daily_cycle(date_override="2026-03-17")
 
     pilot.agents.decide.assert_called_once()
@@ -173,7 +173,97 @@ async def test_run_daily_cycle_skips_long_signal_when_agent_reverses_to_sell(
         final_state={"summary": "reverse short"},
     )
 
-    with patch("src.main.MatchTraderClient", return_value=matchtrader_client):
+    with patch("src.main.build_broker_client", return_value=matchtrader_client):
         await pilot.run_daily_cycle(date_override="2026-03-17")
 
     pilot._execute_trade.assert_not_awaited()
+
+
+async def test_run_daily_cycle_uses_broker_factory(
+    config: AppConfig,
+    matchtrader_client: AsyncMock,
+) -> None:
+    """Daily cycle should build broker via factory, not direct MatchTrader constructor."""
+    pilot = _build_pilot(config)
+    pilot.scanner.run_pipeline.return_value = []
+
+    with patch("src.main.build_broker_client", return_value=matchtrader_client) as mock_factory:
+        await pilot.run_daily_cycle(date_override="2026-03-17")
+
+    mock_factory.assert_called_once_with(config, store=None)
+    matchtrader_client.login.assert_awaited_once()
+
+
+async def test_run_monitor_only_uses_broker_factory(
+    config: AppConfig,
+    matchtrader_client: AsyncMock,
+) -> None:
+    """Monitor-only path should build broker via factory."""
+    pilot = _build_pilot(config)
+    pilot.equity_monitor = MagicMock()
+    pilot.equity_monitor.start = AsyncMock(return_value=None)
+
+    with patch("src.main.build_broker_client", return_value=matchtrader_client) as mock_factory:
+        await pilot.run_monitor_only()
+
+    mock_factory.assert_called_once_with(config, store=None)
+    matchtrader_client.login.assert_awaited_once()
+    pilot.equity_monitor.start.assert_awaited_once()
+
+
+async def test_run_scheduler_uses_broker_factory_with_store(config: AppConfig) -> None:
+    """Scheduler startup should build broker via factory and pass DecisionStore through."""
+    config.execution.broker_backend = "tradelocker"
+    config.tradelocker.account_id = "TL-ACC-01"
+    store = MagicMock()
+    broker_client = AsyncMock()
+    broker_client.__aenter__.return_value = broker_client
+    broker_client.__aexit__.return_value = False
+    broker_client.login = AsyncMock(return_value={"accessToken": "ok"})
+    registry = MagicMock()
+    registry.tradeable_symbols = ["EURUSD"]
+    registry.untradeable_symbols = []
+    scheduler = MagicMock()
+    scheduler.recover_stale_claims = AsyncMock(return_value=0)
+    scheduler.start = AsyncMock(return_value=None)
+    scheduler.stop = AsyncMock(return_value=None)
+    bot_handler = MagicMock()
+    bot_handler.start = AsyncMock(return_value=None)
+    bot_handler.stop = AsyncMock(return_value=None)
+    alert_service = MagicMock()
+    alert_service.send = AsyncMock(return_value=True)
+    alert_service.close = AsyncMock(return_value=None)
+    operational_metrics = MagicMock()
+
+    class _ImmediateEvent:
+        def set(self) -> None:
+            return None
+
+        async def wait(self) -> None:
+            return None
+
+    with (
+        patch("src.main.build_broker_client", return_value=broker_client) as mock_factory,
+        patch("src.main.ScannerBridge", return_value=MagicMock()),
+        patch("src.main.AgentBridge", return_value=MagicMock()),
+        patch("src.main.AlertService", return_value=alert_service),
+        patch("src.main.OperationalMetrics", return_value=operational_metrics),
+        patch("src.main.TradeJournal", return_value=MagicMock()),
+        patch("src.main.MemoryJournal", return_value=MagicMock()),
+        patch("src.main.TelegramBotHandler", return_value=bot_handler),
+        patch("src.main.asyncio.Event", return_value=_ImmediateEvent()),
+        patch("src.decision_store.sqlite_store.DecisionStore", return_value=store),
+        patch(
+            "src.execution.instrument_registry.InstrumentRegistry.from_broker",
+            new=AsyncMock(return_value=registry),
+        ),
+        patch("src.optimize.optimization_engine.OptimizationEngine", return_value=MagicMock()),
+        patch("src.compliance.prop_firm_guard.PropFirmGuard", return_value=MagicMock()),
+        patch("src.execution.position_sizer.PositionSizer", return_value=MagicMock()),
+        patch("src.execution.engine.ExecutionEngine", return_value=MagicMock()),
+        patch("src.scheduler.scheduler.Scheduler", return_value=scheduler),
+    ):
+        await _run_scheduler(config)
+
+    mock_factory.assert_called_once_with(config, store=store)
+    broker_client.login.assert_awaited_once()

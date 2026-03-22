@@ -41,7 +41,8 @@ from src.compliance.prop_firm_guard import AccountSnapshot, PropFirmGuard, Trade
 from src.config import AppConfig, load_config
 from src.decision.agent_bridge import AgentBridge
 from src.decision.fx_analyst_config import build_agent_config
-from src.execution.matchtrader_client import MatchTraderClient
+from src.execution.broker_factory import build_broker_client
+from src.execution.broker_protocol import BrokerClientProtocol
 from src.execution.order_manager import OrderManager, TradeSignal
 from src.execution.pip_value_resolver import (
     quote_to_reference_price,
@@ -74,6 +75,13 @@ def _build_alert_fallback_sink(journal: TradeJournal) -> Callable[[str, str], bo
     return _write_alert_fallback
 
 
+def _runtime_account_id(config: AppConfig, default: str = "") -> str:
+    """Resolve runtime account identifier from selected broker backend."""
+    if config.execution.broker_backend == "tradelocker":
+        return config.tradelocker.account_id or default
+    return os.getenv("MATCHTRADER_ACCOUNT_ID", default)
+
+
 class PropFirmPilot:
     """Main orchestrator for the prop-firm-pilot trading system.
 
@@ -81,7 +89,7 @@ class PropFirmPilot:
     - ScannerBridge: runs qlib_market_scanner for FX signal generation
     - AgentBridge: runs TradingAgents for multi-agent BUY/SELL/HOLD decisions
     - PropFirmGuard: validates compliance with E8 Markets rules
-    - MatchTraderClient: executes trades via REST API
+    - BrokerClientProtocol: executes trades via configured broker REST API
     - EquityMonitor: real-time drawdown monitoring
     - TradeJournal: persistent trade logging
     - AlertService: Telegram notifications
@@ -105,7 +113,7 @@ class PropFirmPilot:
             config=build_agent_config(
                 output_language=config.agents.output_language,
                 memory_path=str(Path(config.monitor.memory_dir) / "chromadb"),
-                session_id=os.getenv("MATCHTRADER_ACCOUNT_ID", "default"),
+                session_id=_runtime_account_id(config, "default"),
             ),
         )
         self.journal = TradeJournal(config.monitor.trade_journal_path)
@@ -118,7 +126,7 @@ class PropFirmPilot:
         self.alert_service = AlertService(
             bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
-            account_id=os.getenv("MATCHTRADER_ACCOUNT_ID", ""),
+            account_id=_runtime_account_id(config, ""),
             initial_balance=config.account.initial_balance,
             profit_target_pct=config.compliance.profit_target,
             daily_loss_pct=config.compliance.daily_drawdown_limit,
@@ -143,7 +151,7 @@ class PropFirmPilot:
         )
 
         # ── State ───────────────────────────────────────────────────────
-        self._matchtrader: MatchTraderClient | None = None
+        self._matchtrader: BrokerClientProtocol | None = None
 
     @staticmethod
     def _normalize_scanner_side(side: Any) -> str | None:
@@ -229,14 +237,7 @@ class PropFirmPilot:
         logger.info("PropFirmPilot: daily cycle starting for {}", today)
         logger.info("=" * 60)
 
-        async with MatchTraderClient(
-            base_url=os.getenv("MATCHTRADER_API_URL", ""),
-            email=os.getenv("MATCHTRADER_USERNAME", ""),
-            password=os.getenv("MATCHTRADER_PASSWORD", ""),
-            broker_id=os.getenv("MATCHTRADER_BROKER_ID", "2"),
-            account_id=os.getenv("MATCHTRADER_ACCOUNT_ID"),
-            daily_request_limit=self.config.compliance.daily_api_request_limit,
-        ) as client:
+        async with build_broker_client(self.config, store=None) as client:
             self._matchtrader = client
 
             # Step 1: Authenticate
@@ -324,7 +325,7 @@ class PropFirmPilot:
 
     async def _execute_trade(
         self,
-        client: MatchTraderClient,
+        client: BrokerClientProtocol,
         signal: Any,
         side: Literal["BUY", "SELL"],
         balance_info: Any,
@@ -451,7 +452,7 @@ class PropFirmPilot:
 
     async def _resolve_live_pip_value_override(
         self,
-        client: MatchTraderClient,
+        client: BrokerClientProtocol,
         symbol: str,
     ) -> float | None:
         """Resolve live USD pip values for JPY-quoted pairs in legacy mode."""
@@ -490,13 +491,7 @@ class PropFirmPilot:
         """Monitor-only mode — watch existing positions without opening new ones."""
         logger.info("PropFirmPilot: starting monitor-only mode")
 
-        async with MatchTraderClient(
-            base_url=os.getenv("MATCHTRADER_API_URL", ""),
-            email=os.getenv("MATCHTRADER_USERNAME", ""),
-            password=os.getenv("MATCHTRADER_PASSWORD", ""),
-            broker_id=os.getenv("MATCHTRADER_BROKER_ID", "2"),
-            account_id=os.getenv("MATCHTRADER_ACCOUNT_ID"),
-        ) as client:
+        async with build_broker_client(self.config, store=None) as client:
             await client.login()
             balance = await client.get_balance()
 
@@ -568,7 +563,7 @@ async def _run_scheduler(config: AppConfig) -> None:
         config=build_agent_config(
             output_language=config.agents.output_language,
             memory_path=str(Path(config.monitor.memory_dir) / "chromadb"),
-            session_id=os.getenv("MATCHTRADER_ACCOUNT_ID", "default"),
+            session_id=_runtime_account_id(config, "default"),
         ),
     )
     operational_metrics = OperationalMetrics()
@@ -576,7 +571,7 @@ async def _run_scheduler(config: AppConfig) -> None:
     alert_service = AlertService(
         bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
-        account_id=os.getenv("MATCHTRADER_ACCOUNT_ID", ""),
+        account_id=_runtime_account_id(config, ""),
         initial_balance=config.account.initial_balance,
         profit_target_pct=config.compliance.profit_target,
         daily_loss_pct=config.compliance.daily_drawdown_limit,
@@ -596,19 +591,11 @@ async def _run_scheduler(config: AppConfig) -> None:
         ab_ratio=config.optimization.ab_ratio,
     )
 
-    async with MatchTraderClient(
-        base_url=os.getenv("MATCHTRADER_API_URL", ""),
-        email=os.getenv("MATCHTRADER_USERNAME", ""),
-        password=os.getenv("MATCHTRADER_PASSWORD", ""),
-        broker_id=os.getenv("MATCHTRADER_BROKER_ID", "2"),
-        account_id=os.getenv("MATCHTRADER_ACCOUNT_ID"),
-        daily_request_limit=config.compliance.daily_api_request_limit,
-        store=store,
-    ) as client:
+    async with build_broker_client(config, store=store) as client:
         await client.login()
 
         # ── Build InstrumentRegistry from effective instruments ────────
-        registry = await InstrumentRegistry.from_matchtrader(client, config.symbols)
+        registry = await InstrumentRegistry.from_broker(client, config.symbols)
         logger.info(
             "InstrumentRegistry: {} tradeable, {} untradeable",
             len(registry.tradeable_symbols),
@@ -625,7 +612,7 @@ async def _run_scheduler(config: AppConfig) -> None:
         engine = ExecutionEngine(
             store=store,
             guard=guard,
-            matchtrader=client,
+            broker=client,
             sizer=sizer,
             config=config,
             alert_service=alert_service,
@@ -639,7 +626,7 @@ async def _run_scheduler(config: AppConfig) -> None:
             scanner=scanner,
             agents=agents,
             engine=engine,
-            matchtrader=client,
+            broker=client,
             alert_service=alert_service,
             instrument_registry=registry,
             optimization_engine=optimization_engine,

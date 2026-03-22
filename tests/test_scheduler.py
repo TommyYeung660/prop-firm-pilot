@@ -145,6 +145,26 @@ def scheduler(
     )
 
 
+def test_scheduler_accepts_broker_keyword_for_tradelocker_backend(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+) -> None:
+    """Scheduler should accept broker keyword for backend-neutral startup wiring."""
+    broker = AsyncMock()
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        broker=broker,
+    )
+    assert sched._matchtrader is broker
+
+
 def _make_mock_signal(
     instrument: str = "EURUSD",
     score: float = 0.85,

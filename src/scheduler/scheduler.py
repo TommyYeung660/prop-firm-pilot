@@ -14,7 +14,7 @@ Includes:
 - Telegram alert integration for key lifecycle events
 
 Usage:
-    scheduler = Scheduler(config, store, scanner, agents, engine, matchtrader)
+    scheduler = Scheduler(config, store, scanner, agents, engine, broker)
     await scheduler.recover_stale_claims()
     await scheduler.start()  # Runs until interrupted
 """
@@ -57,9 +57,9 @@ from src.decision.tactical_validator import TacticalData, TacticalResult, Tactic
 from src.decision_store.janitor import Janitor
 from src.decision_store.sqlite_store import DecisionStore, InvalidTransitionError
 from src.diagnostics.analyze_entry_funnel_ablation import analyze_ablation
+from src.execution.broker_protocol import BrokerClientProtocol
 from src.execution.engine import ExecutionEngine
 from src.execution.instrument_registry import InstrumentRegistry
-from src.execution.matchtrader_client import MatchTraderClient
 from src.monitor.alert_service import AlertService
 from src.monitor.equity_monitor import EquityMonitor
 from src.monitor.memory_journal import MemoryJournal
@@ -95,7 +95,7 @@ class Scheduler:
     - Equity monitor (every 60s): monitors drawdown, triggers emergency close
 
     Usage:
-        scheduler = Scheduler(config, store, scanner, agents, engine, matchtrader)
+        scheduler = Scheduler(config, store, scanner, agents, engine, broker)
         await scheduler.recover_stale_claims()
         await scheduler.start()  # Runs until interrupted
     """
@@ -107,7 +107,9 @@ class Scheduler:
         scanner: ScannerBridge,
         agents: AgentBridge,
         engine: ExecutionEngine,
-        matchtrader: MatchTraderClient,
+        matchtrader: BrokerClientProtocol | None = None,
+        *,
+        broker: BrokerClientProtocol | None = None,
         alert_service: AlertService | None = None,
         instrument_registry: InstrumentRegistry | None = None,
         best_day_tracker: BestDayTracker | None = None,
@@ -118,12 +120,15 @@ class Scheduler:
         decision_cache: StrategicDecisionCache | None = None,
         metrics: OperationalMetrics | None = None,
     ) -> None:
+        selected_broker = broker if broker is not None else matchtrader
+        if selected_broker is None:
+            raise ValueError("Scheduler requires a broker client")
         self._config = config
         self._store = store
         self._scanner = scanner
         self._agents = agents
         self._engine = engine
-        self._matchtrader = matchtrader
+        self._matchtrader = selected_broker
         self._alert_service = alert_service
         self._registry = instrument_registry
         self._best_day_tracker = best_day_tracker or BestDayTracker(
