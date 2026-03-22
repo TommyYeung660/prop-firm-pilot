@@ -37,7 +37,7 @@ from src.compliance.best_day_tracker import BestDayTracker
 from src.compliance.hwm_tracker import HighWaterMarkTracker
 from src.compliance.prop_firm_guard import AccountSnapshot, PropFirmGuard
 from src.config import AppConfig
-from src.data.fx_data_fetcher import EodhdProvider
+from src.data.fx_data_fetcher import EodhdProvider, EodhdRealtimeProvider
 from src.data.fx_tick_aggregator import FXTickAggregator
 from src.data.fx_websocket_client import EODHDFXWebSocketClient
 from src.data.market_data_hub import MarketDataHub
@@ -177,6 +177,9 @@ class Scheduler:
         # v1.4.0: EODHD intraday provider for tactical bar data
         eodhd_key = os.getenv("EODHD_API_KEY", "")
         self._eodhd: EodhdProvider | None = EodhdProvider(api_key=eodhd_key) if eodhd_key else None
+        self._eodhd_realtime: EodhdRealtimeProvider | None = (
+            EodhdRealtimeProvider(api_key=eodhd_key) if eodhd_key else None
+        )
         if not eodhd_key:
             logger.warning("EODHD_API_KEY not set — tactical bar gates will be pass-through")
 
@@ -325,6 +328,7 @@ class Scheduler:
             quote_ttl_seconds=self._config.websocket.quote_ttl_seconds,
             operational_metrics=self._metrics,
             broker_quote_provider=self._market_data_broker_quote_provider,
+            realtime_quote_provider=self._market_data_realtime_quote_provider,
         )
         self._volatility_monitor.set_market_data_hub(self._market_data_hub)
         await self._market_data_hub.warmup()
@@ -343,6 +347,21 @@ class Scheduler:
                 "Scheduler: broker quote provider failed for {} (broker_symbol={}): {}",
                 symbol,
                 broker_symbol,
+                e,
+            )
+            return None
+
+    async def _market_data_realtime_quote_provider(self, symbol: str) -> Any | None:
+        """Resolve EODHD real-time REST quote for degraded market-data fallback."""
+        if self._eodhd_realtime is None:
+            return None
+        try:
+            async with httpx.AsyncClient() as client:
+                return await self._eodhd_realtime.fetch_quote(symbol, client)
+        except Exception as e:
+            logger.debug(
+                "Scheduler: real-time REST quote provider failed for {}: {}",
+                symbol,
                 e,
             )
             return None

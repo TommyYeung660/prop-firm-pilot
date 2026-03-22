@@ -216,6 +216,127 @@ async def test_market_data_hub_prefers_broker_quote_over_websocket_cache() -> No
 
 
 @pytest.mark.asyncio
+async def test_market_data_hub_uses_realtime_rest_quote_when_websocket_is_missing() -> None:
+    now = datetime(2026, 3, 17, 3, 0, 20, tzinfo=timezone.utc)
+    aggregator = FXTickAggregator()
+    quote_time = datetime(2026, 3, 17, 3, 0, 10, tzinfo=timezone.utc)
+    realtime_quote_provider = AsyncMock(
+        return_value={
+            "symbol": "EURUSD",
+            "bid": 1.2001,
+            "ask": 1.2001,
+            "mid": 1.2001,
+            "timestamp_ms": int(quote_time.timestamp() * 1000),
+        }
+    )
+    hub = MarketDataHub(
+        aggregator=aggregator,
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=DummyProvider([]),
+        symbols=["EURUSD"],
+        now_provider=lambda: now,
+        realtime_quote_provider=realtime_quote_provider,
+    )
+
+    result = await hub.get_quote("EURUSD")
+
+    assert result.source == "rest_realtime"
+    assert result.quote is not None
+    assert aggregator.latest_quote("EURUSD") is not None
+    assert aggregator.latest_quote("EURUSD")["timestamp_ms"] == result.quote["timestamp_ms"]
+    realtime_quote_provider.assert_awaited_once_with("EURUSD")
+
+
+@pytest.mark.asyncio
+async def test_market_data_hub_does_not_refeed_duplicate_realtime_quote_timestamp() -> None:
+    now = datetime(2026, 3, 17, 3, 0, 20, tzinfo=timezone.utc)
+    aggregator = FXTickAggregator()
+    quote_time = datetime(2026, 3, 17, 3, 0, 10, tzinfo=timezone.utc)
+    realtime_quote = {
+        "symbol": "EURUSD",
+        "bid": 1.2001,
+        "ask": 1.2001,
+        "mid": 1.2001,
+        "timestamp_ms": int(quote_time.timestamp() * 1000),
+    }
+    realtime_quote_provider = AsyncMock(return_value=realtime_quote)
+    hub = MarketDataHub(
+        aggregator=aggregator,
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=DummyProvider([]),
+        symbols=["EURUSD"],
+        now_provider=lambda: now,
+        realtime_quote_provider=realtime_quote_provider,
+    )
+
+    with patch.object(aggregator, "add_tick", wraps=aggregator.add_tick) as mock_add_tick:
+        first = await hub.get_quote("EURUSD")
+        second = await hub.get_quote("EURUSD")
+
+    assert first.source == "rest_realtime"
+    assert second.source == "rest_realtime"
+    assert mock_add_tick.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_market_data_hub_uses_realtime_rest_fed_ticks_to_build_fresh_5m_bars() -> None:
+    current_now = datetime(2026, 3, 17, 4, 0, 30, tzinfo=timezone.utc)
+    realtime_ticks = [
+        datetime(2026, 3, 17, 4, 0, 10, tzinfo=timezone.utc),
+        datetime(2026, 3, 17, 4, 1, 10, tzinfo=timezone.utc),
+        datetime(2026, 3, 17, 4, 2, 10, tzinfo=timezone.utc),
+        datetime(2026, 3, 17, 4, 3, 10, tzinfo=timezone.utc),
+        datetime(2026, 3, 17, 4, 4, 10, tzinfo=timezone.utc),
+        datetime(2026, 3, 17, 4, 5, 10, tzinfo=timezone.utc),
+    ]
+    realtime_quote_provider = AsyncMock(
+        side_effect=[
+            {
+                "symbol": "EURUSD",
+                "bid": 1.1000 + idx * 0.0001,
+                "ask": 1.1000 + idx * 0.0001,
+                "mid": 1.1000 + idx * 0.0001,
+                "timestamp_ms": int(ts.timestamp() * 1000),
+            }
+            for idx, ts in enumerate(realtime_ticks)
+        ]
+    )
+    provider = DummyProvider(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-17T02:00:00Z"),
+                "open": 1.08,
+                "high": 1.09,
+                "low": 1.07,
+                "close": 1.085,
+                "volume": 0,
+            }
+        ]
+    )
+    hub = MarketDataHub(
+        aggregator=FXTickAggregator(),
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=provider,
+        symbols=["EURUSD"],
+        now_provider=lambda: current_now,
+        realtime_quote_provider=realtime_quote_provider,
+        bar_cache_max_age_seconds=300,
+    )
+
+    for ts in realtime_ticks:
+        current_now = ts + pd.Timedelta(seconds=20)
+        result = await hub.get_quote("EURUSD")
+        assert result.source == "rest_realtime"
+
+    current_now = datetime(2026, 3, 17, 4, 6, 30, tzinfo=timezone.utc)
+    bars = await hub.get_bars("EURUSD", "5m", 10)
+
+    assert bars.source == "websocket_cache"
+    assert not bars.bars.empty
+    assert pd.Timestamp(bars.bars.iloc[-1]["datetime"]) == pd.Timestamp("2026-03-17T04:00:00Z")
+
+
+@pytest.mark.asyncio
 async def test_market_data_hub_prefers_api_cache_for_bars_when_websocket_also_has_data() -> None:
     now = datetime(2026, 3, 17, 4, 5, 1, tzinfo=timezone.utc)
     aggregator = FXTickAggregator()
@@ -393,6 +514,7 @@ async def test_market_data_hub_returns_no_quote_when_rest_fallback_tail_is_still
         symbols=["EURUSD"],
         bar_cache_max_age_seconds=60,
         now_provider=lambda: now,
+        realtime_quote_provider=AsyncMock(return_value=None),
     )
     hub._warm_cache[("EURUSD", "1m")] = pd.DataFrame(
         [

@@ -23,7 +23,7 @@ import pandas as pd
 from loguru import logger
 
 from src.data.fx_tick_aggregator import FXTickAggregator
-from src.data.fx_websocket_client import EODHDFXWebSocketClient
+from src.data.fx_websocket_client import EODHDFXWebSocketClient, WebSocketTick
 from src.monitor.operational_metrics import OperationalMetrics
 
 
@@ -32,7 +32,7 @@ class QuoteResult:
     """Quote lookup result with explicit source metadata."""
 
     symbol: str
-    source: Literal["broker_quote", "websocket_cache", "rest_fallback"]
+    source: Literal["broker_quote", "websocket_cache", "rest_realtime", "rest_fallback"]
     quote: dict[str, Any] | None
 
 
@@ -107,11 +107,13 @@ class MarketDataHub:
         now_provider: Callable[[], datetime] | None = None,
         operational_metrics: OperationalMetrics | None = None,
         broker_quote_provider: Callable[[str], Awaitable[Any | None]] | None = None,
+        realtime_quote_provider: Callable[[str], Awaitable[Any | None]] | None = None,
     ) -> None:
         self._aggregator = aggregator
         self._websocket_client = websocket_client
         self._rest_provider = rest_provider
         self._broker_quote_provider = broker_quote_provider
+        self._realtime_quote_provider = realtime_quote_provider
         self._symbols = list(symbols)
         self._quote_ttl_seconds = quote_ttl_seconds
         self._bar_cache_max_age_seconds = bar_cache_max_age_seconds
@@ -125,6 +127,7 @@ class MarketDataHub:
         self._initialized_at = self._now_provider()
         self._broker_quote_available_by_symbol: dict[str, bool] = {}
         self._broker_quote_error_by_symbol: dict[str, str] = {}
+        self._realtime_quote_timestamp_ms_by_symbol: dict[str, int] = {}
 
     async def warmup(self) -> None:
         """Backfill recent intraday bars into the warm cache for all symbols."""
@@ -161,6 +164,11 @@ class MarketDataHub:
                 if age <= timedelta(seconds=self._quote_ttl_seconds):
                     self._record_market_data_read("websocket_cache")
                     return QuoteResult(symbol=symbol, source="websocket_cache", quote=quote)
+
+        realtime_quote = await self._fetch_realtime_quote(symbol)
+        if realtime_quote is not None:
+            self._feed_realtime_quote(symbol=symbol, quote=realtime_quote)
+            return QuoteResult(symbol=symbol, source="rest_realtime", quote=realtime_quote)
         bars = self._warm_cache.get((symbol, "1m"))
         rows_fetched = 0
         if bars is None or bars.empty or not self._bars_are_fresh(bars, "1m"):
@@ -454,6 +462,49 @@ class MarketDataHub:
             self._broker_quote_error_by_symbol[symbol] = "empty_or_invalid_broker_quote"
             return None
         return normalized
+
+    async def _fetch_realtime_quote(self, symbol: str) -> dict[str, Any] | None:
+        """Fetch and validate an EODHD real-time REST quote when configured."""
+        if self._realtime_quote_provider is None:
+            return None
+        try:
+            raw_quote = await self._realtime_quote_provider(symbol)
+        except Exception as e:
+            logger.warning(
+                "MarketDataHub: real-time REST quote fetch failed for {} ({})",
+                symbol,
+                e,
+            )
+            return None
+
+        normalized = self._normalize_quote_payload(symbol=symbol, payload=raw_quote)
+        if normalized is None:
+            return None
+        timestamp_ms = normalized.get("timestamp_ms")
+        if not isinstance(timestamp_ms, int) or timestamp_ms <= 0:
+            return None
+
+        quote_time = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
+        age = self._now_provider() - quote_time
+        if age > timedelta(seconds=self._quote_ttl_seconds):
+            return None
+
+        return normalized
+
+    def _feed_realtime_quote(self, *, symbol: str, quote: dict[str, Any]) -> None:
+        """Feed a validated real-time REST snapshot into the existing tick aggregator."""
+        timestamp_ms = int(quote["timestamp_ms"])
+        if self._realtime_quote_timestamp_ms_by_symbol.get(symbol) == timestamp_ms:
+            return
+
+        tick = WebSocketTick(
+            symbol=symbol,
+            bid=float(quote["bid"]),
+            ask=float(quote["ask"]),
+            timestamp_ms=timestamp_ms,
+        )
+        self._aggregator.add_tick(tick)
+        self._realtime_quote_timestamp_ms_by_symbol[symbol] = timestamp_ms
 
     def _normalize_quote_payload(
         self,

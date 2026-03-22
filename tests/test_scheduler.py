@@ -2240,6 +2240,17 @@ class TestStartStop:
             engine=mock_engine,
             matchtrader=mock_matchtrader,
         )
+        mock_realtime_provider = MagicMock()
+        mock_realtime_provider.fetch_quote = AsyncMock(
+            return_value={
+                "symbol": "EURUSD",
+                "bid": 1.1001,
+                "ask": 1.1001,
+                "mid": 1.1001,
+                "timestamp_ms": 1774072200000,
+            }
+        )
+        sched._eodhd_realtime = mock_realtime_provider
 
         mock_hub = MagicMock()
         mock_hub.warmup = AsyncMock()
@@ -2247,10 +2258,15 @@ class TestStartStop:
         mock_ws.register_tick_callback = MagicMock()
         mock_ws.run = AsyncMock(return_value=None)
 
+        def _create_task_stub(coro):
+            if hasattr(coro, "close"):
+                coro.close()
+            return MagicMock()
+
         with (
             patch("src.scheduler.scheduler.EODHDFXWebSocketClient", return_value=mock_ws),
             patch("src.scheduler.scheduler.MarketDataHub", return_value=mock_hub) as hub_cls,
-            patch("src.scheduler.scheduler.asyncio.create_task", return_value=MagicMock()),
+            patch("src.scheduler.scheduler.asyncio.create_task", side_effect=_create_task_stub),
         ):
             await sched._initialize_market_data_hub()
 
@@ -2259,6 +2275,10 @@ class TestStartStop:
         assert callable(kwargs["broker_quote_provider"])
         await kwargs["broker_quote_provider"]("EURUSD")
         mock_matchtrader.get_quote.assert_awaited_once_with("EURUSD")
+        assert "realtime_quote_provider" in kwargs
+        assert callable(kwargs["realtime_quote_provider"])
+        await kwargs["realtime_quote_provider"]("EURUSD")
+        mock_realtime_provider.fetch_quote.assert_awaited_once()
 
 
 # ── Helper Method Tests ─────────────────────────────────────────────────────

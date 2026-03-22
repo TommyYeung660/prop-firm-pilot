@@ -22,6 +22,7 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - stale / previous-day intraday bars 現在會在 scanner admission fail closed，不再被誤當成 startup retryable
 - tactical retry expiry 對 `atr.fail.insufficient_1h_data`、freshness 類 wait 不再 degrade 到 execution
 - retry-expiry degrade 現在會寫出標準化 `TACTICAL_RESULT resolution=EXECUTE_DEGRADED`，讓 metrics snapshot 與 prod bundle summary 對齊
+- websocket 退化時的 market-data quote continuity 現在會先走 `EODHD real-time REST`，再退到 intraday REST，讓 `FXTickAggregator` 可持續關閉 `1m/5m/1h` bars，同時維持 fail-closed
 
 #### Changed
 - project version identity 將從 `1.5.0_preview` / `1.5.0rc0` 升到 `1.5.0_preview_2` / `1.5.0rc1`

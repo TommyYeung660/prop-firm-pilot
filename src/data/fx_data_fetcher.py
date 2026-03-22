@@ -670,6 +670,97 @@ class EodhdProvider(FxDataProvider):
         return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
 
 
+class EodhdRealtimeProvider:
+    """EODHD Real-Time REST API for snapshot quotes.
+
+    Endpoint: GET https://eodhd.com/api/real-time/{SYMBOL}.FOREX
+
+    Usage:
+        provider = EodhdRealtimeProvider(api_key="YOUR_KEY")
+        async with httpx.AsyncClient() as http:
+            quote = await provider.fetch_quote("EURUSD", http)
+    """
+
+    def __init__(self, api_key: str, max_retries: int = 3) -> None:
+        self._api_key = api_key
+        self._max_retries = max_retries
+
+    @property
+    def name(self) -> str:
+        return "eodhd_realtime"
+
+    async def fetch_quote(
+        self,
+        symbol: str,
+        client: httpx.AsyncClient,
+    ) -> dict[str, float | int | str] | None:
+        """Fetch a single normalized snapshot quote from EODHD real-time REST."""
+        eodhd_sym = _to_eodhd_symbol(symbol)
+        url = f"{_EODHD_API_BASE}/api/real-time/{eodhd_sym}"
+        params = {
+            "fmt": "json",
+            "api_token": self._api_key,
+        }
+
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                response = await client.get(url, params=params, timeout=30.0)
+
+                if response.status_code == 429:
+                    wait = 2**attempt
+                    logger.warning(
+                        "EODHD real-time: rate limited, waiting {}s (attempt {})",
+                        wait,
+                        attempt,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+
+                if response.status_code != 200:
+                    logger.error(
+                        "EODHD real-time: HTTP {} for {}: {}",
+                        response.status_code,
+                        symbol,
+                        response.text[:300],
+                    )
+                    await asyncio.sleep(2**attempt)
+                    continue
+
+                data = response.json()
+                if not isinstance(data, dict):
+                    return None
+
+                close = data.get("close")
+                timestamp = data.get("timestamp")
+                try:
+                    close_f = float(close)
+                    timestamp_ms = int(timestamp) * 1000
+                except (TypeError, ValueError):
+                    return None
+                if close_f <= 0 or timestamp_ms <= 0:
+                    return None
+
+                return {
+                    "symbol": symbol,
+                    "bid": close_f,
+                    "ask": close_f,
+                    "mid": close_f,
+                    "timestamp_ms": timestamp_ms,
+                }
+            except httpx.HTTPError as e:
+                wait = 2**attempt
+                logger.warning(
+                    "EODHD real-time: network error '{}', retry in {}s (attempt {})",
+                    e,
+                    wait,
+                    attempt,
+                )
+                await asyncio.sleep(wait)
+
+        logger.error("EODHD real-time: failed after {} retries for {}", self._max_retries, symbol)
+        return None
+
+
 # ── Factory ─────────────────────────────────────────────────────────────────
 
 

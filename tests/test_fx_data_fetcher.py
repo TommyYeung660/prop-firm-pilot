@@ -8,6 +8,7 @@ import respx
 
 from src.data.fx_data_fetcher import (
     EodhdProvider,
+    EodhdRealtimeProvider,
     ITickProvider,
     TraderMadeProvider,
     _to_eodhd_symbol,
@@ -271,6 +272,64 @@ async def test_eodhd_fetch_bars_1h():
     url_str = str(request.url)
     assert "interval=1h" in url_str
     assert "api_token=test_key" in url_str
+
+
+@respx.mock
+async def test_eodhd_realtime_fetch_quote_normalizes_snapshot():
+    """EODHD real-time REST quote should normalize snapshot payload."""
+    provider = EodhdRealtimeProvider(api_key="test_key")
+    route = respx.get("https://eodhd.com/api/real-time/EURUSD.FOREX").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "EURUSD.FOREX",
+                "timestamp": 1774072200,
+                "gmtoffset": 0,
+                "open": 1.0820,
+                "high": 1.0830,
+                "low": 1.0810,
+                "close": 1.0825,
+                "volume": 0,
+            },
+        )
+    )
+
+    async with httpx.AsyncClient() as client:
+        quote = await provider.fetch_quote("EURUSD", client)
+
+    assert route.called
+    assert quote == {
+        "symbol": "EURUSD",
+        "bid": 1.0825,
+        "ask": 1.0825,
+        "mid": 1.0825,
+        "timestamp_ms": 1774072200000,
+    }
+
+
+@respx.mock
+async def test_eodhd_realtime_fetch_quote_returns_none_for_invalid_payload():
+    """Malformed real-time payload should be treated as unavailable."""
+    provider = EodhdRealtimeProvider(api_key="test_key")
+    respx.get("https://eodhd.com/api/real-time/EURUSD.FOREX").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": "EURUSD.FOREX",
+                "timestamp": 1774072200,
+                "gmtoffset": 0,
+                "open": 1.0820,
+                "high": 1.0830,
+                "low": 1.0810,
+                "volume": 0,
+            },
+        )
+    )
+
+    async with httpx.AsyncClient() as client:
+        quote = await provider.fetch_quote("EURUSD", client)
+
+    assert quote is None
 
 
 @respx.mock
