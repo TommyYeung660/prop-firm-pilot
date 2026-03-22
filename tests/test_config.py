@@ -320,6 +320,18 @@ def test_runbook_does_not_reference_nonexistent_literal_config_files() -> None:
     assert not missing, f"runbook references missing config file(s): {missing}"
 
 
+def test_env_example_tradelocker_api_url_includes_backend_api_path() -> None:
+    content = _read_repo_file(".env.example")
+    match = re.search(r"^TRADELOCKER_API_URL=(?P<url>\S+)$", content, flags=re.MULTILINE)
+    assert match is not None, "TRADELOCKER_API_URL must exist in .env.example"
+
+    url = match.group("url")
+    assert "/backend-api" in url, (
+        "TRADELOCKER_API_URL in .env.example must include '/backend-api' "
+        "to match runtime endpoint shape"
+    )
+
+
 def test_readme_mentions_backend_selection_and_tradelocker_path() -> None:
     content = _read_repo_file("README.md")
     normalized = content.lower()
