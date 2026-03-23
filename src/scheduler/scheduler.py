@@ -3324,6 +3324,96 @@ class Scheduler:
         meta_json = json.dumps(meta, default=str)
         self._store.update_execution_meta(intent.id, meta_json)
 
+    def _format_tactical_exit_alert_message(
+        self,
+        *,
+        pos: Any,
+        intent: TradeIntent,
+        decision: Any,
+        outcome: CloseOutcome,
+        close_volume: float | None,
+    ) -> str:
+        """Build the Telegram alert payload for a successful tactical exit action."""
+        symbol = intent.symbol
+        side = str(getattr(pos, "side", "")).upper()
+        position_id = str(getattr(pos, "position_id", ""))
+        position_volume = self._coerce_numeric(getattr(pos, "volume", 0.0), fallback=0.0)
+        precision = self._price_precision_for_symbol(symbol)
+
+        def _format_price(price: float | None) -> str:
+            if price is None:
+                return "n/a"
+            if precision is None:
+                return f"{float(price):.5f}"
+            return f"{float(price):.{precision}f}"
+
+        lines = [
+            "🛡️ <b>Tactical Exit</b>",
+            f"• Action: <b>{decision.action}</b>",
+            f"• {symbol} {side} {position_volume:.2f} lots",
+            f"• Position: {position_id}",
+            f"• State: {decision.state}",
+            f"• Reason: {decision.reason}",
+            f"• Status: {outcome.execution_status}",
+        ]
+
+        if decision.action == "MOVE_TO_BREAKEVEN":
+            lines.append(f"• SL → { _format_price(decision.new_sl) }")
+        elif decision.action == "TRAIL_SL":
+            lines.append(f"• SL → { _format_price(decision.new_sl) }")
+            if decision.new_tp is not None:
+                lines.append(f"• TP → { _format_price(decision.new_tp) }")
+        elif decision.action == "REPRICE_TP":
+            lines.append(f"• TP → { _format_price(decision.new_tp) }")
+        elif decision.action == "PARTIAL_CLOSE":
+            executed_volume = close_volume if close_volume is not None else 0.0
+            lines.append(f"• Close Volume: {executed_volume:.2f} lots")
+        elif decision.action == "EXIT_NOW":
+            lines.append(f"• Close Volume: {position_volume:.2f} lots")
+
+        return "\n".join(lines)
+
+    async def _send_tactical_exit_action_alert(
+        self,
+        *,
+        pos: Any,
+        intent: TradeIntent,
+        decision: Any,
+        outcome: CloseOutcome,
+        close_volume: float | None,
+    ) -> None:
+        """Send one tactical exit success alert with duplicate suppression."""
+        if self._alert_service is None:
+            return
+
+        summary_parts = [
+            "tactical_exit",
+            str(decision.action),
+            str(getattr(pos, "position_id", "")),
+            str(decision.reason),
+            str(outcome.execution_status),
+        ]
+        if decision.new_sl is not None:
+            summary_parts.append(f"sl={decision.new_sl}")
+        if decision.new_tp is not None:
+            summary_parts.append(f"tp={decision.new_tp}")
+        if close_volume is not None:
+            summary_parts.append(f"close={close_volume:.4f}")
+
+        alert_summary = "|".join(summary_parts)
+        now = self._now_utc()
+        if not self._should_send_tactical_alert(intent.id, alert_summary, now):
+            return
+
+        message = self._format_tactical_exit_alert_message(
+            pos=pos,
+            intent=intent,
+            decision=decision,
+            outcome=outcome,
+            close_volume=close_volume,
+        )
+        await self._send_alert(message)
+
     def _update_close_control_meta(
         self,
         intent: TradeIntent,
@@ -3514,6 +3604,13 @@ class Scheduler:
         elif decision.action == "EXIT_NOW":
             action_payload["volume"] = pos.volume
         self._log_trade_event("TACTICAL_EXIT_ACTION", action_payload)
+        await self._send_tactical_exit_action_alert(
+            pos=pos,
+            intent=intent,
+            decision=decision,
+            outcome=outcome,
+            close_volume=close_volume,
+        )
 
     async def _run_tactical_exit_cycle(
         self,

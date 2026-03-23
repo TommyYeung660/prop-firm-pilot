@@ -351,3 +351,102 @@ async def test_exit_now_closes_full_position_and_persists_meta(
         and entry.get("action_kind") == "full_close"
         for entry in entries
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("decision", "expected_snippets"),
+    [
+        (
+            TacticalExitDecision(
+                action="MOVE_TO_BREAKEVEN",
+                state="PROTECTION",
+                reason="breakeven_threshold_reached",
+                new_sl=1.1000,
+            ),
+            ["Tactical Exit", "MOVE_TO_BREAKEVEN", "EURUSD", "POS-1", "1.10000"],
+        ),
+        (
+            TacticalExitDecision(
+                action="TRAIL_SL",
+                state="TREND_EXTENSION",
+                reason="atr_trailing_stop_improved",
+                new_sl=1.1032149,
+                new_tp=1.1098761,
+            ),
+            ["Tactical Exit", "TRAIL_SL", "EURUSD", "1.10321", "1.10988"],
+        ),
+        (
+            TacticalExitDecision(
+                action="REPRICE_TP",
+                state="TREND_EXTENSION",
+                reason="dynamic_take_profit_repriced",
+                new_tp=1.1098761,
+            ),
+            ["Tactical Exit", "REPRICE_TP", "EURUSD", "POS-1", "1.10988"],
+        ),
+        (
+            TacticalExitDecision(
+                action="PARTIAL_CLOSE",
+                state="PROFIT_PROTECTION",
+                reason="profit_protection_partial_close",
+                partial_close_ratio=0.5,
+            ),
+            ["Tactical Exit", "PARTIAL_CLOSE", "EURUSD", "POS-1", "0.05"],
+        ),
+        (
+            TacticalExitDecision(
+                action="EXIT_NOW",
+                state="INITIAL_RISK",
+                reason="initial_risk_structure_failure",
+            ),
+            ["Tactical Exit", "EXIT_NOW", "EURUSD", "POS-1", "0.10"],
+        ),
+    ],
+)
+async def test_tactical_exit_success_actions_send_alerts(
+    scheduler: Scheduler,
+    store: DecisionStore,
+    mock_matchtrader: AsyncMock,
+    decision: TacticalExitDecision,
+    expected_snippets: list[str],
+) -> None:
+    """Successful tactical exit actions should emit Telegram alerts."""
+    position = _make_position()
+    intent = _insert_opened_intent(store)
+    scheduler._alert_service = AsyncMock()
+    scheduler._alert_service.send = AsyncMock(return_value=True)
+    evaluation = TacticalExitEvaluation(decision=decision)
+
+    await scheduler._execute_tactical_exit_action(position, intent, evaluation)
+
+    scheduler._alert_service.send.assert_awaited_once()
+    message = scheduler._alert_service.send.await_args.args[0]
+    for snippet in expected_snippets:
+        assert snippet in message
+
+
+@pytest.mark.asyncio
+async def test_tactical_exit_verify_failed_does_not_send_success_alert(
+    scheduler: Scheduler,
+    store: DecisionStore,
+    mock_matchtrader: AsyncMock,
+) -> None:
+    """Read-back verification failures must not emit success alerts."""
+    position = _make_position()
+    intent = _insert_opened_intent(store)
+    scheduler._alert_service = AsyncMock()
+    scheduler._alert_service.send = AsyncMock(return_value=True)
+    mock_matchtrader.verify_sl_tp.return_value = False
+    evaluation = TacticalExitEvaluation(
+        decision=TacticalExitDecision(
+            action="MOVE_TO_BREAKEVEN",
+            state="PROTECTION",
+            reason="breakeven_threshold_reached",
+            new_sl=position.open_price,
+        )
+    )
+
+    await scheduler._execute_tactical_exit_action(position, intent, evaluation)
+
+    scheduler._alert_service.send.assert_not_awaited()
