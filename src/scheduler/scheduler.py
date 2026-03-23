@@ -3517,6 +3517,10 @@ class Scheduler:
             open_positions: Currently open positions from MatchTrader.
             opened_intents: Intents in "opened" state from the store.
         """
+        if not self._config.agents.enabled:
+            logger.debug("Skipping re-evaluation — TradingAgents disabled")
+            return
+
         # Skip entirely if using mock agents
         if self._agents.using_mock:
             logger.debug("Skipping re-evaluation — using mock agents")
@@ -4436,11 +4440,14 @@ class Scheduler:
 
     def _entry_funnel_mode(self) -> str:
         """Return active entry-funnel runtime mode."""
-        return self._config.scheduler.entry_funnel_mode
+        configured_mode = self._config.scheduler.entry_funnel_mode
+        if not self._config.agents.enabled and configured_mode == "scanner_llm_tactical":
+            return "scanner_tactical"
+        return configured_mode
 
     def _uses_llm(self) -> bool:
         """Return whether current entry funnel requires LLM strategic decisions."""
-        return self._entry_funnel_mode() == "scanner_llm_tactical"
+        return self._config.agents.enabled and self._entry_funnel_mode() == "scanner_llm_tactical"
 
     @classmethod
     def _scanner_side_to_decision(cls, scanner_side: str | None) -> str | None:

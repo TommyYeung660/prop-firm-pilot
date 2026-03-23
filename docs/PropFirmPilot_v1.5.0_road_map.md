@@ -1,12 +1,12 @@
 # PropFirmPilot v1.5.0 之後 — `v1.5.0` 到 `v1.5.9` 單一入口路線圖
 
-> **更新日期**: `2026-03-18`
+> **更新日期**: `2026-03-22`
 >
 > **文件角色**: `v1.5.0` 到 `v1.5.9` 的唯一入口 roadmap
 >
 > **適用範圍**: `prop-firm-pilot` 主線規劃，並直接納入 `qlib_market_scanner` / `qlib_rd_agent` / `TradingAgents` 的必要依賴
 >
-> **當前主線狀態**: `v1.5.0_preview` 已於 `2026-03-18` 對齊目前 `main` 的最新 preview 主線基線：bounded capital utilization uplift preview、preview incident remediation（Best Day semantics、compliance admission、market-data routing、scanner success contract、Telegram fallback）、side-aware scanner live activation（`fx_signal_v2`、`topk_short = 1`、direction-aware gating），以及 first-batch JPY cross rollout（`EURJPY`、`AUDJPY`、`CADJPY` + dynamic JPY pip-value live sizing）；`v1.5.0_stable` 仍待 open-book worst-case natural-SL drawdown guard、exposure / memory / validation acceptance closure
+> **當前主線狀態**: `v1.5.0_preview_2` 已於 `2026-03-22` 對齊目前 `main` 的最新 preview 主線基線：bounded capital utilization uplift preview、preview incident remediation（Best Day semantics、compliance admission、market-data routing、scanner success contract、Telegram fallback）、first-batch JPY cross rollout（`EURJPY`、`AUDJPY`、`CADJPY` + dynamic JPY pip-value live sizing）、side-aware scanner live activation（`fx_signal_v2`、`topk_short = 1`、direction-aware gating），以及 `preview_2` runtime repair（stale intraday fail-closed、retry-expiry correctness、`EODHD real-time REST` continuity fallback）；`v1.5.0_stable` 仍待 open-book worst-case natural-SL drawdown guard、exposure / memory / validation acceptance closure
 >
 > **閱讀原則**: 若你只想知道 `1.5.0` 到 `1.5.9` 應做什麼，先看這份；不需要先回頭讀複數文檔
 
@@ -38,6 +38,7 @@
 | 類別 | 已完成內容 | 來源版本 / 狀態 |
 |---|---|---|
 | **Market data baseline** | `broker quote-first + API bars-first + websocket auxiliary` hybrid routing、warm-cache、degraded summary 已落地 | `v1.5.0_preview` remediation |
+| **Market data continuity fallback** | websocket 退化時，quote continuity 已補上 `EODHD real-time REST -> intraday REST -> fail-closed`；real-time snapshots 會回餵 aggregator 持續關閉 `1m/5m/1h` bars | `v1.5.0_preview_2` runtime repair |
 | **Freshness semantics** | effective close time freshness、stale tactical warning throttling 已落地 | `v1.4.9` |
 | **Close control plane** | canonical close schema、`CloseControlPlane`、`CloseReconciler` 已落地 | `v1.4.8` |
 | **Scanner contract gate** | `manifest/schema/version/validation` 檢查、required signal columns 驗證已落地 | `v1.5.0_beta` |
@@ -49,7 +50,7 @@
 | **Side-aware scanner live ingestion** | `fx_signal_v2`、`scanner_side` persistence、direction-aware ranking / threshold / veto、legacy daily-cycle parity guard 已落地 | `v1.5.0_preview` acceptance window |
 | **JPY first-batch universe rollout** | runtime/scanner 已擴到 10-pair first batch，新增 `EURJPY`、`AUDJPY`、`CADJPY`；`GBPJPY`、`NZDJPY`、`CHFJPY` 仍 deferred | `2026-03-18` rollout |
 | **Dynamic JPY pip-value sizing** | `USDJPY` 與 `*JPY` quote pairs live sizing 改由 `USDJPY` quote 解析 USD pip value，不再只依賴靜態 YAML pip value | `2026-03-18` rollout |
-| **Version identity baseline** | `qlib_market_scanner` 的 scanner contract baseline 已凍結在 `1.5.0_beta` / `v1.5.0_beta`；`prop-firm-pilot` 主線則已 bump 到 `1.5.0_preview` / `v1.5.0_preview`，明確標記 bounded uplift preview lane | `v1.5.0_beta` → `v1.5.0_preview` |
+| **Version identity baseline** | `qlib_market_scanner` 的 scanner contract baseline 已凍結在 `1.5.0_beta` / `v1.5.0_beta`；`prop-firm-pilot` 主線則已 bump 到 `1.5.0_preview_2` / `v1.5.0_preview_2`，包裝版本為 `1.5.0rc1` | `v1.5.0_beta` → `v1.5.0_preview_2` |
 | **FX scanner release cadence decision** | upstream 已完成第一輪 FX cadence research，canonical cadence 凍結為 `1d` | `qlib_market_scanner v1.5.0_beta` |
 | **Runtime bundle family isolation** | runtime `outputs/*` 與 legacy `data/shared_export/*` 已分流，不再混讀 sidecars | `v1.5.0_beta` |
 
@@ -81,18 +82,22 @@
 | **P1** | incident diagnostics closure：`bars_5m_unavailable` 類 incident 現在會帶出 market-data hub 初始化時間、uptime 與 per-symbol websocket closed bar counts |
 | **P2** | account config tuning / ergonomics：`e8_one_5k_challenge` 已把 off-hours scanner cadence 下調到 `3600s`，並按「高頻常調 / 低頻基礎」重排 YAML 結構與中文註解 |
 
-### 2.3 `v1.5.0_preview` incident remediation 已成為 stable 前 correctness hardening baseline
+### 2.3 `v1.5.0_preview` / `v1.5.0_preview_2` correctness 與 runtime hardening 已成為 stable 前 baseline
 
-根據 `prod_logs_20260318_v1.5.0_preview` 的 incident review，preview lane 雖已完成 bounded capital utilization uplift，但仍暴露出一組不能留到 stable 才處理的 correctness defects。這輪 remediation 已在本 repo 實作完成，stable gate 應視其為 baseline，而不是待選 enhancement。
+根據 `prod_logs_20260318_v1.5.0_preview` 與 `prod_logs_20260319_v1.5.0_preview_2` 的 incident review，preview lane 雖已完成 bounded capital utilization uplift，但仍暴露出一組不能留到 stable 才處理的 correctness defects 與 runtime continuity 問題。這兩輪 remediation / repair 已在本 repo 實作完成，stable gate 應視其為 baseline，而不是待選 enhancement。
 
-| 嚴重度 | `v1.5.0_preview` remediation 已納入的 corrective actions |
+| 嚴重度 | `v1.5.0_preview` / `v1.5.0_preview_2` 已納入的 corrective actions |
 |---|---|
 | **P0** | `Best Day Rule` 新單 gate 改為 actual `daily_pnl` only，禁止 hypothetical TP profit 造成 no-trade false reject |
 | **P0** | deterministic compliance headroom 前移到 candidate / intent creation，避免必定被拒的單子仍完整跑過 tactical / execution |
 | **P0** | tactical hard-gate observability 已拆開 `spread`、`atr_regime`、`data_freshness`，並可對 USDCAD spread / ATR warmup 做後續 calibration review |
+| **P0** | stale / previous-day intraday bars 現在會在 scanner admission fail closed，不再被誤當成 startup retryable |
+| **P0** | tactical retry expiry 對 freshness / `atr.fail.insufficient_1h_data` 類 wait 不再 degrade 到 execution |
 | **P1** | market-data routing 改為 `broker quote-first + API bars-first + websocket auxiliary`，websocket degraded 不再單獨 hard-block 系統 |
+| **P1** | websocket degraded 時，quote continuity 現在會先走 `EODHD real-time REST`，再退到 intraday REST，並把 snapshot 回餵 `FXTickAggregator` 以持續形成 fresh bars |
 | **P1** | scanner success contract 改為 process + artifact + ingestion + `target_date` matched 才算 success |
 | **P1** | Telegram send 補上 retry accounting、failure metrics 與 secondary sink；primary channel 失效時至少寫入 `ALERT_FALLBACK` journal event |
+| **P1** | retry-expiry degrade 現在會寫出標準化 `TACTICAL_RESULT resolution=EXECUTE_DEGRADED`，避免 attribution drift |
 
 這輪 remediation 的關鍵 evidence 如下：
 
@@ -189,7 +194,7 @@
 | 版本 | 角色 | 主軸 |
 |---|---|---|
 | `1.5.0_beta_2` | beta hardening repair gate | 已收斂 freshness、stale signals、tactical timeout、monitor / alert hardening，並補齊 market-data diagnostics 與 account config tuning |
-| `1.5.0_preview` | bounded uplift + incident remediation preview lane | 先落地 bounded capital utilization uplift，再吸收 preview incident remediation，形成 stable 前的最新 correctness baseline |
+| `1.5.0_preview_2` | bounded uplift + remediation + runtime repair preview lane | 在 bounded capital utilization uplift、preview incident remediation 之上，再補 stale-data fail-closed 與 `EODHD real-time REST` continuity fallback，形成 stable 前的最新 preview baseline |
 | `1.5.0` | 第一個 stable acceptance gate | 把 preview uplift 與 preview remediation 一起納入 entry / exit / memory / exposure / validation 的整體驗收，形成第一個可保守稱為 stable 的 release |
 | `1.5.1` | post-stable correctness sweep | 修正 first stable run 暴露的 correctness 與 taxonomy drift |
 | `1.5.2` | validation accumulation | 強化 live-vs-research consistency 與 multi-day acceptance evidence |
@@ -243,16 +248,17 @@
 - `bars_5m_unavailable` 類 incident 可直接看出 market-data hub uptime 與 websocket closed bar accumulation 狀態
 - `config/e8_one_5k_challenge.yaml` 已可按高頻調參 / 低頻基礎兩種操作場景直接維護，且淡時段 scanner cadence 降為 `3600s`
 
-### 5.5 `v1.5.0_preview` — Current Mainline Preview Baseline
+### 5.5 `v1.5.0_preview_2` — Current Mainline Preview Baseline
 
-`v1.5.0_preview` 建立在 `v1.5.0_beta_2` 的 operational repair baseline 上，但到目前 `main` 為止，它已不再只是單一 uplift preview lane。最新 preview baseline 是四個已整合子項的集合：
+`v1.5.0_preview_2` 建立在 `v1.5.0_beta_2` 的 operational repair baseline 上，但到目前 `main` 為止，它已不再只是單一 uplift preview lane。最新 preview baseline 是五個已整合子項的集合：
 
 - bounded capital utilization uplift preview
 - `2026-03-18` preview incident remediation baseline
+- `2026-03-19` preview_2 runtime repair baseline
 - side-aware scanner live activation
 - first-batch JPY cross rollout with dynamic JPY pip-value live sizing
 
-它的角色是把這四個已落地主題先收斂成同一個可驗證的 preview mainline，再交由 `v1.5.0 stable` 做 integrated acceptance，而不是直接把整個 stable gate 宣稱完成。
+它的角色是把這五個已落地主題先收斂成同一個可驗證的 preview mainline，再交由 `v1.5.0 stable` 做 integrated acceptance，而不是直接把整個 stable gate 宣稱完成。
 
 這一版在本 repo 已落地：
 
@@ -262,6 +268,9 @@
 - `PropFirmGuard` / execution-side Best Day gate 已對齊 actual `daily_pnl` semantics，no-trade / zero-PnL 情境不再被 hypothetical TP potential profit 錯擋
 - deterministic compliance headroom 已前移到 candidate / intent creation，必定被拒的 setup 不再白跑 tactical / execution
 - market-data live path 已改為 `broker quote-first + API bars-first + websocket auxiliary`；websocket degraded 不再單獨 hard-block 全系統
+- quote continuity 在 websocket stale / missing 時，現在會先走 `EODHD real-time REST`，再退到 intraday REST；real-time snapshot 也會回餵 `FXTickAggregator` 持續形成 fresh `1m/5m/1h` bars
+- stale / previous-day intraday bars 現在會在 scanner admission fail closed，不再被誤當成 startup retryable
+- tactical retry expiry 對 freshness / `atr.fail.insufficient_1h_data` 不再 degrade 到 execution，且 attribution 會寫出標準化 `TACTICAL_RESULT resolution=EXECUTE_DEGRADED`
 - `ScannerBridge.run_pipeline()` success contract 已收緊為 process + artifact + ingestion + `target_date` matched
 - Telegram alert path 已補上 retry accounting、failure metrics 與 `ALERT_FALLBACK` secondary sink
 - live scanner path 已啟用 side-aware ingestion：`ScannerBridge` 支援 `fx_signal_v2`、`TradeIntent` / SQLite 持久化 `scanner_side`、scheduler 以 direction-aware quality 排序 mixed long/short bundles
@@ -272,7 +281,7 @@
 - `TradingAgents` FX pair context 已新增 `EURJPY`、`AUDJPY`、`CADJPY` 的 description / macro drivers / ADR / session bias
 - JPY-quoted pairs 現在會在 live sizing 中以 `USDJPY` quote 解析 USD pip value，覆蓋 `USDJPY / EURJPY / AUDJPY / CADJPY`，避免只依賴靜態 YAML pip value
 - first-batch rollout 目前明確只包含 `EURJPY`、`AUDJPY`、`CADJPY`；`GBPJPY`、`NZDJPY`、`CHFJPY` 仍 deferred，不屬於當前 preview baseline
-- 專案 version identity 已切到 `1.5.0_preview` / `v1.5.0_preview`，包裝版本為 `1.5.0rc0`
+- 專案 version identity 已切到 `1.5.0_preview_2` / `v1.5.0_preview_2`，包裝版本為 `1.5.0rc1`
 
 這一版同時建立在已核對的 upstream 事實上：
 
@@ -306,13 +315,13 @@
 
 `v1.5.0` 是第一個 stable milestone，不是新 feature 大包。
 
-它的任務是把 `v1.5.0_beta` 已經吸收進主線的 scanner contract、version identity 與 `1d` cadence baseline，加上 `v1.5.0_preview` 已落地的 bounded capital utilization uplift 與 `2026-03-18` preview incident remediation，經過 `v1.5.0_beta_2` repair gate 後，升級成可以被保守驗收的 stable trading system gate。
+它的任務是把 `v1.5.0_beta` 已經吸收進主線的 scanner contract、version identity 與 `1d` cadence baseline，加上 `v1.5.0_preview_2` 已落地的 bounded capital utilization uplift、`2026-03-18` preview incident remediation、以及 `2026-03-19` preview_2 runtime repair，經過 `v1.5.0_beta_2` repair gate 後，升級成可以被保守驗收的 stable trading system gate。
 
 ### 6.2 本 repo 主責
 
 - 完成 tactical entry production-grade closure
 - 完成 tactical exit audit / read-back / postmortem closure
-- 將 preview 已落地的 bounded capital utilization uplift 納入 stable acceptance，並證明 Best Day / compliance admission / market-data / scanner / alert remediation 沒有回退
+- 將 preview 已落地的 bounded capital utilization uplift 納入 stable acceptance，並證明 Best Day / compliance admission / market-data / scanner / alert remediation，以及 `preview_2` 的 stale-data / retry-expiry / real-time REST continuity repair 都沒有回退
 - 上線 portfolio-level open-risk reservation / daily drawdown budget guard，保證 tactical exit 不介入時的 worst-case natural-SL 組合損失不穿透 `daily_drawdown_stop`
 - 上線 exposure guard v1
 - 上線 trade-memory v1 與 quality gate v1
@@ -337,7 +346,7 @@
 ### 6.5 完成條件
 
 - `v1.5.0_beta_2` 所定義的 P0 / P1 repair 已先收斂
-- `2026-03-18` preview remediation 所定義的 Best Day、compliance admission、market-data routing、scanner success contract、Telegram fallback 修正已經過 multi-day regression-free validation
+- `2026-03-18` preview remediation 與 `2026-03-19` preview_2 runtime repair 所定義的 Best Day、compliance admission、market-data routing、stale-data fail-closed、retry-expiry semantics、scanner success contract、Telegram fallback 修正已經過 multi-day regression-free validation
 - entry verdict 有完整 deterministic reason taxonomy
 - exit action 有完整 broker read-back 與 canonical close facts
 - bounded capital utilization uplift 已完成 stable acceptance，且未削弱 safety-critical guard
@@ -566,6 +575,8 @@
 - runtime bundle contract 已可被 pilot 可靠 ingest
 - close control plane 已建立
 - market data freshness semantics 已收斂
+- `v1.5.0_preview_2` runtime repair 已進主線
+- `EODHD real-time REST` continuity fallback 已進主線
 - `v1.5.0_beta_2` 的 repair scope 已被明確定義
 - bounded capital utilization uplift preview 已在本 repo 落地
 - side-aware scanner live activation 已在 preview acceptance window 落地
@@ -586,7 +597,7 @@
 `1.5.x` 的角色不是大改世界觀，而是：
 
 - 讓 `v1.5.0 stable` 真正站穩
-- 先經過 `v1.5.0_beta_2` repair，再把 `v1.5.0_preview` 的 bounded uplift 與 side-aware scanner live path 一起納入 stable acceptance，之後補 memory 與 bounded research productization
+- 先經過 `v1.5.0_beta_2` repair，再把 `v1.5.0_preview_2` 的 bounded uplift、incident remediation、runtime continuity repair 與 side-aware scanner live path 一起納入 stable acceptance，之後補 memory 與 bounded research productization
 - 累積足夠證據，決定 `1.6.0` 要往哪裡走
 
 ---
@@ -595,4 +606,4 @@
 
 如果只用一句話描述這份 roadmap：
 
-> `v1.5.0_beta_2` 先做 operational repair；`v1.5.0_preview` 先落地 bounded capital utilization uplift 與 side-aware scanner live activation；`v1.5.0` 再完成第一個 stable acceptance gate；之後的 `1.5.1-1.5.9` 才沿著 correctness、validation、memory、capital efficiency 與 bounded follow-up 繼續推進。`
+> `v1.5.0_beta_2` 先做 operational repair；`v1.5.0_preview_2` 在 bounded capital utilization uplift、incident remediation、side-aware live activation、JPY first-batch rollout 之上，再補齊 stale-data fail-closed 與 `EODHD real-time REST` continuity fallback；`v1.5.0` 再完成第一個 stable acceptance gate；之後的 `1.5.1-1.5.9` 才沿著 correctness、validation、memory、capital efficiency 與 bounded follow-up 繼續推進。`

@@ -39,7 +39,7 @@ from loguru import logger
 
 from src.compliance.prop_firm_guard import AccountSnapshot, PropFirmGuard, TradePlan
 from src.config import AppConfig, load_config
-from src.decision.agent_bridge import AgentBridge
+from src.decision.agent_bridge import AgentBridge, AgentDecision
 from src.decision.fx_analyst_config import build_agent_config
 from src.execution.broker_factory import build_broker_client
 from src.execution.broker_protocol import BrokerClientProtocol
@@ -177,6 +177,16 @@ class PropFirmPilot:
             return round(1.0 - score, 6)
         return score
 
+    @classmethod
+    def _scanner_side_to_decision(cls, scanner_side: str | None) -> str | None:
+        """Map scanner-side labels into executable trade directions."""
+        normalized_side = cls._normalize_scanner_side(scanner_side)
+        if normalized_side == "long":
+            return "BUY"
+        if normalized_side == "short":
+            return "SELL"
+        return None
+
     def _select_top_signals(self, signals: list[Any]) -> list[Any]:
         """Select top signals for daily-cycle mode.
 
@@ -274,18 +284,37 @@ class PropFirmPilot:
             # Step 4: Run TradingAgents decisions on top signals
             top_signals = self._select_top_signals(signals)
             for signal in top_signals:
-                qlib_data = signal.to_qlib_data()
-                decision = self.agents.decide(
-                    symbol=signal.instrument,
-                    trade_date=today,
-                    qlib_data=qlib_data,
-                )
+                scanner_side = self._signal_scanner_side(signal)
+                if self.config.agents.enabled:
+                    qlib_data = signal.to_qlib_data()
+                    decision = self.agents.decide(
+                        symbol=signal.instrument,
+                        trade_date=today,
+                        qlib_data=qlib_data,
+                    )
+                else:
+                    routed_decision = self._scanner_side_to_decision(scanner_side)
+                    if routed_decision is None:
+                        logger.warning(
+                            "PropFirmPilot: {} skipped — TradingAgents disabled "
+                            "but scanner side unavailable",
+                            signal.instrument,
+                        )
+                        continue
+                    decision = AgentDecision(
+                        symbol=signal.instrument,
+                        decision=routed_decision,
+                        final_state={
+                            "entry_funnel_mode": "scanner_tactical",
+                            "decision_source": "scanner_side",
+                        },
+                        risk_report=f"scanner_tactical:{scanner_side}",
+                    )
 
                 if not decision.is_actionable:
                     logger.info("PropFirmPilot: {} → HOLD, skipping", signal.instrument)
                     continue
 
-                scanner_side = self._signal_scanner_side(signal)
                 if not self._decision_matches_scanner_side(scanner_side, decision.decision):
                     logger.warning(
                         "PropFirmPilot: {} → {} rejected (scanner_side={})",

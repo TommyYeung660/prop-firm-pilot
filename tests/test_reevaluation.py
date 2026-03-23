@@ -274,6 +274,22 @@ class TestReevaluateOpenPositions:
 
         mock_agents.decide.assert_not_called()
 
+    async def test_tradingagents_disabled_skips_reevaluation(
+        self,
+        scheduler: Scheduler,
+        store: DecisionStore,
+        mock_agents: MagicMock,
+    ) -> None:
+        """Disabling TradingAgents should fail-closed and skip LLM re-evaluation."""
+        scheduler._config.agents.enabled = False
+        _insert_opened_intent(store, "INT-1", "EURUSD.", "POS-1")
+        pos = _make_position(position_id="POS-1")
+
+        opened_intents = store.get_active_positions()
+        await scheduler._reevaluate_open_positions([pos], opened_intents)
+
+        mock_agents.decide.assert_not_called()
+
     async def test_close_failure_does_not_add_to_set(
         self,
         scheduler: Scheduler,

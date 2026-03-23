@@ -267,3 +267,22 @@ async def test_run_scheduler_uses_broker_factory_with_store(config: AppConfig) -
 
     mock_factory.assert_called_once_with(config, store=store)
     broker_client.login.assert_awaited_once()
+
+
+async def test_run_daily_cycle_bypasses_agent_when_tradingagents_disabled(
+    config: AppConfig,
+    matchtrader_client: AsyncMock,
+) -> None:
+    """With TradingAgents disabled, legacy mode should route directly from scanner side."""
+    config.agents.enabled = False
+    pilot = _build_pilot(config)
+    pilot.scanner.run_pipeline.return_value = [
+        _make_signal(instrument="USDCHF", score=0.12, rank=1, side="short"),
+    ]
+
+    with patch("src.main.build_broker_client", return_value=matchtrader_client):
+        await pilot.run_daily_cycle(date_override="2026-03-17")
+
+    pilot.agents.decide.assert_not_called()
+    pilot._execute_trade.assert_awaited_once()
+    assert pilot._execute_trade.await_args.kwargs["side"] == "SELL"

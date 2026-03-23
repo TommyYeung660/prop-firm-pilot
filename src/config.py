@@ -92,6 +92,10 @@ class ScannerConfig(BaseModel):
 class AgentsConfig(BaseModel):
     """Bridge config for TradingAgents."""
 
+    enabled: bool = Field(
+        default=True,
+        description="Enable TradingAgents-backed LLM decisions for entry and re-evaluation paths.",
+    )
     project_path: str = "../../TradingAgents"
     selected_analysts: list[str] = ["market", "news", "social", "macro"]
     output_language: str = "繁體中文"
@@ -631,6 +635,48 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return merged
 
 
+def _parse_env_bool(name: str) -> bool | None:
+    """Parse an optional boolean environment variable."""
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _apply_env_runtime_overrides(merged: dict[str, Any]) -> dict[str, Any]:
+    """Apply environment-driven runtime overrides after YAML merge."""
+    resolved = merged.copy()
+
+    agents_block = dict(resolved.get("agents") or {})
+    tradingagents_enabled = _parse_env_bool("TRADINGAGENTS_ENABLED")
+    agents_enabled = tradingagents_enabled if tradingagents_enabled is not None else False
+    agents_block["enabled"] = agents_enabled
+    resolved["agents"] = agents_block
+
+    scheduler_block = dict(resolved.get("scheduler") or {})
+    if scheduler_block.get("entry_funnel_mode", "scanner_llm_tactical") == "scanner_llm_tactical":
+        scheduler_block["entry_funnel_mode"] = (
+            "scanner_llm_tactical" if agents_enabled else "scanner_tactical"
+        )
+    resolved["scheduler"] = scheduler_block
+
+    tactical_block = dict(resolved.get("tactical") or {})
+    tactical_exit_block = dict(tactical_block.get("exit") or {})
+    if not agents_enabled:
+        tactical_exit_block["use_llm_exception_path"] = False
+    if tactical_exit_block:
+        tactical_block["exit"] = tactical_exit_block
+    if tactical_block:
+        resolved["tactical"] = tactical_block
+
+    return resolved
+
+
 def load_config(
     config_path: str | Path,
     default_path: str | Path | None = None,
@@ -664,5 +710,6 @@ def load_config(
 
     # Merge: account config overrides defaults
     merged = _deep_merge(base_data, override_data)
+    merged = _apply_env_runtime_overrides(merged)
 
     return AppConfig(**merged)

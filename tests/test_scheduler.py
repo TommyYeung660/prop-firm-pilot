@@ -2264,6 +2264,39 @@ class TestStartStop:
             elif hasattr(item, "cancel"):
                 item.cancel()
 
+    async def test_start_routes_workers_through_scanner_tactical_when_tradingagents_disabled(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Disabling TradingAgents should keep workers but force scanner_tactical mode."""
+        config.agents.enabled = False
+        config.scheduler.llm_worker_count = 3
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+
+        with patch("asyncio.gather", new_callable=AsyncMock) as mock_gather:
+            await sched.start()
+
+        args = mock_gather.call_args[0]
+        assert len(args) == 9
+        assert sched._entry_funnel_mode() == "scanner_tactical"
+        for item in args:
+            if hasattr(item, "close"):
+                item.close()
+            elif hasattr(item, "cancel"):
+                item.cancel()
+
     async def test_initialize_market_data_hub_injects_broker_quote_provider(
         self,
         config: AppConfig,

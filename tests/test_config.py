@@ -26,6 +26,32 @@ def test_scheduler_config_entry_funnel_mode_default() -> None:
     assert config.entry_funnel_mode == "scanner_llm_tactical"
 
 
+def test_load_config_disables_tradingagents_by_default_from_env(monkeypatch) -> None:
+    from src.config import load_config
+
+    monkeypatch.delenv("TRADINGAGENTS_ENABLED", raising=False)
+
+    config = load_config("config/e8_one_5k_challenge.yaml")
+
+    assert config.agents.enabled is False
+    assert config.scheduler.entry_funnel_mode == "scanner_tactical"
+    assert config.scheduler.llm_worker_count == 2
+    assert config.tactical.exit.use_llm_exception_path is False
+
+
+def test_load_config_allows_tradingagents_when_env_enabled(monkeypatch) -> None:
+    from src.config import load_config
+
+    monkeypatch.setenv("TRADINGAGENTS_ENABLED", "1")
+
+    config = load_config("config/e8_one_5k_challenge.yaml")
+
+    assert config.agents.enabled is True
+    assert config.scheduler.entry_funnel_mode == "scanner_llm_tactical"
+    assert config.scheduler.llm_worker_count == 2
+    assert config.tactical.exit.use_llm_exception_path is True
+
+
 def test_scheduler_config_allows_ablation_modes() -> None:
     config = SchedulerConfig(
         entry_funnel_mode="scanner_tactical",
