@@ -2415,41 +2415,33 @@ class Scheduler:
             try:
                 # Auto-throttle: increase sleep when API budget is low
                 base_interval = self._position_monitor_base_interval_seconds()
-                limiter = getattr(
-                    self._matchtrader,
-                    "rate_limiter",
-                    getattr(self._matchtrader, "_rate_limiter", None),
-                )
-                remaining = self._coerce_numeric(
-                    getattr(limiter, "write_remaining", getattr(limiter, "remaining", 0)),
-                    fallback=0.0,
-                )
-                daily_limit = self._coerce_numeric(
-                    getattr(limiter, "daily_write_limit", getattr(limiter, "_daily_limit", 1)),
-                    fallback=1.0,
-                )
-                if daily_limit <= 0:
-                    daily_limit = 1.0
-                if remaining < daily_limit * 0.15:
-                    sleep_interval = base_interval * 4
-                    logger.warning(
-                        "Position monitor: API budget critical ({}/{} remaining)"
-                        " — throttling to {}s interval",
-                        remaining,
-                        daily_limit,
-                        sleep_interval,
-                    )
-                elif remaining < daily_limit * 0.30:
-                    sleep_interval = base_interval * 2
-                    logger.info(
-                        "Position monitor: API budget low ({}/{} remaining)"
-                        " — throttling to {}s interval",
-                        remaining,
-                        daily_limit,
-                        sleep_interval,
-                    )
-                else:
-                    sleep_interval = base_interval
+                limiter = getattr(self._matchtrader, "rate_limiter", None)
+                budget = self._extract_write_budget(limiter)
+                if budget is None:
+                    limiter = getattr(self._matchtrader, "_rate_limiter", None)
+                    budget = self._extract_write_budget(limiter)
+
+                sleep_interval = base_interval
+                if budget is not None:
+                    remaining, daily_limit = budget
+                    if remaining < daily_limit * 0.15:
+                        sleep_interval = base_interval * 4
+                        logger.warning(
+                            "Position monitor: API budget critical ({}/{} remaining)"
+                            " — throttling to {}s interval",
+                            remaining,
+                            daily_limit,
+                            sleep_interval,
+                        )
+                    elif remaining < daily_limit * 0.30:
+                        sleep_interval = base_interval * 2
+                        logger.info(
+                            "Position monitor: API budget low ({}/{} remaining)"
+                            " — throttling to {}s interval",
+                            remaining,
+                            daily_limit,
+                            sleep_interval,
+                        )
                 # During market closure, reduce polling frequency
                 if not self._market_hours.is_market_open(self._now_utc()):
                     await asyncio.sleep(base_interval * 10)  # 20min instead of 2min
@@ -4262,6 +4254,29 @@ class Scheduler:
         if isinstance(value, Real):
             return float(value)
         return fallback
+
+    @staticmethod
+    def _extract_write_budget(limiter: Any) -> tuple[float, float] | None:
+        """Return (remaining, daily_limit) when the limiter exposes usable numeric values."""
+        if limiter is None:
+            return None
+
+        remaining = getattr(limiter, "write_remaining", None)
+        if not isinstance(remaining, Real) or isinstance(remaining, bool):
+            remaining = getattr(limiter, "remaining", None)
+
+        daily_limit = getattr(limiter, "daily_write_limit", None)
+        if not isinstance(daily_limit, Real) or isinstance(daily_limit, bool):
+            daily_limit = getattr(limiter, "_daily_limit", None)
+
+        if not isinstance(remaining, Real) or isinstance(remaining, bool):
+            return None
+        if not isinstance(daily_limit, Real) or isinstance(daily_limit, bool):
+            return None
+        if float(daily_limit) <= 0:
+            return None
+
+        return float(remaining), float(daily_limit)
 
     def _compute_tactical_retry_deadline(self) -> datetime:
         """Return a deterministic expiry covering the full tactical retry budget."""

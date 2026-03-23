@@ -2792,7 +2792,15 @@ class TestPositionMonitorLoop:
         sched._market_hours.should_force_close.return_value = False
         sched._market_hours.is_market_open.return_value = False
 
-        await _run_loop_once(sched, sched._position_monitor_loop())
+        with patch("src.scheduler.scheduler.logger.warning") as mock_warning:
+            await _run_loop_once(sched, sched._position_monitor_loop())
+
+        budget_warnings = [
+            call
+            for call in mock_warning.call_args_list
+            if call.args and "Position monitor: API budget critical" in str(call.args[0])
+        ]
+        assert budget_warnings == []
 
     async def test_detects_closed_position(
         self,
