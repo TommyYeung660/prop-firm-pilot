@@ -347,7 +347,17 @@ class MarketDataHub:
             requires_tactical_retry = True
             pending_reason = "market_data.startup_5m_bar_pending"
         elif not bars_5m_fresh:
-            if bars_5m_close_at is not None and bars_5m_close_at.date() < current_trade_date:
+            if self._is_startup_5m_bar_pending(
+                symbol=symbol,
+                websocket_state=websocket_state,
+                quote_available=quote_available,
+                bars_1h_fresh=bars_1h_fresh,
+                bars_5m_close_at=bars_5m_close_at,
+                current_trade_date=current_trade_date,
+            ):
+                requires_tactical_retry = True
+                pending_reason = "market_data.startup_5m_bar_pending"
+            elif bars_5m_close_at is not None and bars_5m_close_at.date() < current_trade_date:
                 block_reason = "market_data.trade_date_not_ready"
             else:
                 block_reason = "market_data.bars_5m_stale"
@@ -376,6 +386,27 @@ class MarketDataHub:
             bars_1h_fresh=bars_1h_fresh,
             api_bars_1h_fresh=self._api_bars_fresh(symbol, "1h"),
         )
+
+    def _is_startup_5m_bar_pending(
+        self,
+        *,
+        symbol: str,
+        websocket_state: str,
+        quote_available: bool,
+        bars_1h_fresh: bool,
+        bars_5m_close_at: datetime | None,
+        current_trade_date: date,
+    ) -> bool:
+        """Detect cold-start windows before the first websocket 5m bar closes."""
+        if symbol in self._forced_stale_symbols:
+            return False
+        if websocket_state != "healthy" or not quote_available or not bars_1h_fresh:
+            return False
+        if bars_5m_close_at is not None and bars_5m_close_at.date() < current_trade_date:
+            return False
+
+        self._aggregator.close_elapsed_bars(now=self._now_provider())
+        return not self._aggregator.get_closed_bars(symbol, "5m", 1)
 
     def _bars_from_aggregator(
         self,

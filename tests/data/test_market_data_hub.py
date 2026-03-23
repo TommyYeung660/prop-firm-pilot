@@ -622,6 +622,75 @@ async def test_entry_readiness_marks_startup_5m_gap_as_retryable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_entry_readiness_marks_stale_same_day_5m_rest_gap_as_startup_retryable(
+) -> None:
+    now = datetime(2026, 3, 23, 3, 31, 30, tzinfo=timezone.utc)
+    tick_time = datetime(2026, 3, 23, 3, 31, 5, tzinfo=timezone.utc)
+    aggregator = FXTickAggregator()
+    aggregator.add_tick(_tick("AUDJPY", 100.0, 100.02, tick_time))
+
+    client = EODHDFXWebSocketClient(
+        api_token="token",
+        symbols=["AUDJPY"],
+        stale_after_seconds=86400,
+    )
+    client._connected = True
+    client._record_tick(_tick("AUDJPY", 100.0, 100.02, tick_time))
+
+    hub = MarketDataHub(
+        aggregator=aggregator,
+        websocket_client=client,
+        rest_provider=DummyProvider([]),
+        symbols=["AUDJPY"],
+        now_provider=lambda: now,
+        broker_quote_provider=AsyncMock(
+            return_value={
+                "bid": 100.0,
+                "ask": 100.02,
+                "timestampMs": int(tick_time.timestamp() * 1000),
+            }
+        ),
+    )
+    hub._warm_cache[("AUDJPY", "5m")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-23T02:00:00Z"),
+                "open": 99.9,
+                "high": 100.1,
+                "low": 99.8,
+                "close": 100.0,
+                "volume": 0,
+            }
+        ]
+    )
+    hub._warm_cache[("AUDJPY", "1h")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-23T02:00:00Z"),
+                "open": 99.8,
+                "high": 100.2,
+                "low": 99.7,
+                "close": 100.0,
+                "volume": 0,
+            }
+        ]
+    )
+
+    readiness = await hub.get_entry_readiness("AUDJPY")
+
+    assert readiness.entry_safe is True
+    assert readiness.block_reason == ""
+    assert readiness.requires_tactical_retry is True
+    assert readiness.pending_reason == "market_data.startup_5m_bar_pending"
+    assert readiness.quote_source == "broker_quote"
+    assert readiness.quote_available is True
+    assert readiness.bars_5m_source == "rest_fallback"
+    assert readiness.bars_5m_fresh is False
+    assert readiness.bars_1h_fresh is True
+    assert readiness.websocket_state == "healthy"
+
+
+@pytest.mark.asyncio
 async def test_entry_readiness_blocks_when_1h_bars_are_stale_even_with_fresh_quote() -> None:
     now = datetime(2026, 3, 19, 0, 15, tzinfo=timezone.utc)
     tick_time = datetime(2026, 3, 19, 0, 14, 50, tzinfo=timezone.utc)
