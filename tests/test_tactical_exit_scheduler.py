@@ -1,5 +1,6 @@
 """Tests for scheduler integration with tactical exit manager."""
 
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -220,6 +221,49 @@ async def test_run_tactical_exit_cycle_logs_hold_summary(
         mp.setattr(scheduler, "_now_utc", MagicMock(return_value=datetime.now(timezone.utc)))
         await scheduler._run_tactical_exit_cycle([_make_position()], [_make_opened_intent()])
 
+    assert _tactical_cycle_log_calls(mock_info)
+
+
+@pytest.mark.asyncio
+async def test_run_tactical_exit_cycle_recovers_missing_position_id_and_logs_summary(
+    scheduler: Scheduler, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy opened intents without a position_id should be rebound to the live broker position."""
+    scheduler._fetch_tactical_data = AsyncMock(return_value=TacticalData())
+    scheduler._handle_tactical_exit_evaluation = AsyncMock()
+    scheduler._tactical_exit_manager = MagicMock()
+    scheduler._tactical_exit_manager.evaluate_position.return_value = TacticalExitEvaluation(
+        decision=TacticalExitDecision(
+            action="HOLD",
+            state="INITIAL_RISK",
+            reason="no_tactical_exit_action",
+        )
+    )
+
+    intent = _make_opened_intent()
+    intent.position_id = ""
+    intent.suggested_side = "BUY"
+    intent.execution_meta = json.dumps(
+        {
+            "volume": 0.10,
+            "side": "BUY",
+            "fill_price": 1.1000,
+        }
+    )
+
+    repair_mock = MagicMock()
+    monkeypatch.setattr(scheduler._store, "repair_opened_position_id", repair_mock)
+
+    mock_info = MagicMock()
+    monkeypatch.setattr(scheduler_module.logger, "info", mock_info)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(scheduler, "_now_utc", MagicMock(return_value=datetime.now(timezone.utc)))
+        await scheduler._run_tactical_exit_cycle([_make_position()], [intent])
+
+    assert intent.position_id == "POS-1"
+    repair_mock.assert_called_once_with("INT-1", "POS-1")
+    scheduler._tactical_exit_manager.evaluate_position.assert_called_once()
     assert _tactical_cycle_log_calls(mock_info)
 
 

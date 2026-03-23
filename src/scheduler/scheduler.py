@@ -2382,6 +2382,10 @@ class Scheduler:
                     if opened_intents:
                         # Get currently open positions from broker
                         open_positions = await self._matchtrader.get_open_positions()
+                        await self._repair_missing_opened_position_ids(
+                            open_positions,
+                            opened_intents,
+                        )
                         open_position_ids = {str(p.position_id) for p in open_positions}
 
                         # Update BestDayTracker with current unrealized PnL
@@ -3458,6 +3462,7 @@ class Scheduler:
         if not self._config.tactical.exit.enabled:
             return
 
+        await self._repair_missing_opened_position_ids(open_positions, opened_intents)
         intent_lookup = {
             intent.position_id: intent
             for intent in opened_intents
@@ -3492,6 +3497,120 @@ class Scheduler:
                 len(evaluation_summaries),
                 "; ".join(evaluation_summaries),
             )
+
+    async def _repair_missing_opened_position_ids(
+        self,
+        open_positions: list[Any],
+        opened_intents: list[TradeIntent],
+    ) -> None:
+        """Backfill missing opened-intent position ids by matching live broker positions."""
+        claimed_position_ids = {
+            str(intent.position_id).strip()
+            for intent in opened_intents
+            if isinstance(intent.position_id, str) and intent.position_id.strip()
+        }
+
+        for intent in opened_intents:
+            current_position_id = str(intent.position_id or "").strip()
+            if current_position_id:
+                continue
+
+            matched_position = self._match_open_position_for_intent(
+                intent,
+                open_positions,
+                claimed_position_ids=claimed_position_ids,
+            )
+            if matched_position is None:
+                continue
+
+            matched_position_id = str(getattr(matched_position, "position_id", "")).strip()
+            if not matched_position_id:
+                continue
+
+            try:
+                await asyncio.to_thread(
+                    self._store.repair_opened_position_id,
+                    intent.id,
+                    matched_position_id,
+                )
+                intent.position_id = matched_position_id
+                claimed_position_ids.add(matched_position_id)
+                logger.warning(
+                    "Position monitor: repaired missing position_id for intent {} ({}) -> {}",
+                    intent.id,
+                    intent.symbol,
+                    matched_position_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Position monitor: failed to repair missing position_id for intent {} ({}): {}",
+                    intent.id,
+                    intent.symbol,
+                    e,
+                )
+
+    def _match_open_position_for_intent(
+        self,
+        intent: TradeIntent,
+        open_positions: list[Any],
+        *,
+        claimed_position_ids: set[str],
+    ) -> Any | None:
+        """Return the unique live broker position that matches an opened intent."""
+        meta = self._load_execution_meta_dict(intent)
+        expected_symbol = str(intent.symbol or "").strip().upper()
+        expected_side = str(
+            getattr(intent, "suggested_side", "") or meta.get("side", "")
+        ).strip().upper()
+        expected_volume = self._coerce_numeric(meta.get("volume"), fallback=0.0)
+        expected_fill_price = self._coerce_numeric(meta.get("fill_price"), fallback=0.0)
+
+        candidates: list[Any] = []
+        for pos in open_positions:
+            position_id = str(getattr(pos, "position_id", "")).strip()
+            if not position_id or position_id in claimed_position_ids:
+                continue
+
+            broker_symbol = str(getattr(pos, "symbol", "")).strip()
+            config_symbol = broker_symbol.rstrip(".")
+            if self._registry is not None and broker_symbol:
+                config_symbol = self._registry.to_config_safe(broker_symbol)
+            if config_symbol.strip().upper() != expected_symbol:
+                continue
+
+            pos_side = str(getattr(pos, "side", "")).strip().upper()
+            if expected_side and pos_side and pos_side != expected_side:
+                continue
+
+            pos_volume = self._coerce_numeric(getattr(pos, "volume", 0.0), fallback=0.0)
+            if expected_volume > 0 and abs(pos_volume - expected_volume) > 1e-9:
+                continue
+
+            candidates.append(pos)
+
+        if len(candidates) == 1:
+            return candidates[0]
+
+        if len(candidates) > 1 and expected_fill_price > 0:
+            exact_matches = [
+                pos
+                for pos in candidates
+                if abs(
+                    self._coerce_numeric(getattr(pos, "open_price", 0.0), fallback=0.0)
+                    - expected_fill_price
+                )
+                <= 1e-9
+            ]
+            if len(exact_matches) == 1:
+                return exact_matches[0]
+
+        if len(candidates) > 1:
+            logger.warning(
+                "Position monitor: ambiguous live-position repair candidates for intent {} ({})",
+                intent.id,
+                intent.symbol,
+            )
+        return None
 
     async def _reevaluate_open_positions(
         self, open_positions: list[Any], opened_intents: list[TradeIntent]

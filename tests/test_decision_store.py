@@ -252,6 +252,29 @@ class TestStateTransitions:
         store.mark_closed(intent_id)
         assert store.get_intent(intent_id).status == "closed"  # type: ignore[union-attr]
 
+    def test_repair_opened_position_id_updates_intent_and_decision(
+        self, store: DecisionStore
+    ) -> None:
+        """Opened intents should support backfilling a missing broker position id."""
+        claimed = self._create_and_claim(store)
+        intent_id = claimed.id
+
+        store.update_intent_decision(intent_id, "BUY", 40.0, 80.0, "report", "{}")
+        store.mark_ready_for_exec(intent_id)
+        store.mark_executing(intent_id)
+        store.mark_opened(intent_id, position_id="")
+
+        store.repair_opened_position_id(intent_id, "POS-RECOVERED")
+
+        opened = store.get_intent(intent_id)
+        assert opened is not None
+        assert opened.status == "opened"
+        assert opened.position_id == "POS-RECOVERED"
+
+        decision = store.get_decision(intent_id)
+        assert decision is not None
+        assert decision.position_id == "POS-RECOVERED"
+
     def test_cancel_from_pending(self, store: DecisionStore) -> None:
         """Pending intents should be cancellable."""
         intent = TradeIntent(trade_date="2026-02-16", symbol="EURUSD")

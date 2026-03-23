@@ -545,6 +545,34 @@ class DecisionStore:
         self._conn.commit()
         logger.info("Intent {} opened with position {}", intent_id, position_id)
 
+    def repair_opened_position_id(self, intent_id: str, position_id: str) -> None:
+        """Backfill a missing broker position id for an already-opened intent."""
+        updated = self._conn.execute(
+            """UPDATE intents
+               SET position_id = :position_id
+               WHERE id = :id AND status = 'opened'""",
+            {
+                "position_id": position_id,
+                "id": intent_id,
+            },
+        ).rowcount
+        if not updated:
+            self._conn.rollback()
+            raise InvalidTransitionError(
+                f"Cannot repair position_id for {intent_id}: not in 'opened' state"
+            )
+        self._conn.execute(
+            """UPDATE decisions
+               SET position_id = :position_id
+               WHERE intent_id = :intent_id""",
+            {
+                "position_id": position_id,
+                "intent_id": intent_id,
+            },
+        )
+        self._conn.commit()
+        logger.info("Intent {} repaired with position {}", intent_id, position_id)
+
     def mark_rejected(self, intent_id: str, reason: str) -> None:
         """Transition intent from executing → rejected with compliance reason."""
         now = datetime.now(timezone.utc)
