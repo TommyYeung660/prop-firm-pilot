@@ -206,35 +206,13 @@ class MarketDataHub:
                 bars=warm.tail(limit).reset_index(drop=True),
             )
 
-        rows_fetched = 0
-        bars, rows_fetched, refreshed = await self._refresh_rest_cache_serialized(
-            symbol=symbol,
-            timeframe=timeframe,
-        )
-        if refreshed:
-            self._log_rest_fallback(
-                symbol=symbol,
-                timeframe=timeframe,
-                rows_fetched=rows_fetched,
-                bars=bars,
-            )
-        if not bars.empty and self._bars_are_fresh(bars, timeframe):
-            self._record_market_data_read("rest_fallback", rows_fetched)
-            return BarResult(
-                symbol=symbol,
-                timeframe=timeframe,
-                source="rest_fallback",
-                bars=bars.tail(limit).reset_index(drop=True),
-            )
-
         if symbol not in self._forced_stale_symbols:
-            self._aggregator.close_elapsed_bars(now=self._now_provider())
-            websocket_bars = self._bars_from_aggregator(
+            websocket_bars = self._fresh_websocket_bars(
                 symbol=symbol,
                 timeframe=timeframe,
                 limit=limit,
             )
-            if not websocket_bars.empty and self._bars_are_fresh(websocket_bars, timeframe):
+            if websocket_bars is not None:
                 self._record_market_data_read("websocket_cache")
                 return BarResult(
                     symbol=symbol,
@@ -243,6 +221,34 @@ class MarketDataHub:
                     bars=websocket_bars,
                 )
 
+        rows_fetched = 0
+        bars, rows_fetched, refreshed = await self._refresh_rest_cache_serialized(
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+        if not bars.empty and self._bars_are_fresh(bars, timeframe):
+            if refreshed:
+                self._log_rest_fallback(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    rows_fetched=rows_fetched,
+                    bars=bars,
+                )
+            self._record_market_data_read("rest_fallback", rows_fetched)
+            return BarResult(
+                symbol=symbol,
+                timeframe=timeframe,
+                source="rest_fallback",
+                bars=bars.tail(limit).reset_index(drop=True),
+            )
+
+        if refreshed:
+            self._log_rest_fallback(
+                symbol=symbol,
+                timeframe=timeframe,
+                rows_fetched=rows_fetched,
+                bars=bars,
+            )
         self._record_market_data_read("rest_fallback", rows_fetched)
         return BarResult(
             symbol=symbol,
@@ -430,6 +436,24 @@ class MarketDataHub:
             for bar in bars
         ]
         return pd.DataFrame(rows)
+
+    def _fresh_websocket_bars(
+        self,
+        *,
+        symbol: str,
+        timeframe: Literal["1m", "5m", "1h"],
+        limit: int,
+    ) -> pd.DataFrame | None:
+        """Return fresh closed websocket bars when available."""
+        self._aggregator.close_elapsed_bars(now=self._now_provider())
+        websocket_bars = self._bars_from_aggregator(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=limit,
+        )
+        if websocket_bars.empty or not self._bars_are_fresh(websocket_bars, timeframe):
+            return None
+        return websocket_bars
 
     def _bars_are_fresh(self, bars: pd.DataFrame, timeframe: Literal["1m", "5m", "1h"]) -> bool:
         """Check bar freshness independently from quote freshness."""

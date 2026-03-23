@@ -92,7 +92,8 @@ async def test_market_data_hub_prefers_websocket_cache_for_healthy_symbol() -> N
 
 
 @pytest.mark.asyncio
-async def test_market_data_hub_falls_back_to_fresh_closed_1h_websocket_bar_after_api_miss() -> None:
+async def test_market_data_hub_prefers_fresh_closed_1h_websocket_bar_before_rest_refresh(
+) -> None:
     provider = DummyProvider([])
     aggregator = FXTickAggregator()
     aggregator.add_tick(
@@ -126,9 +127,7 @@ async def test_market_data_hub_falls_back_to_fresh_closed_1h_websocket_bar_after
 
     assert bars.source == "websocket_cache"
     assert len(bars.bars) == 1
-    assert provider.calls == [
-        ("EURUSD", "1h", date(2026, 3, 4), date(2026, 3, 11))
-    ]
+    assert provider.calls == []
 
 
 @pytest.mark.asyncio
@@ -375,6 +374,118 @@ async def test_market_data_hub_prefers_api_cache_for_bars_when_websocket_also_ha
 
     assert result.source == "warmup_cache"
     assert float(result.bars.iloc[-1]["close"]) == pytest.approx(1.1200)
+
+
+@pytest.mark.asyncio
+async def test_market_data_hub_prefers_fresh_websocket_closed_5m_bars_before_rest_refresh() -> None:
+    now = datetime(2026, 3, 17, 4, 5, 30, tzinfo=timezone.utc)
+    provider = DummyProvider(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-17T03:00:00Z"),
+                "open": 1.08,
+                "high": 1.09,
+                "low": 1.07,
+                "close": 1.085,
+                "volume": 0,
+            }
+        ]
+    )
+    aggregator = FXTickAggregator()
+    for minute, price in enumerate([1.10, 1.11, 1.12, 1.13, 1.14]):
+        aggregator.add_tick(
+            _tick(
+                "EURUSD",
+                price,
+                price + 0.0002,
+                datetime(2026, 3, 17, 4, minute, 10, tzinfo=timezone.utc),
+            )
+        )
+    aggregator.close_elapsed_bars(now=datetime(2026, 3, 17, 4, 5, 1, tzinfo=timezone.utc))
+
+    hub = MarketDataHub(
+        aggregator=aggregator,
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=provider,
+        symbols=["EURUSD"],
+        now_provider=lambda: now,
+        bar_cache_max_age_seconds=300,
+    )
+    hub._warm_cache[("EURUSD", "5m")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-17T03:00:00Z"),
+                "open": 1.0800,
+                "high": 1.0900,
+                "low": 1.0700,
+                "close": 1.0850,
+                "volume": 0,
+            }
+        ]
+    )
+
+    result = await hub.get_bars("EURUSD", "5m", 10)
+
+    assert result.source == "websocket_cache"
+    assert len(provider.calls) == 0
+    assert pd.Timestamp(result.bars.iloc[-1]["datetime"]) == pd.Timestamp("2026-03-17T04:00:00Z")
+
+
+@pytest.mark.asyncio
+async def test_market_data_hub_skips_rest_fallback_warning_when_websocket_closed_5m_bars_are_used(
+) -> None:
+    now = datetime(2026, 3, 17, 4, 5, 30, tzinfo=timezone.utc)
+    provider = DummyProvider(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-17T03:00:00Z"),
+                "open": 1.08,
+                "high": 1.09,
+                "low": 1.07,
+                "close": 1.085,
+                "volume": 0,
+            }
+        ]
+    )
+    aggregator = FXTickAggregator()
+    for minute, price in enumerate([1.10, 1.11, 1.12, 1.13, 1.14]):
+        aggregator.add_tick(
+            _tick(
+                "EURUSD",
+                price,
+                price + 0.0002,
+                datetime(2026, 3, 17, 4, minute, 10, tzinfo=timezone.utc),
+            )
+        )
+    aggregator.close_elapsed_bars(now=datetime(2026, 3, 17, 4, 5, 1, tzinfo=timezone.utc))
+
+    hub = MarketDataHub(
+        aggregator=aggregator,
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=provider,
+        symbols=["EURUSD"],
+        now_provider=lambda: now,
+        bar_cache_max_age_seconds=300,
+    )
+    hub._warm_cache[("EURUSD", "5m")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-17T03:00:00Z"),
+                "open": 1.0800,
+                "high": 1.0900,
+                "low": 1.0700,
+                "close": 1.0850,
+                "volume": 0,
+            }
+        ]
+    )
+
+    with patch("src.data.market_data_hub.logger.warning") as mock_warning:
+        result = await hub.get_bars("EURUSD", "5m", 10)
+
+    assert result.source == "websocket_cache"
+    assert mock_warning.call_count == 0
+    assert len(provider.calls) == 0
 
 
 @pytest.mark.asyncio
@@ -1272,7 +1383,7 @@ async def test_market_data_hub_uses_timeframe_sized_cooldown_for_1h_refreshes() 
 
 
 @pytest.mark.asyncio
-async def test_market_data_hub_finalizes_elapsed_rollup_bars_before_api_then_websocket_lookup(
+async def test_market_data_hub_finalizes_elapsed_rollup_bars_before_websocket_first_lookup(
 ) -> None:
     aggregator = FXTickAggregator()
     for minute, price in enumerate([1.10, 1.11, 1.12, 1.13, 1.14]):
@@ -1298,9 +1409,7 @@ async def test_market_data_hub_finalizes_elapsed_rollup_bars_before_api_then_web
 
     assert result.source == "websocket_cache"
     assert len(result.bars) == 1
-    assert provider.calls == [
-        ("EURUSD", "5min", date(2026, 3, 8), date(2026, 3, 11))
-    ]
+    assert provider.calls == []
 
 
 @pytest.mark.asyncio
