@@ -377,6 +377,46 @@ async def test_open_positions_parsing_handles_live_nested_payload(
     assert positions[0].profit == 10.5
 
 
+async def test_open_positions_parsing_handles_live_array_payload(
+    client: TradeLockerClient,
+) -> None:
+    client._instrument_id_to_symbol = {"6125": "USDCAD"}
+    client._account_request = AsyncMock(
+        return_value={
+            "s": "ok",
+            "d": {
+                "positions": [
+                    [
+                        "7421932185916132049",
+                        "6125",
+                        "948735",
+                        "buy",
+                        "0.62",
+                        "1.37364",
+                        None,
+                        None,
+                        "1774250624000",
+                        "8.12",
+                        "key-undefined",
+                    ]
+                ]
+            },
+        }
+    )
+
+    positions = await client.get_open_positions()
+
+    assert len(positions) == 1
+    assert positions[0].position_id == "7421932185916132049"
+    assert positions[0].symbol == "USDCAD"
+    assert positions[0].side == "BUY"
+    assert positions[0].volume == 0.62
+    assert positions[0].open_price == 1.37364
+    assert positions[0].profit == 8.12
+    assert positions[0].sl_price is None
+    assert positions[0].tp_price is None
+
+
 async def test_closed_positions_parsing_returns_broker_model(client: TradeLockerClient) -> None:
     client._account_request = AsyncMock(
         return_value=[
@@ -402,6 +442,55 @@ async def test_closed_positions_parsing_returns_broker_model(client: TradeLocker
     assert closed[0].position_id == "CLOSED-1"
     assert closed[0].volume == 0.2
     assert closed[0].profit == 100.0
+
+
+async def test_closed_positions_parsing_handles_live_orders_history_array_payload(
+    client: TradeLockerClient,
+) -> None:
+    client._instrument_id_to_symbol = {"6117": "AUDJPY"}
+    client._account_request = AsyncMock(
+        return_value={
+            "s": "ok",
+            "d": {
+                "ordersHistory": [
+                    [
+                        "7421932185967501931",
+                        "6117",
+                        "948735",
+                        "0.91",
+                        "sell",
+                        "market",
+                        "Filled",
+                        "0.91",
+                        "110.867",
+                        "110.867",
+                        "0",
+                        "IOC",
+                        None,
+                        "1774250619843",
+                        "1774250620000",
+                        "false",
+                        "7421932185916132047",
+                        None,
+                        None,
+                        None,
+                        None,
+                        "key-undefined",
+                    ]
+                ]
+            },
+        }
+    )
+
+    closed = await client.get_closed_positions(from_ts=1774250000000, to_ts=1774251000000)
+
+    assert len(closed) == 1
+    assert closed[0].position_id == "7421932185916132047"
+    assert closed[0].symbol == "AUDJPY"
+    assert closed[0].side == "SELL"
+    assert closed[0].volume == 0.91
+    assert closed[0].open_price == 110.867
+    assert closed[0].close_price == 110.867
 
 
 async def test_market_order_open_builds_provider_payload(client: TradeLockerClient) -> None:
@@ -437,6 +526,67 @@ async def test_market_order_open_builds_provider_payload(client: TradeLockerClie
     assert body["tradableInstrumentId"] == "TI-EURUSD"
     assert body["stopLoss"] == 1.08
     assert body["takeProfit"] == 1.09
+
+
+async def test_market_order_open_recovers_position_id_and_fill_price_from_orders_history(
+    client: TradeLockerClient,
+) -> None:
+    client._instrument_id_to_symbol = {"6117": "AUDJPY"}
+    client._resolve_symbol_meta = AsyncMock(
+        return_value={
+            "tradableInstrumentId": "6117",
+            "infoRouteId": "948733",
+            "tradeRouteId": "948735",
+        }
+    )
+    client._account_request = AsyncMock(
+        side_effect=[
+            {"s": "ok", "d": {"orderId": "7421932185967501931"}},
+            {
+                "s": "ok",
+                "d": {
+                    "ordersHistory": [
+                        [
+                            "7421932185967501931",
+                            "6117",
+                            "948735",
+                            "0.91",
+                            "sell",
+                            "market",
+                            "Filled",
+                            "0.91",
+                            "110.867",
+                            "110.867",
+                            "0",
+                            "IOC",
+                            None,
+                            "1774250619843",
+                            "1774250620000",
+                            "true",
+                            "7421932185916132047",
+                            None,
+                            None,
+                            None,
+                            None,
+                            "key-undefined",
+                        ]
+                    ],
+                    "hasMore": False,
+                },
+            },
+        ]
+    )
+
+    result = await client.open_position(symbol="AUDJPY", side="SELL", volume=0.91)
+
+    assert result.success is True
+    assert result.position_id == "7421932185916132047"
+    assert result.raw_response["positionId"] == "7421932185916132047"
+    assert result.raw_response["openPrice"] == 110.867
+    assert client._account_request.await_args_list[1].args == (
+        "GET",
+        "/trade/accounts/{account_id}/ordersHistory",
+    )
 
 
 async def test_close_position_full_close_uses_qty_zero(client: TradeLockerClient) -> None:

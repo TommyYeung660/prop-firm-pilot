@@ -16,6 +16,8 @@ Usage:
         quote = await client.get_quote("EURUSD")
 """
 
+import asyncio
+import time
 from typing import Any, Literal
 
 import httpx
@@ -28,6 +30,45 @@ from src.execution.broker_models import (
     BrokerOrderResult,
     BrokerPositionInfo,
     BrokerQuoteInfo,
+)
+
+POSITION_COLUMNS = (
+    "id",
+    "tradableInstrumentId",
+    "routeId",
+    "side",
+    "qty",
+    "avgPrice",
+    "stopLossId",
+    "takeProfitId",
+    "openDate",
+    "unrealizedPl",
+    "strategyId",
+)
+
+ORDERS_HISTORY_COLUMNS = (
+    "id",
+    "tradableInstrumentId",
+    "routeId",
+    "qty",
+    "side",
+    "type",
+    "status",
+    "filledQty",
+    "avgPrice",
+    "price",
+    "stopPrice",
+    "validity",
+    "expireDate",
+    "createdDate",
+    "lastModified",
+    "isOpen",
+    "positionId",
+    "stopLoss",
+    "stopLossType",
+    "takeProfit",
+    "takeProfitType",
+    "strategyId",
 )
 
 
@@ -64,6 +105,7 @@ class TradeLockerClient:
         self._account_id = ""
         self._acc_num = ""
         self._symbol_meta: dict[str, dict[str, str]] = {}
+        self._instrument_id_to_symbol: dict[str, str] = {}
 
     # ── Context Manager ─────────────────────────────────────────────────
 
@@ -207,6 +249,8 @@ class TradeLockerClient:
                 self._symbol_meta[symbol.upper()] = meta
                 if raw_symbol:
                     self._symbol_meta[raw_symbol.upper()] = meta
+                if tradable_instrument_id:
+                    self._instrument_id_to_symbol[tradable_instrument_id] = symbol
 
             instruments.append(
                 BrokerInstrumentInfo(
@@ -257,26 +301,40 @@ class TradeLockerClient:
 
     async def get_open_positions(self) -> list[BrokerPositionInfo]:
         payload = await self._account_request("GET", "/trade/accounts/{account_id}/positions")
-        rows = self._extract_list(payload, ["positions", "data"])
+        rows = self._extract_rows(payload, ["positions", "data"])
+        has_array_rows = any(isinstance(row, (list, tuple)) for row in rows)
+        if rows and has_array_rows and not self._instrument_id_to_symbol:
+            await self.get_effective_instruments()
 
         positions: list[BrokerPositionInfo] = []
         for row in rows:
+            values = self._row_as_dict(row, POSITION_COLUMNS)
+            current_price = values.get(
+                "currentPrice",
+                values.get("markPrice", values.get("avgPrice", 0)),
+            )
+            profit = values.get(
+                "profit",
+                values.get("unrealizedPnl", values.get("unrealizedPl", 0)),
+            )
+            open_time = values.get(
+                "openTime",
+                values.get("createdAt", values.get("openDate", "")),
+            )
             positions.append(
                 BrokerPositionInfo(
-                    position_id=str(row.get("positionId", row.get("id", ""))),
-                    symbol=self._normalize_symbol(
-                        str(row.get("symbol", row.get("instrument", "")))
+                    position_id=str(values.get("positionId", values.get("id", ""))),
+                    symbol=self._resolve_position_symbol(values),
+                    side=self._normalize_side(str(values.get("side", values.get("direction", "")))),
+                    volume=self._as_float(values.get("qty", values.get("volume", 0))),
+                    open_price=self._as_float(values.get("openPrice", values.get("avgPrice", 0))),
+                    current_price=self._as_float(current_price),
+                    profit=self._as_float(profit),
+                    sl_price=self._as_optional_float(values.get("stopLoss", values.get("slPrice"))),
+                    tp_price=self._as_optional_float(
+                        values.get("takeProfit", values.get("tpPrice"))
                     ),
-                    side=self._normalize_side(str(row.get("side", row.get("direction", "")))),
-                    volume=self._as_float(row.get("qty", row.get("volume", 0))),
-                    open_price=self._as_float(row.get("openPrice", row.get("avgPrice", 0))),
-                    current_price=self._as_float(row.get("currentPrice", row.get("markPrice", 0))),
-                    profit=self._as_float(
-                        row.get("profit", row.get("unrealizedPnl", row.get("unrealizedPl", 0)))
-                    ),
-                    sl_price=self._as_optional_float(row.get("stopLoss", row.get("slPrice"))),
-                    tp_price=self._as_optional_float(row.get("takeProfit", row.get("tpPrice"))),
-                    open_time=str(row.get("openTime", row.get("createdAt", ""))),
+                    open_time=str(open_time),
                 )
             )
 
@@ -288,24 +346,47 @@ class TradeLockerClient:
             "/trade/accounts/{account_id}/ordersHistory",
             params={"from": from_ts, "to": to_ts},
         )
-        rows = self._extract_list(payload, ["orders", "data"])
+        rows = self._extract_rows(payload, ["ordersHistory", "orders", "data"])
+        has_array_rows = any(isinstance(row, (list, tuple)) for row in rows)
+        if rows and has_array_rows and not self._instrument_id_to_symbol:
+            await self.get_effective_instruments()
 
         closed: list[BrokerClosedPosition] = []
         for row in rows:
+            values = self._row_as_dict(row, ORDERS_HISTORY_COLUMNS)
+            volume = values.get("filledQty", values.get("qty", values.get("volume", 0)))
+            open_price = values.get(
+                "openPrice",
+                values.get("entryPrice", values.get("avgPrice", 0)),
+            )
+            close_price = values.get(
+                "closePrice",
+                values.get("exitPrice", values.get("price", values.get("avgPrice", 0))),
+            )
+            open_time = values.get(
+                "openTime",
+                values.get("openedAt", values.get("createdDate", "")),
+            )
+            close_time = values.get(
+                "closeTime",
+                values.get("closedAt", values.get("lastModified", "")),
+            )
+            close_reason = values.get(
+                "closeReason",
+                values.get("reason", values.get("status", "")),
+            )
             closed.append(
                 BrokerClosedPosition(
-                    position_id=str(row.get("positionId", row.get("id", ""))),
-                    symbol=self._normalize_symbol(
-                        str(row.get("symbol", row.get("instrument", "")))
-                    ),
-                    side=self._normalize_side(str(row.get("side", row.get("direction", "")))),
-                    volume=self._as_float(row.get("qty", row.get("volume", 0))),
-                    open_price=self._as_float(row.get("openPrice", row.get("entryPrice", 0))),
-                    close_price=self._as_float(row.get("closePrice", row.get("exitPrice", 0))),
-                    profit=self._as_float(row.get("profit", row.get("realizedPnl", 0))),
-                    open_time=str(row.get("openTime", row.get("openedAt", ""))),
-                    close_time=str(row.get("closeTime", row.get("closedAt", ""))),
-                    close_reason=str(row.get("closeReason", row.get("reason", ""))),
+                    position_id=str(values.get("positionId", values.get("id", ""))),
+                    symbol=self._resolve_position_symbol(values),
+                    side=self._normalize_side(str(values.get("side", values.get("direction", "")))),
+                    volume=self._as_float(volume),
+                    open_price=self._as_float(open_price),
+                    close_price=self._as_float(close_price),
+                    profit=self._as_float(values.get("profit", values.get("realizedPnl", 0))),
+                    open_time=str(open_time),
+                    close_time=str(close_time),
+                    close_reason=str(close_reason),
                 )
             )
 
@@ -342,7 +423,16 @@ class TradeLockerClient:
                 "/trade/accounts/{account_id}/orders",
                 json=body,
             )
-            response_raw = payload if isinstance(payload, dict) else {"data": payload}
+            response_raw = self._extract_object(payload)
+            if not response_raw:
+                response_raw = payload if isinstance(payload, dict) else {"data": payload}
+            response_raw = await self._enrich_order_response(
+                response_raw=response_raw,
+                symbol=symbol,
+                side=side,
+                volume=volume,
+                tradable_instrument_id=meta["tradableInstrumentId"],
+            )
             return BrokerOrderResult(
                 success=True,
                 position_id=str(
@@ -508,9 +598,9 @@ class TradeLockerClient:
             resolved_path,
             params=params,
             json=json,
-            authenticated=True,
-            account_scoped=True,
-        )
+                authenticated=True,
+                account_scoped=True,
+            )
 
     async def _request(
         self,
@@ -620,6 +710,22 @@ class TradeLockerClient:
         return []
 
     @staticmethod
+    def _extract_rows(payload: Any, candidate_keys: list[str]) -> list[Any]:
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, (dict, list, tuple))]
+        if isinstance(payload, dict):
+            for key in candidate_keys:
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [row for row in value if isinstance(row, (dict, list, tuple))]
+            if isinstance(payload.get("d"), dict):
+                for key in candidate_keys:
+                    value = payload["d"].get(key)
+                    if isinstance(value, list):
+                        return [row for row in value if isinstance(row, (dict, list, tuple))]
+        return []
+
+    @staticmethod
     def _extract_quote(payload: Any) -> dict[str, Any]:
         if isinstance(payload, dict):
             if "quotes" in payload and isinstance(payload["quotes"], list) and payload["quotes"]:
@@ -639,6 +745,18 @@ class TradeLockerClient:
             if isinstance(payload.get("d"), dict):
                 return payload["d"]
             return payload
+        return {}
+
+    @staticmethod
+    def _row_as_dict(row: Any, columns: tuple[str, ...]) -> dict[str, Any]:
+        if isinstance(row, dict):
+            return row
+        if isinstance(row, (list, tuple)):
+            return {
+                column: row[index]
+                for index, column in enumerate(columns)
+                if index < len(row)
+            }
         return {}
 
     @staticmethod
@@ -666,6 +784,126 @@ class TradeLockerClient:
         if side in {"BUY", "SELL"}:
             return side
         return value
+
+    def _resolve_position_symbol(self, values: dict[str, Any]) -> str:
+        symbol = str(values.get("symbol", values.get("instrument", "")))
+        if symbol:
+            return self._normalize_symbol(symbol)
+
+        instrument_id = str(
+            values.get("tradableInstrumentId", values.get("instrumentId", ""))
+        ).strip()
+        if instrument_id:
+            return self._instrument_id_to_symbol.get(instrument_id, instrument_id)
+        return ""
+
+    async def _enrich_order_response(
+        self,
+        *,
+        response_raw: dict[str, Any],
+        symbol: str,
+        side: Literal["BUY", "SELL"],
+        volume: float,
+        tradable_instrument_id: str,
+    ) -> dict[str, Any]:
+        position_id = str(
+            response_raw.get(
+                "positionId",
+                response_raw.get("position_id", ""),
+            )
+        ).strip()
+        if position_id:
+            return response_raw
+
+        recovered = await self._recover_recent_order(
+            existing_order_id=str(
+                response_raw.get(
+                    "orderId",
+                    response_raw.get("id", response_raw.get("order_id", "")),
+                )
+            ),
+            symbol=symbol,
+            side=side,
+            volume=volume,
+            tradable_instrument_id=tradable_instrument_id,
+        )
+        if not recovered:
+            return response_raw
+
+        merged = dict(response_raw)
+        merged.update(recovered)
+        return merged
+
+    async def _recover_recent_order(
+        self,
+        *,
+        existing_order_id: str,
+        symbol: str,
+        side: Literal["BUY", "SELL"],
+        volume: float,
+        tradable_instrument_id: str,
+    ) -> dict[str, Any]:
+        now_ms = int(time.time() * 1000)
+        tolerance = 1e-9
+
+        for attempt in range(3):
+            payload = await self._account_request(
+                "GET",
+                "/trade/accounts/{account_id}/ordersHistory",
+                params={
+                    "from": now_ms - 300000,
+                    "to": now_ms + 60000,
+                },
+            )
+            rows = self._extract_rows(payload, ["ordersHistory", "orders", "data"])
+            matches: list[tuple[int, dict[str, Any]]] = []
+            for row in rows:
+                values = self._row_as_dict(row, ORDERS_HISTORY_COLUMNS)
+                if not values:
+                    continue
+                row_order_id = str(values.get("id", "")).strip()
+                if existing_order_id and row_order_id == existing_order_id:
+                    return {
+                        "orderId": row_order_id,
+                        "positionId": str(values.get("positionId", "")).strip(),
+                        "openPrice": self._as_float(values.get("avgPrice", values.get("price", 0))),
+                        "price": self._as_float(values.get("price", values.get("avgPrice", 0))),
+                    }
+
+                row_instrument_id = str(values.get("tradableInstrumentId", "")).strip()
+                if tradable_instrument_id and row_instrument_id != tradable_instrument_id:
+                    continue
+                if self._normalize_side(str(values.get("side", ""))) != side:
+                    continue
+                row_volume = self._as_float(values.get("filledQty", values.get("qty", 0)))
+                if abs(row_volume - volume) > tolerance:
+                    continue
+                status = str(values.get("status", "")).strip().lower()
+                if status and status != "filled":
+                    continue
+                modified = self._as_int(values.get("lastModified", values.get("createdDate", 0)))
+                matches.append((modified, values))
+
+            if matches:
+                _, latest = max(matches, key=lambda item: item[0])
+                return {
+                    "orderId": str(latest.get("id", "")).strip(),
+                    "positionId": str(latest.get("positionId", "")).strip(),
+                    "openPrice": self._as_float(latest.get("avgPrice", latest.get("price", 0))),
+                    "price": self._as_float(latest.get("price", latest.get("avgPrice", 0))),
+                }
+
+            if attempt < 2:
+                logger.warning(
+                    "TradeLocker: order recovery pending for {} {} {} (attempt {}/3)",
+                    side,
+                    symbol,
+                    volume,
+                    attempt + 1,
+                )
+                await asyncio.sleep(0.5 * (attempt + 1))
+
+        return {}
 
     @staticmethod
     def _value_at(values: list[Any], index: int) -> float:
