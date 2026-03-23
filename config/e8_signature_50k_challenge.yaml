@@ -1,0 +1,260 @@
+# E8 Markets - E8 Signature $50,000 Challenge Account Configuration
+# 說明原則：
+# 1. 這份檔案可直接搭配 `uv run python -m src.main --config config/e8_signature_50k_challenge.yaml --scheduler` 啟動。
+# 2. 只寫此帳號需要明確覆蓋的欄位；未列出的欄位沿用 default.yaml / src.config.py 預設值。
+# 3. 結構沿用 e8_one_5k_challenge，避免 production / stable runtime 對不同帳號出現過大行為漂移。
+# 4. 這份檔案只表達目前程式真正能執行的規則。無法精確自動化的 Signature 規則會寫成註解，不假裝已被 enforcement。
+
+account_name: "e8_signature_50k_challenge"  # 帳號配置名稱；用於啟動、日誌、bundle 與報表識別
+
+# ── 高頻常調參數 ────────────────────────────────────────────────────────────
+
+symbols:  # 本帳號啟用的交易標的；scanner、market data、execution、風控都會以這份清單為主
+  - EURUSD
+  - GBPUSD
+  - USDJPY
+  - AUDUSD
+  - NZDUSD
+  - USDCAD
+  - USDCHF
+  - EURJPY
+  - AUDJPY
+  - CADJPY
+
+scanner:
+  topk: 5  # 每輪 daily scanner 最多保留前 5 個分數最高的 symbol 候選
+  topk_short: 1  # 保留 1 個 short-side scanner 候選，交由 tactical gate 再把關
+  benchmark: "FX"  # 傳給 qlib scanner 的市場/benchmark 標識；外匯組合使用 FX
+
+agents:
+  enabled: false  # v1.5.0_stable 預設關閉 TradingAgents；本帳號以 scanner -> tactical -> execution 為主
+  selected_analysts:
+    - market
+    - news
+    - social
+    - macro
+
+execution:
+  broker_backend: "tradelocker"  # E8 Signature 使用 TradeLocker-first runtime
+  max_positions: 5  # 保留與現行 stable universe 相同的容量上限，避免為新帳號額外改 scheduler 節奏
+  default_risk_pct: 0.005  # 保守預設單筆風險 0.5%（約 $250/trade）
+  max_risk_pct: 0.01  # bounded allocation uplift 上限 1.0%；避免 sparse-portfolio uplift 過大
+  max_slippage_pips: 2.0  # 下單時可接受的最大滑價；過小可能拒單，過大會惡化成交品質
+  random_delay_min: 0.5  # 下單前隨機延遲最小秒數；降低過度機械化的行為特徵
+  random_delay_max: 2.0  # 下單前隨機延遲最大秒數；需大於等於 random_delay_min
+
+websocket:
+  enabled: true  # 是否啟用 WebSocket 行情側車；關掉後會退回 REST-first 流程
+  use_as_primary_market_data: true  # 行情健康時優先使用 websocket quote / bars，而不是 REST
+  provider: "eodhd"  # WebSocket 供應商名稱；目前系統只支援 eodhd
+  symbols:  # WebSocket 訂閱的標的清單；通常與頂層 symbols 保持一致
+    - EURUSD
+    - GBPUSD
+    - USDJPY
+    - AUDUSD
+    - NZDUSD
+    - USDCAD
+    - USDCHF
+    - EURJPY
+    - AUDJPY
+    - CADJPY
+  reconnect_base_seconds: 2  # 斷線後第一次重連等待秒數；配合 exponential backoff 使用
+  reconnect_max_seconds: 300  # 斷線重連等待上限；避免供應商持續異常時打太兇
+  stale_after_seconds: 45  # 超過多久沒 tick 就把 symbol 視為 stale；會觸發 fallback / block
+  quote_ttl_seconds: 30  # quote 最大可接受新鮮度；超過就不再視為可用報價
+  warmup_1m_bars: 120  # 啟動時預抓 1m bars 數量；供 tactical / volatility 冷啟動使用
+  warmup_5m_bars: 120  # 啟動時預抓 5m bars 數量；供 entry guard / tactical 使用
+  warmup_1h_bars: 80  # 啟動時預抓 1h bars 數量；供 ATR / regime 判斷使用
+
+scheduler:
+  market_hours:
+    enabled: true  # 啟用週末市場開關控制；避免休市時還持續掃描/下單
+    close_day: "Friday"  # 市場關閉日；配合 close_time_utc 判定何時進入週末保護
+    close_time_utc: "22:00"  # 冬令時基準的 UTC 收市時間；夏令時會由 dst_auto 自動換算
+    open_day: "Sunday"  # 市場重新開市日；配合 open_time_utc 判定何時恢復
+    open_time_utc: "22:00"  # 冬令時基準的 UTC 開市時間；夏令時會由 dst_auto 自動換算
+    force_close_before_weekend: true  # Signature 明確不允許 weekend holding；此規則目前可自動執行
+    force_close_minutes_before: 15  # 若啟用強平，會在收市前幾分鐘執行
+    dst_auto: true  # 是否依 broker server timezone 自動處理 DST，避免季節切換時時間錯位
+    server_timezone: "Europe/Athens"  # 經紀商伺服器時區；DST 換算依此進行
+
+  session_aware_enabled: true  # 依倫敦/紐約活躍時段動態調整 scanner 週期；提升有效時段掃描頻率
+  active_session_interval_seconds: 1800  # 活躍時段 scanner 週期 30 分鐘；越小越快，但計算更頻繁
+  quiet_session_interval_seconds: 3600  # 淡時段 scanner 週期 1 小時；降低等待但不過度重掃
+  session_dst_auto: true  # 倫敦/紐約 session 時間是否跟當地 DST 自動位移
+  london_timezone: "Europe/London"  # 倫敦時段 DST 參考時區
+  ny_timezone: "America/New_York"  # 紐約時段 DST 參考時區
+
+  volatility_trigger_enabled: true  # 啟用波動率觸發提早 rescan；不必死等下一輪 scanner cadence
+  volatility_threshold_pct: 0.5  # 價格在觀察窗內變動超過多少百分比就觸發 rescan
+  volatility_window_minutes: 30  # 波動率計算觀察窗長度；越短越敏感，越長越平滑
+  volatility_cooldown_seconds: 1800  # 同一 symbol 兩次波動觸發間的冷卻時間；避免洗版與重掃過度
+  volatility_poll_interval_seconds: 30  # 檢查報價波動的頻率；越小反應越快，但 API / CPU 負擔更高
+
+  llm_poll_interval_seconds: 10  # 保持既有輪詢節奏；即使 agents 預設關閉也不改 scheduler 基本節拍
+  entry_funnel_mode: "scanner_tactical"  # 明確鎖定非 LLM 入口模式，避免依賴 env override
+
+  multi_timeframe_enabled: true  # 啟用多時間框架流程；daily 給方向，較短週期做進場時機確認
+  entry_timeframe: "4h"  # 多時間框架的進場確認週期；目前用 4h 供 tactical / agent 參考
+  intraday_lookback_days: 90  # 日內模型/分析抓取回看天數；越大資料更多但成本更高
+  scanner_timeframe: "1d"  # qlib scanner 的主時間框架；1d 代表訊號只在日 K 收盤後更新
+  agent_timeframe: "4h"  # 若之後手動開啟 TradingAgents，預設仍以 4h 看進場結構
+
+  breakeven_activation_pct: 0.3  # 部位浮盈達 TP 距離 30% 時，就允許將 SL 上移至 breakeven
+
+tactical:
+  enabled: true  # 啟用 tactical execution 模組；用低時間框架資料確認是否值得進場
+  shadow_mode: false  # false 代表 tactical gate 真的會阻擋交易；true 則只記錄不阻擋
+
+  hard_gates:
+    spread_max_multiplier: 2.0  # 即時 spread 不可超過常態 spread 的幾倍；避免流動性太差時進場
+    atr_min_ratio: 0.5  # ATR 太低低於此比例視為市場太死；不進場
+    atr_max_ratio: 2.5  # ATR 太高高於此比例視為過度波動；不進場
+    atr_period: 14  # ATR 計算使用的回看期數
+    atr_timeframe: "1h"  # ATR 取樣時間框架；這裡用 1h 評估波動 regime
+    data_max_age_seconds: 600  # tactical bar 最長允許資料延遲秒數；超過視為 stale
+
+  soft_gates:
+    min_score: 2  # soft gate 至少要拿到幾分才放行；目前總分概念為 3 過 2
+    ema_fast: 8  # 快 EMA 週期；用於短動能方向確認
+    ema_slow: 21  # 慢 EMA 週期；與快 EMA 搭配判斷趨勢位置
+    ema_timeframe: "5min"  # EMA 計算用的時間框架；越短越貼近即時節奏
+    ema_lookback_bars: 50  # 為算 EMA 預先取得的 bar 數量；太少可能指標不穩
+    rsi_period: 14  # RSI 週期
+    rsi_overbought: 70  # RSI 高於此值視為偏過熱；可能抑制追價
+    rsi_oversold: 30  # RSI 低於此值視為偏過冷；可能抑制追空
+    candle_min_body_ratio: 0.3  # K 棒實體佔全 range 最低比例；過小代表方向性不足
+
+  retry:
+    interval_seconds: 300  # tactical WAIT 後多久重試一次；5 分鐘可對齊 5m bar 產生節奏
+    max_retries: 12  # 最多重試幾次；12 次代表最多等約 1 小時
+    expire_action: "degrade"  # 重試耗盡後如何處理；degrade=放寬後續流程，cancel=直接取消
+    jitter_seconds: 10  # 在 retry 時加入隨機抖動秒數；避免固定節奏撞 API / 同時喚醒
+
+  decision_cache:
+    ttl_seconds: 14400  # strategic decision cache 存活時間；4 小時內可重用既有決策
+
+  intent_dedup:
+    cooldown_after_close_seconds: 1800  # 同 symbol 平倉後的去重冷卻期；避免剛平又馬上重開
+
+  exit:
+    enabled: true  # 啟用 tactical exit；持倉後會持續動態調整 SL/TP 與保本策略
+    evaluation_interval_seconds: 60  # 多久評估一次已開倉部位的出場條件
+    breakeven_activation_r: 0.3  # 浮盈達 0.3R 時啟用保本移動
+    atr_trailing_multiplier: 2.5  # ATR trailing stop 的倍數；越大越寬鬆，越小越緊
+    trend_extension_tp_atr_multiplier: 1.5  # 趨勢健康時延伸 TP 的 ATR 倍數
+    profit_protection_tp_atr_multiplier: 0.75  # 趨勢轉弱時收緊 TP 的 ATR 倍數
+    partial_close_ratio: 0.5  # 部分平倉時一次關掉多少比例倉位
+    partial_close_min_r: 0.8  # 浮盈至少達多少 R 才允許 partial close
+    modify_cooldown_seconds: 300  # 連續修改 SL/TP 的冷卻時間；避免頻繁改單
+    tp_reprice_cooldown_seconds: 600  # 連續重設 TP 的冷卻時間；降低抖動與 API 壓力
+    min_sl_improvement_pips: 2.0  # SL 至少改善多少 pip 才值得送出修改
+    min_tp_improvement_pips: 3.0  # TP 至少改善多少 pip 才值得送出修改
+    use_llm_exception_path: false  # LLM 預設關閉時，不走 exception path，避免隱性依賴 TradingAgents
+
+# ── 低頻基礎參數 ────────────────────────────────────────────────────────────
+
+account:
+  plan: "E8 Signature 50K Challenge"  # 帳號方案名稱；主要用於日誌、報表與告警顯示
+  initial_balance: 50000  # 初始資金；各類 drawdown、profit target、部位 sizing 會以此為基準
+
+compliance:
+  # E8 Signature 50K 挑戰規則（僅寫目前 runtime 能安全表達的部分）
+  daily_drawdown_limit: 1.0  # Signature challenge 為 Daily Loss: None；此值是停用現有 daily-DD guard 的 runtime workaround
+  max_drawdown_limit: 0.04  # 4% 最大允許回撤
+  profit_target: 0.06  # 1-step challenge 通關目標 6%
+  best_day_ratio: 0.35  # 記錄 Signature payout consistency rule 的參考值；目前 runtime 不自動 enforcement
+  best_day_limit: 1000000.0  # 停用 legacy best-day blocker；避免把 payout consistency 誤當 challenge hard rule
+  daily_api_request_limit: 4000  # 這是系統 API budget，不等於 E8 broker 的 orders/modifies quota
+  drawdown_type: "dynamic"  # 以 dynamic 作為 EOD trailing 的保守近似；現有程式尚未有精確 EOD trailing mode
+
+  # 安全裕度：未碰正式紅線前先停手，避免因滑價或浮虧瞬間觸發違規
+  daily_drawdown_stop: 0.90  # 因 daily_drawdown_limit 已被實質停用，此值僅保留結構一致性
+  max_drawdown_stop: 0.90  # 達到總回撤限制的 90% 就停止新交易
+  best_day_stop: 0.90  # 因 best_day_limit 已被抬高，此值僅保留結構一致性
+  hwm_state_path: data/hwm_state_e8_signature_50k.json  # 用於 dynamic 近似模式的高水位持久化檔案
+
+decision_store:
+  db_path: data/decisions_e8_signature_50k.db  # 決策/intent/position 狀態儲存的 SQLite 路徑
+
+monitor:
+  trade_journal_path: data/trade_journal_e8_signature_50k.jsonl  # 交易事件 journal；用於追蹤與稽核
+  memory_dir: MEMORY_E8_SIGNATURE_50K  # agent/memory 類檔案的專屬資料夾；避免不同帳號互相污染
+
+optimization:
+  state_path: data/optimization_state_e8_signature_50k.json  # optimizer 狀態與閾值持久化檔案
+  ab_model_a: "rightcodes/gpt-5.4"  # 保留 stable 版本既有 A/B 模型設定
+  ab_model_b: "volcengine/kimi-k2.5"  # 保留 stable 版本既有 A/B 模型設定
+
+# 各商品共用欄位說明：
+# pip_size: 1 pip 對應的價格最小單位
+# pip_value: 1 標準手每 1 pip 約值多少美元；用於風險換算
+# avg_spread_pips: 常態點差基準；供 tactical spread gate / execution 評估
+# min_lot: 經紀商允許的最小下單手數
+# max_lot: 經紀商允許的最大下單手數；Signature FX per-order 以 50 lots 為上限
+instruments:  # 各交易標的的 pip 與 lot 規格；position sizing 與風控會依此換算
+  EURUSD:
+    pip_size: 0.0001
+    pip_value: 10.0
+    avg_spread_pips: 1.2
+    min_lot: 0.01
+    max_lot: 50.0
+  GBPUSD:
+    pip_size: 0.0001
+    pip_value: 10.0
+    avg_spread_pips: 1.5
+    min_lot: 0.01
+    max_lot: 50.0
+  USDJPY:
+    pip_size: 0.01
+    pip_value: 10.0
+    avg_spread_pips: 1.3
+    min_lot: 0.01
+    max_lot: 50.0
+  AUDUSD:
+    pip_size: 0.0001
+    pip_value: 10.0
+    avg_spread_pips: 1.8
+    min_lot: 0.01
+    max_lot: 50.0
+  NZDUSD:
+    pip_size: 0.0001
+    pip_value: 10.0
+    avg_spread_pips: 1.8
+    min_lot: 0.01
+    max_lot: 50.0
+  USDCAD:
+    pip_size: 0.0001
+    pip_value: 10.0
+    avg_spread_pips: 1.7
+    min_lot: 0.01
+    max_lot: 50.0
+  USDCHF:
+    pip_size: 0.0001
+    pip_value: 10.0
+    avg_spread_pips: 1.6
+    min_lot: 0.01
+    max_lot: 50.0
+  EURJPY:
+    pip_size: 0.01
+    pip_value: 6.67
+    avg_spread_pips: 1.6
+    min_lot: 0.01
+    max_lot: 50.0
+  AUDJPY:
+    pip_size: 0.01
+    pip_value: 6.67
+    avg_spread_pips: 2.0
+    min_lot: 0.01
+    max_lot: 50.0
+  CADJPY:
+    pip_size: 0.01
+    pip_value: 6.67
+    avg_spread_pips: 2.1
+    min_lot: 0.01
+    max_lot: 50.0
+
+# 尚未自動 enforcement 的 Signature 規則：
+# - Overnight holding: no。現有 scheduler 只有週末強平，沒有每日收市前強平。
+# - 35% consistency / 5 profitable days。屬 payout / funded-stage 邏輯，非目前 challenge runtime 風控。
+# - E8 broker 的 orders / modifies / daily position quotas。現時沒有獨立 broker-level quota accounting。

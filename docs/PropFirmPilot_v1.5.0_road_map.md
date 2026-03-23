@@ -99,6 +99,7 @@
 
 ### 3.3 Execution 與 broker-neutral runtime
 
+- 這條主線對應先前 stable rollout 中的 `Task 5`: broker-neutral runtime startup 與 `TradeLocker-first` backend 接線。
 - broker-neutral client factory 已接上 runtime startup，不再只有單一 broker path。
 - `TradeLocker` backend 已進入可實際啟動的 runtime path，是 `E8 Signature` 的主目標路徑。
 - `MatchTrader` backend 仍保留，作為現有 account 與兼容回退路徑。

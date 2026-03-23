@@ -284,6 +284,82 @@ def test_e8_one_5k_first_batch_jpy_crosses_are_enabled_everywhere():
     assert config.instruments["CADJPY"].pip_size == 0.01
 
 
+def test_e8_signature_50k_config_loads_as_runnable_tradelocker_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.config import load_config
+
+    monkeypatch.delenv("TRADINGAGENTS_ENABLED", raising=False)
+
+    config = load_config("config/e8_signature_50k_challenge.yaml")
+
+    assert config.execution.broker_backend == "tradelocker"
+    assert config.execution.max_positions == 5
+    assert config.execution.default_risk_pct == 0.005
+    assert config.execution.max_risk_pct == 0.01
+    assert config.account.plan == "E8 Signature 50K Challenge"
+    assert config.account.initial_balance == 50000
+    assert config.compliance.profit_target == 0.06
+    assert config.compliance.max_drawdown_limit == 0.04
+    assert config.compliance.daily_drawdown_limit == 1.0
+    assert config.compliance.drawdown_type == "dynamic"
+    assert config.compliance.best_day_limit == 1000000.0
+    assert config.agents.enabled is False
+    assert config.scheduler.entry_funnel_mode == "scanner_tactical"
+    assert config.scheduler.market_hours.force_close_before_weekend is True
+    assert config.tactical.exit.use_llm_exception_path is False
+    assert config.decision_store.db_path == "data/decisions_e8_signature_50k.db"
+    assert config.monitor.trade_journal_path == "data/trade_journal_e8_signature_50k.jsonl"
+    assert config.monitor.memory_dir == "MEMORY_E8_SIGNATURE_50K"
+    assert config.optimization.state_path == "data/optimization_state_e8_signature_50k.json"
+    assert config.compliance.hwm_state_path == "data/hwm_state_e8_signature_50k.json"
+    assert all(
+        instrument.max_lot == 50.0 for instrument in config.instruments.values()
+    )
+
+
+def test_e8_signature_trial_5k_config_loads_as_matchtrader_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.config import load_config
+
+    monkeypatch.delenv("TRADINGAGENTS_ENABLED", raising=False)
+
+    config = load_config("config/e8_signature_trial_5k_challenge.yaml")
+
+    assert config.execution.broker_backend == "matchtrader"
+    assert config.execution.max_positions == 5
+    assert config.execution.default_risk_pct == 0.005
+    assert config.execution.max_risk_pct == 0.01
+    assert config.account.plan == "E8 Signature Trial 5K Challenge (dry-run)"
+    assert config.account.initial_balance == 5000
+    assert config.compliance.daily_drawdown_limit == 1.0
+    assert config.compliance.drawdown_type == "dynamic"
+    assert config.compliance.best_day_limit == 1000000.0
+    assert config.agents.enabled is False
+    assert config.scheduler.entry_funnel_mode == "scanner_tactical"
+    assert config.tactical.exit.use_llm_exception_path is False
+    assert (
+        config.decision_store.db_path == "data/decisions_e8_signature_trial_5k.db"
+    )
+    assert (
+        config.monitor.trade_journal_path
+        == "data/trade_journal_e8_signature_trial_5k.jsonl"
+    )
+    assert config.monitor.memory_dir == "MEMORY_E8_SIGNATURE_TRIAL_5K"
+    assert (
+        config.optimization.state_path
+        == "data/optimization_state_e8_signature_trial_5k.json"
+    )
+    assert (
+        config.compliance.hwm_state_path
+        == "data/hwm_state_e8_signature_trial_5k.json"
+    )
+    assert all(
+        instrument.max_lot == 50.0 for instrument in config.instruments.values()
+    )
+
+
 @pytest.mark.parametrize("backend", ["matchtrader", "tradelocker"])
 def test_execution_config_accepts_supported_broker_backend(backend: str) -> None:
     from src.config import ExecutionConfig
