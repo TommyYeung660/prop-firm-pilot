@@ -6,7 +6,7 @@
 >
 > **適用範圍**: `prop-firm-pilot` 主線實作，以及它與 `qlib_market_scanner`、`TradingAgents`、`qlib_rd_agent` 的必要上下游邊界
 >
-> **當前主線狀態**: `main` 已具備 `v1.5.0_stable` implementation baseline，包括 broker-neutral runtime startup、`TradeLocker-first` backend path、`TradingAgents` 預設關閉的 deterministic entry path、side-aware scanner contract、market-data continuity fallback、tactical entry/exit、以及 canonical close reconciliation；但正式 release identity 仍是 `1.5.0_preview_2` / `1.5.0rc1`，需待 stable acceptance、版本 bump 與 release closure 完成後才會切換
+> **當前主線狀態**: `main` 現已對齊 `v1.5.0_stable` release identity，並具備 stable implementation baseline，包括 broker-neutral runtime startup、`TradeLocker-first` backend path、`TradingAgents` 預設關閉的 deterministic entry path、side-aware scanner contract、market-data continuity fallback、tactical entry/exit、以及 canonical close reconciliation；後續工作重點已從版本 bump 轉為 stable acceptance 累積、portfolio / memory closure 與 operator evidence 收斂
 >
 > **閱讀原則**: 若你只想知道目前 stable 主線已做了什麼、還差什麼，先看這份；若你要看一筆交易怎樣開始與結束，再看 `docs/PropFirmPilot_v1.5.0_stable_Report.md`
 
@@ -126,7 +126,6 @@
 
 | 工作流 | 尚未 closure 的原因 | 需要的交付 |
 |---|---|---|
-| **Release identity closure** | `pyproject.toml` / `src/version.py` 仍是 `1.5.0_preview_2` / `1.5.0rc1` | stable acceptance 完成後再做版本 bump、tag 與 release notes closure |
 | **Open-book worst-case risk guard** | 系統已有單筆風控與 tactical exit，但尚未完全證明 tactical 不介入時，open-book natural-SL 組合風險不會穿透 `daily_drawdown_stop` | portfolio-level open-risk reservation / aggregate worst-case guard |
 | **Exposure / portfolio budget v1** | 同向、同貨幣、相關性暴露仍未形成完整 stable contract | base/quote exposure budget、setup grouping、portfolio-level admission guard |
 | **Trade-memory v1** | 目前已有 journal / reflection / execution meta，但尚未凍結成 stable memory schema 與 quality gate | raw event / reflection / retrieval 分層與 quality gate |
@@ -139,7 +138,7 @@
 
 - 把已經落地的 implementation 做完整 acceptance
 - 把尚未 formalized 的 portfolio / memory / evidence closure 補齊
-- 在此之後才把版本 identity 從 `preview_2` 切到 `stable`
+- 在 release identity 已切到 stable 之後，繼續補齊 acceptance 與 portfolio / memory closure
 
 ---
 
@@ -189,10 +188,10 @@ stable release closure 做完之後，`1.5.x` 的後續優先級應維持精簡�
 
 ### 6.2 還不能說「正式完成」的
 
-- 版本 identity 尚未切到 `stable`
+- 版本 identity 已切到 `1.5.0_stable`，但 stable acceptance 證據仍需持續累積
 - portfolio-level worst-case open-book risk closure 尚未完成
 - exposure / trade-memory / acceptance evidence 尚未全部 formalized
 
 ### 6.3 一句話版結論
 
-> `prop-firm-pilot` 的 `main` 已經具備 `v1.5.0_stable` implementation baseline，但正式 stable release 仍取決於 portfolio / memory / acceptance closure；在此之前，主線正確的描述是「stable 實作已落地，release identity 尚未切換」。 
+> `prop-firm-pilot` 的 `main` 現已切到 `v1.5.0_stable` release identity，並具備 stable implementation baseline；接下來的重點不再是版本 bump，而是把 portfolio / memory / acceptance closure 補成真正完整的 stable release evidence。 

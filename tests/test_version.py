@@ -8,9 +8,9 @@ from scripts import pack_prod_logs
 from src.version import get_app_version, get_release_tag
 
 
-def test_get_app_version_reports_preview_release_identity() -> None:
-    assert get_app_version() == "1.5.0_preview_2"
-    assert get_release_tag() == "v1.5.0_preview_2"
+def test_get_app_version_reports_stable_release_identity() -> None:
+    assert get_app_version() == "1.5.0_stable"
+    assert get_release_tag() == "v1.5.0_stable"
 
 
 def test_get_app_version_matches_pyproject() -> None:

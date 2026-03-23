@@ -6,7 +6,7 @@
 >
 > **適用範圍**: 目前 `main` 上的 stable runtime 實作，包括 scanner ingestion、scheduler、tactical entry/exit、execution、monitoring、close reconciliation 與 broker-neutral backend
 >
-> **狀態說明**: 本文件描述的是 `v1.5.0_stable` 的實作基線，而不是已完成版本 bump 的正式 release。當前 package / display version 仍是 `1.5.0_preview_2` / `1.5.0rc1`，但 stable runtime 所需的主要路徑已在 `main` 落地
+> **狀態說明**: 本文件描述的是當前 `main` 已採用的 `v1.5.0_stable` release identity 與 stable runtime implementation baseline；目前重點已從版本 bump 轉為 stable acceptance 證據、portfolio closure 與 operator evidence 累積
 
 ---
 
