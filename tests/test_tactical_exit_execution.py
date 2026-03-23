@@ -278,3 +278,76 @@ async def test_modify_action_normalizes_prices_before_verify_and_meta_update(
     assert meta["trailing_sl"] == pytest.approx(1.10321)
     assert meta["close_control"]["execution_status"] == "accepted"
     assert meta["close_control"]["readback_status"] == "verified"
+
+
+@pytest.mark.asyncio
+async def test_reprice_tp_updates_take_profit_and_persists_meta(
+    scheduler: Scheduler,
+    store: DecisionStore,
+    mock_matchtrader: AsyncMock,
+) -> None:
+    """REPRICE_TP should patch TP, verify readback, and persist dynamic_tp metadata."""
+    position = _make_position()
+    intent = _insert_opened_intent(store)
+    evaluation = TacticalExitEvaluation(
+        decision=TacticalExitDecision(
+            action="REPRICE_TP",
+            state="TREND_EXTENSION",
+            reason="dynamic_take_profit_repriced",
+            new_tp=1.1098761,
+        )
+    )
+
+    await scheduler._execute_tactical_exit_action(position, intent, evaluation)
+
+    modify_kwargs = mock_matchtrader.modify_position.await_args.kwargs
+    assert modify_kwargs["sl"] == pytest.approx(1.0980)
+    assert modify_kwargs["tp"] == pytest.approx(1.10988)
+
+    verify_kwargs = mock_matchtrader.verify_sl_tp.await_args.kwargs
+    assert verify_kwargs["expected_sl"] == pytest.approx(1.0980)
+    assert verify_kwargs["expected_tp"] == pytest.approx(1.10988)
+
+    meta = json.loads(store.get_decision(intent.id).execution_meta)
+    assert meta["dynamic_tp"] == pytest.approx(1.10988)
+    assert meta["last_tactical_exit_action"] == "REPRICE_TP"
+    assert meta["close_control"]["execution_status"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_exit_now_closes_full_position_and_persists_meta(
+    scheduler: Scheduler,
+    store: DecisionStore,
+    trade_journal: TradeJournal,
+    mock_matchtrader: AsyncMock,
+) -> None:
+    """EXIT_NOW should close the full position and persist close-control metadata."""
+    position = _make_position()
+    intent = _insert_opened_intent(store)
+    evaluation = TacticalExitEvaluation(
+        decision=TacticalExitDecision(
+            action="EXIT_NOW",
+            state="INITIAL_RISK",
+            reason="initial_risk_structure_failure",
+        )
+    )
+
+    await scheduler._execute_tactical_exit_action(position, intent, evaluation)
+
+    close_kwargs = mock_matchtrader.close_position.await_args.kwargs
+    assert close_kwargs["volume"] == pytest.approx(position.volume)
+
+    meta = json.loads(store.get_decision(intent.id).execution_meta)
+    assert meta["last_tactical_exit_action"] == "EXIT_NOW"
+    assert meta["close_control"]["action_kind"] == "full_close"
+    assert meta["close_control"]["execution_status"] == "submitted"
+
+    entries = [
+        json.loads(line)
+        for line in trade_journal._path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        entry.get("type") == "CLOSE_CONTROL_EVENT"
+        and entry.get("action_kind") == "full_close"
+        for entry in entries
+    )

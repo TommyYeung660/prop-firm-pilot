@@ -18,6 +18,7 @@ from src.decision.tactical_exit_manager import TacticalExitEvaluation
 from src.decision.tactical_exit_rules import TacticalExitDecision
 from src.decision.tactical_validator import TacticalData
 from src.decision_store.sqlite_store import DecisionStore
+from src.execution.broker_models import BrokerQuoteInfo
 from src.scheduler import scheduler as scheduler_module
 from src.scheduler.scheduler import Scheduler
 
@@ -142,6 +143,62 @@ async def test_run_tactical_exit_cycle_delegates_to_manager(scheduler: Scheduler
 
     scheduler._tactical_exit_manager.evaluate_position.assert_called_once()
     scheduler._handle_tactical_exit_evaluation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_tactical_exit_cycle_overrides_stale_position_price_with_live_quote(
+    scheduler: Scheduler,
+    mock_matchtrader: AsyncMock,
+) -> None:
+    """Tactical exit should use live broker quote when position current_price is stale."""
+    scheduler._fetch_tactical_data = AsyncMock(return_value=TacticalData())
+    scheduler._handle_tactical_exit_evaluation = AsyncMock()
+    scheduler._tactical_exit_manager = MagicMock()
+    scheduler._tactical_exit_manager.evaluate_position.return_value = TacticalExitEvaluation(
+        decision=TacticalExitDecision(
+            action="HOLD",
+            state="INITIAL_RISK",
+            reason="no_tactical_exit_action",
+        )
+    )
+    mock_matchtrader.get_quote.side_effect = [
+        BrokerQuoteInfo(symbol="USDCHF", bid=0.79190, ask=0.79198),
+        BrokerQuoteInfo(symbol="AUDJPY", bid=110.950, ask=110.962),
+    ]
+
+    buy_pos = _make_position()
+    buy_pos.symbol = "USDCHF"
+    buy_pos.side = "BUY"
+    buy_pos.open_price = 0.78947
+    buy_pos.current_price = 0.78947
+    buy_pos.profit = 209.75
+
+    sell_pos = _make_position()
+    sell_pos.position_id = "POS-2"
+    sell_pos.symbol = "AUDJPY"
+    sell_pos.side = "SELL"
+    sell_pos.open_price = 110.867
+    sell_pos.current_price = 110.867
+    sell_pos.profit = -74.19
+
+    buy_intent = _make_opened_intent()
+    buy_intent.symbol = "USDCHF"
+
+    sell_intent = _make_opened_intent()
+    sell_intent.id = "INT-2"
+    sell_intent.symbol = "AUDJPY"
+    sell_intent.position_id = "POS-2"
+
+    await scheduler._run_tactical_exit_cycle([buy_pos, sell_pos], [buy_intent, sell_intent])
+
+    first_snapshot = scheduler._tactical_exit_manager.evaluate_position.call_args_list[0].kwargs[
+        "snapshot"
+    ]
+    second_snapshot = scheduler._tactical_exit_manager.evaluate_position.call_args_list[1].kwargs[
+        "snapshot"
+    ]
+    assert first_snapshot.current_price == 0.79190
+    assert second_snapshot.current_price == 110.962
 
 
 @pytest.mark.asyncio

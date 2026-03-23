@@ -306,12 +306,26 @@ class TradeLockerClient:
         if rows and has_array_rows and not self._instrument_id_to_symbol:
             await self.get_effective_instruments()
 
+        raw_positions = [self._row_as_dict(row, POSITION_COLUMNS) for row in rows]
+        quote_by_symbol = await self._fetch_live_quotes_by_symbol(
+            [
+                self._resolve_position_symbol(values)
+                for values in raw_positions
+                if self._resolve_position_symbol(values)
+            ]
+        )
+        open_orders = await self._fetch_open_orders_safe()
+        order_by_id, orders_by_position = self._index_open_orders(open_orders)
+
         positions: list[BrokerPositionInfo] = []
-        for row in rows:
-            values = self._row_as_dict(row, POSITION_COLUMNS)
-            current_price = values.get(
-                "currentPrice",
-                values.get("markPrice", values.get("avgPrice", 0)),
+        for values in raw_positions:
+            symbol = self._resolve_position_symbol(values)
+            side = self._normalize_side(str(values.get("side", values.get("direction", ""))))
+            current_price = self._resolve_live_current_price(
+                values=values,
+                symbol=symbol,
+                side=side,
+                quote_by_symbol=quote_by_symbol,
             )
             profit = values.get(
                 "profit",
@@ -321,19 +335,22 @@ class TradeLockerClient:
                 "openTime",
                 values.get("createdAt", values.get("openDate", "")),
             )
+            sl_price, tp_price = self._resolve_position_protective_prices(
+                values=values,
+                order_by_id=order_by_id,
+                orders_by_position=orders_by_position,
+            )
             positions.append(
                 BrokerPositionInfo(
                     position_id=str(values.get("positionId", values.get("id", ""))),
-                    symbol=self._resolve_position_symbol(values),
-                    side=self._normalize_side(str(values.get("side", values.get("direction", "")))),
+                    symbol=symbol,
+                    side=side,
                     volume=self._as_float(values.get("qty", values.get("volume", 0))),
                     open_price=self._as_float(values.get("openPrice", values.get("avgPrice", 0))),
                     current_price=self._as_float(current_price),
                     profit=self._as_float(profit),
-                    sl_price=self._as_optional_float(values.get("stopLoss", values.get("slPrice"))),
-                    tp_price=self._as_optional_float(
-                        values.get("takeProfit", values.get("tpPrice"))
-                    ),
+                    sl_price=sl_price,
+                    tp_price=tp_price,
                     open_time=str(open_time),
                 )
             )
@@ -796,6 +813,153 @@ class TradeLockerClient:
         if instrument_id:
             return self._instrument_id_to_symbol.get(instrument_id, instrument_id)
         return ""
+
+    async def _fetch_live_quotes_by_symbol(
+        self,
+        symbols: list[str],
+    ) -> dict[str, BrokerQuoteInfo]:
+        """Fetch one live quote per symbol and degrade safely on failures."""
+        quotes: dict[str, BrokerQuoteInfo] = {}
+        seen: set[str] = set()
+        for symbol in symbols:
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            try:
+                quotes[symbol] = await self.get_quote(symbol)
+            except (TradeLockerError, RuntimeError, httpx.HTTPError) as exc:
+                logger.warning("TradeLocker: quote enrichment failed for {}: {}", symbol, exc)
+            except Exception as exc:
+                logger.warning("TradeLocker: quote enrichment failed for {}: {}", symbol, exc)
+        return quotes
+
+    async def _fetch_open_orders_safe(self) -> list[dict[str, Any]]:
+        """Fetch open orders for protective-price enrichment without failing positions read."""
+        fetcher = getattr(self, "_fetch_open_orders", None)
+        if not callable(fetcher):
+            return []
+        try:
+            return await fetcher()
+        except (TradeLockerError, RuntimeError, httpx.HTTPError) as exc:
+            logger.warning("TradeLocker: open-order enrichment failed: {}", exc)
+            return []
+        except Exception as exc:
+            logger.warning("TradeLocker: open-order enrichment failed: {}", exc)
+            return []
+
+    async def _fetch_open_orders(self) -> list[dict[str, Any]]:
+        """Fetch active account orders for protective SL/TP enrichment."""
+        payload = await self._account_request(
+            "GET",
+            "/trade/accounts/{account_id}/orders",
+        )
+        rows = self._extract_rows(payload, ["orders", "data"])
+        return [self._row_as_dict(row, ORDERS_HISTORY_COLUMNS) for row in rows]
+
+    @staticmethod
+    def _index_open_orders(
+        orders: list[dict[str, Any]],
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+        """Index open orders by order id and position id."""
+        order_by_id: dict[str, dict[str, Any]] = {}
+        orders_by_position: dict[str, list[dict[str, Any]]] = {}
+        for order in orders:
+            order_id = str(order.get("id", "")).strip()
+            if order_id:
+                order_by_id[order_id] = order
+            position_id = str(order.get("positionId", "")).strip()
+            if position_id:
+                orders_by_position.setdefault(position_id, []).append(order)
+        return order_by_id, orders_by_position
+
+    def _resolve_live_current_price(
+        self,
+        *,
+        values: dict[str, Any],
+        symbol: str,
+        side: str,
+        quote_by_symbol: dict[str, BrokerQuoteInfo],
+    ) -> float:
+        """Resolve the live executable price for a position."""
+        raw_current_price = self._as_float(
+            values.get("currentPrice", values.get("markPrice", values.get("avgPrice", 0)))
+        )
+        quote = quote_by_symbol.get(symbol)
+        if quote is None:
+            return raw_current_price
+        if side == "BUY" and quote.bid > 0:
+            return quote.bid
+        if side == "SELL" and quote.ask > 0:
+            return quote.ask
+        return raw_current_price
+
+    def _resolve_position_protective_prices(
+        self,
+        *,
+        values: dict[str, Any],
+        order_by_id: dict[str, dict[str, Any]],
+        orders_by_position: dict[str, list[dict[str, Any]]],
+    ) -> tuple[float | None, float | None]:
+        """Resolve SL/TP from inline payload first, then linked protective orders."""
+        sl_price = self._as_optional_float(values.get("stopLoss", values.get("slPrice")))
+        tp_price = self._as_optional_float(values.get("takeProfit", values.get("tpPrice")))
+
+        position_id = str(values.get("positionId", values.get("id", ""))).strip()
+        if sl_price is None:
+            stop_loss_id = str(values.get("stopLossId", "")).strip()
+            sl_price = self._extract_protective_price(
+                order_id=stop_loss_id,
+                order_kind="sl",
+                order_by_id=order_by_id,
+                orders_by_position=orders_by_position,
+                position_id=position_id,
+            )
+        if tp_price is None:
+            take_profit_id = str(values.get("takeProfitId", "")).strip()
+            tp_price = self._extract_protective_price(
+                order_id=take_profit_id,
+                order_kind="tp",
+                order_by_id=order_by_id,
+                orders_by_position=orders_by_position,
+                position_id=position_id,
+            )
+        return sl_price, tp_price
+
+    def _extract_protective_price(
+        self,
+        *,
+        order_id: str,
+        order_kind: Literal["sl", "tp"],
+        order_by_id: dict[str, dict[str, Any]],
+        orders_by_position: dict[str, list[dict[str, Any]]],
+        position_id: str,
+    ) -> float | None:
+        """Resolve a protective price from linked order ids or position-scoped orders."""
+        if order_id and order_id in order_by_id:
+            return self._extract_price_from_order(order_by_id[order_id], order_kind=order_kind)
+
+        for order in orders_by_position.get(position_id, []):
+            candidate = self._extract_price_from_order(order, order_kind=order_kind)
+            if candidate is not None:
+                return candidate
+        return None
+
+    def _extract_price_from_order(
+        self,
+        order: dict[str, Any],
+        *,
+        order_kind: Literal["sl", "tp"],
+    ) -> float | None:
+        """Extract a stop-loss or take-profit price from one open-order payload."""
+        order_type = str(order.get("type", order.get("orderType", ""))).strip().lower()
+        if order_kind == "sl":
+            if order_type in {"stop", "stop_loss", "sl"}:
+                return self._as_optional_float(order.get("stopPrice", order.get("price")))
+            return self._as_optional_float(order.get("stopLoss"))
+
+        if order_type in {"limit", "take_profit", "tp"}:
+            return self._as_optional_float(order.get("price", order.get("stopPrice")))
+        return self._as_optional_float(order.get("takeProfit"))
 
     async def _enrich_order_response(
         self,

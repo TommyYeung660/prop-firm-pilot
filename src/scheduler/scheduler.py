@@ -3136,6 +3136,52 @@ class Scheduler:
             last_tactical_exit_at=self._parse_meta_datetime(meta.get("last_tactical_exit_at")),
         )
 
+    @staticmethod
+    def _position_price_needs_tactical_refresh(pos: Any) -> bool:
+        """Return True when the broker position price looks stale for tactical exit."""
+        current_price = float(getattr(pos, "current_price", 0.0) or 0.0)
+        open_price = float(getattr(pos, "open_price", 0.0) or 0.0)
+        profit = float(getattr(pos, "profit", 0.0) or 0.0)
+        if current_price <= 0 or open_price <= 0:
+            return True
+        return abs(current_price - open_price) < 1e-12 and abs(profit) > 1e-9
+
+    async def _refresh_tactical_position_market_price(
+        self,
+        pos: Any,
+        symbol: str,
+    ) -> None:
+        """Refresh stale tactical position price from live broker quote when needed."""
+        if not self._position_price_needs_tactical_refresh(pos):
+            return
+
+        broker_symbol = symbol
+        if self._registry is not None:
+            try:
+                broker_symbol = self._registry.to_broker(symbol)
+            except KeyError:
+                broker_symbol = symbol
+        try:
+            quote = await self._matchtrader.get_quote(broker_symbol)
+        except Exception as e:
+            logger.debug(
+                "Tactical exit: live quote refresh failed for {} (broker_symbol={}): {}",
+                symbol,
+                broker_symbol,
+                e,
+            )
+            return
+
+        side = str(getattr(pos, "side", "")).upper()
+        refreshed_price = None
+        if side == "BUY":
+            refreshed_price = getattr(quote, "bid", 0.0) or 0.0
+        elif side == "SELL":
+            refreshed_price = getattr(quote, "ask", 0.0) or 0.0
+
+        if refreshed_price and refreshed_price > 0:
+            pos.current_price = float(refreshed_price)
+
     def _get_tactical_exit_budget_snapshot(self) -> WriteBudgetSnapshot:
         """Read current broker write-budget snapshot for tactical exit throttling."""
         limiter = getattr(
@@ -3493,6 +3539,7 @@ class Scheduler:
             if intent is None:
                 continue
 
+            await self._refresh_tactical_position_market_price(pos, intent.symbol)
             tactical_data = await self._fetch_tactical_data(intent.symbol)
             snapshot = self._build_tactical_exit_snapshot(pos, intent, tactical_data)
             evaluation = self._tactical_exit_manager.evaluate_position(

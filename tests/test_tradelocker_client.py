@@ -417,6 +417,156 @@ async def test_open_positions_parsing_handles_live_array_payload(
     assert positions[0].tp_price is None
 
 
+async def test_open_positions_live_array_uses_side_aware_quotes_for_current_price(
+    client: TradeLockerClient,
+) -> None:
+    client._instrument_id_to_symbol = {
+        "6124": "USDCHF",
+        "6125": "AUDJPY",
+    }
+    client._account_request = AsyncMock(
+        return_value={
+            "s": "ok",
+            "d": {
+                "positions": [
+                    [
+                        "POS-BUY",
+                        "6124",
+                        "948735",
+                        "buy",
+                        "0.62",
+                        "0.78947",
+                        None,
+                        None,
+                        "1774250624000",
+                        "209.75",
+                        "key-1",
+                    ],
+                    [
+                        "POS-SELL",
+                        "6125",
+                        "948735",
+                        "sell",
+                        "0.91",
+                        "110.867",
+                        None,
+                        None,
+                        "1774250624001",
+                        "-74.19",
+                        "key-2",
+                    ],
+                ]
+            },
+        }
+    )
+    client.get_quote = AsyncMock(
+        side_effect=[
+            BrokerQuoteInfo(symbol="USDCHF", bid=0.79190, ask=0.79198),
+            BrokerQuoteInfo(symbol="AUDJPY", bid=110.950, ask=110.962),
+        ]
+    )
+
+    positions = await client.get_open_positions()
+
+    assert len(positions) == 2
+    assert positions[0].current_price == 0.79190
+    assert positions[1].current_price == 110.962
+
+
+async def test_open_positions_live_array_recovers_sl_tp_from_protective_orders(
+    client: TradeLockerClient,
+) -> None:
+    client._instrument_id_to_symbol = {"6124": "USDCHF"}
+    client._account_request = AsyncMock(
+        return_value={
+            "s": "ok",
+            "d": {
+                "positions": [
+                    [
+                        "POS-BUY",
+                        "6124",
+                        "948735",
+                        "buy",
+                        "0.62",
+                        "0.78947",
+                        "ORDER-SL",
+                        "ORDER-TP",
+                        "1774250624000",
+                        "209.75",
+                        "key-1",
+                    ]
+                ]
+            },
+        }
+    )
+    client.get_quote = AsyncMock(
+        return_value=BrokerQuoteInfo(
+            symbol="USDCHF",
+            bid=0.79190,
+            ask=0.79198,
+        )
+    )
+    client._fetch_open_orders = AsyncMock(
+        return_value=[
+            {
+                "id": "ORDER-SL",
+                "positionId": "POS-BUY",
+                "type": "stop",
+                "stopPrice": "0.78700",
+            },
+            {
+                "id": "ORDER-TP",
+                "positionId": "POS-BUY",
+                "type": "limit",
+                "price": "0.79350",
+            },
+        ]
+    )
+
+    positions = await client.get_open_positions()
+
+    assert len(positions) == 1
+    assert positions[0].sl_price == 0.78700
+    assert positions[0].tp_price == 0.79350
+
+
+async def test_open_positions_enrichment_failure_falls_back_to_raw_position(
+    client: TradeLockerClient,
+) -> None:
+    client._instrument_id_to_symbol = {"6124": "USDCHF"}
+    client._account_request = AsyncMock(
+        return_value={
+            "s": "ok",
+            "d": {
+                "positions": [
+                    [
+                        "POS-BUY",
+                        "6124",
+                        "948735",
+                        "buy",
+                        "0.62",
+                        "0.78947",
+                        None,
+                        None,
+                        "1774250624000",
+                        "209.75",
+                        "key-1",
+                    ]
+                ]
+            },
+        }
+    )
+    client.get_quote = AsyncMock(side_effect=RuntimeError("quote unavailable"))
+    client._fetch_open_orders = AsyncMock(side_effect=RuntimeError("orders unavailable"))
+
+    positions = await client.get_open_positions()
+
+    assert len(positions) == 1
+    assert positions[0].current_price == 0.78947
+    assert positions[0].sl_price is None
+    assert positions[0].tp_price is None
+
+
 async def test_closed_positions_parsing_returns_broker_model(client: TradeLockerClient) -> None:
     client._account_request = AsyncMock(
         return_value=[
