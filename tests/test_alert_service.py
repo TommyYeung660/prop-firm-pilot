@@ -672,6 +672,22 @@ class TestTelegramBotHandler:
         mock_alert_service.format_profit_status.assert_called_once()
         mock_alert_service.send.assert_awaited()
 
+    async def test_cmd_profit_reuses_cached_snapshot_within_ttl(
+        self,
+        bot_handler: TelegramBotHandler,
+        mock_trading_client: AsyncMock,
+        mock_alert_service: AsyncMock,
+    ) -> None:
+        """Repeated /profit requests within TTL should not hit broker again."""
+        with patch("src.monitor.telegram_bot.time.monotonic", side_effect=[100.0, 105.0]):
+            await bot_handler._cmd_profit()
+            await bot_handler._cmd_profit()
+
+        mock_trading_client.get_balance.assert_awaited_once()
+        mock_trading_client.get_open_positions.assert_awaited_once()
+        mock_alert_service.format_profit_status.assert_called_once()
+        assert mock_alert_service.send.await_count == 2
+
     async def test_cmd_orders(
         self,
         bot_handler: TelegramBotHandler,

@@ -2413,8 +2413,14 @@ class Scheduler:
                 logger.info("Position monitor loop: cancelled")
                 return
             except Exception as e:
-                logger.error("Position monitor loop error: {}", e)
-                await self._send_alert(f"⚠️ <b>Position Monitor Error</b>\n<code>{e}</code>")
+                if self._is_broker_rate_limit_error(e):
+                    logger.warning(
+                        "Position monitor: broker rate limited — skipping cycle ({})",
+                        e,
+                    )
+                else:
+                    logger.error("Position monitor loop error: {}", e)
+                    await self._send_alert(f"⚠️ <b>Position Monitor Error</b>\n<code>{e}</code>")
 
             try:
                 # Auto-throttle: increase sleep when API budget is low
@@ -2456,6 +2462,16 @@ class Scheduler:
                 return
 
         logger.info("Position monitor loop: stopped")
+
+    @staticmethod
+    def _is_broker_rate_limit_error(error: Exception) -> bool:
+        """Return True when a broker read request failed due to rate limiting."""
+        message = str(error).lower()
+        if "rate limit" in message:
+            return True
+        if "too many requests" in message:
+            return True
+        return "429" in message and "api error" in message
 
     async def _handle_position_closed(self, intent: TradeIntent) -> None:
         """Process a detected position closure — update store and send alert.

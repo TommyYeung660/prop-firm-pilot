@@ -30,6 +30,7 @@ from src.decision.agent_bridge import AgentDecision
 from src.decision.schemas import TradeIntent
 from src.decision_store.sqlite_store import DecisionStore, InvalidTransitionError
 from src.execution.broker_models import BrokerInstrumentInfo
+from src.execution.tradelocker_client import TradeLockerError
 from src.optimize.optimization_state import OptimizationState, Thresholds
 from src.scheduler.scheduler import Scheduler
 
@@ -3081,6 +3082,50 @@ class TestPositionMonitorLoop:
 
         # Loop should complete without raising
         mock_alert.send.assert_called()  # Error alert sent
+
+    async def test_rate_limit_error_is_downgraded_without_alert(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """TradeLocker 429s should be logged as warnings without error alerts."""
+        mock_alert = AsyncMock()
+        mock_alert.send = AsyncMock()
+
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            alert_service=mock_alert,
+        )
+        sched._market_hours = MagicMock()
+        sched._market_hours.should_force_close.return_value = False
+        sched._market_hours.is_market_open.return_value = True
+
+        _advance_intent_to_opened(store, "EURUSD")
+        mock_matchtrader.get_open_positions.side_effect = TradeLockerError(
+            'TradeLocker API error 429: {"error":"Too Many Requests"}'
+        )
+
+        with (
+            patch("src.scheduler.scheduler.logger.warning") as mock_warning,
+            patch("src.scheduler.scheduler.logger.error") as mock_error,
+        ):
+            await _run_loop_once(sched, sched._position_monitor_loop())
+
+        mock_alert.send.assert_not_called()
+        mock_error.assert_not_called()
+        assert any(
+            call.args and "rate limited" in str(call.args[0]).lower()
+            for call in mock_warning.call_args_list
+        )
 
 
 # ── Daily Summary Loop Tests ───────────────────────────────────────────────

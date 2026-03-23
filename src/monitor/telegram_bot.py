@@ -75,6 +75,12 @@ class TelegramBotHandler:
         self._CIRCUIT_OPEN_THRESHOLD: int = 3
         self._CIRCUIT_RETRY_INTERVAL: float = 300.0  # seconds
 
+        # ── /profit Snapshot Cache ────────────────────────────────────
+        self._profit_snapshot_cache: str | None = None
+        self._profit_snapshot_cached_at: float = 0.0
+        self._profit_snapshot_ttl_seconds: float = 15.0
+        self._profit_snapshot_lock = asyncio.Lock()
+
     # ── Lifecycle ───────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -273,15 +279,7 @@ class TelegramBotHandler:
     async def _cmd_profit(self) -> None:
         """Handle /profit — show positions and profit target progress."""
         try:
-            balance = await self._trading_client.get_balance()
-            positions = await self._trading_client.get_open_positions()
-            pos_dicts = [p.model_dump() for p in positions]
-
-            message = self._alert_service.format_profit_status(
-                equity=balance.equity,
-                positions=pos_dicts,
-                day_start_balance=balance.balance,
-            )
+            message = await self._get_profit_snapshot()
             await self._send_reply(message)
         except Exception as e:
             logger.error("TelegramBotHandler: /profit failed: {}", e)
@@ -330,3 +328,29 @@ class TelegramBotHandler:
     async def _send_reply(self, text: str) -> None:
         """Send a reply message via the alert service."""
         await self._alert_service.send(text)
+
+    async def _get_profit_snapshot(self) -> str:
+        """Return a cached /profit snapshot when still fresh."""
+        async with self._profit_snapshot_lock:
+            now = time.monotonic()
+            if (
+                self._profit_snapshot_cache is not None
+                and now - self._profit_snapshot_cached_at < self._profit_snapshot_ttl_seconds
+            ):
+                logger.info(
+                    "TelegramBotHandler: /profit serving cached snapshot ({:.1f}s old)",
+                    now - self._profit_snapshot_cached_at,
+                )
+                return self._profit_snapshot_cache
+
+            balance = await self._trading_client.get_balance()
+            positions = await self._trading_client.get_open_positions()
+            pos_dicts = [p.model_dump() for p in positions]
+            message = self._alert_service.format_profit_status(
+                equity=balance.equity,
+                positions=pos_dicts,
+                day_start_balance=balance.balance,
+            )
+            self._profit_snapshot_cache = message
+            self._profit_snapshot_cached_at = now
+            return message
