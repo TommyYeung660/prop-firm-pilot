@@ -137,6 +137,53 @@ async def test_get_balance_auto_login_uses_resolved_account_path(client: TradeLo
     assert client._request.await_args.args == ("GET", "/trade/accounts/ACC-2/state")
 
 
+async def test_get_balance_parses_live_account_details_payload(client: TradeLockerClient) -> None:
+    client._ensure_auth = AsyncMock()
+    client._request = AsyncMock(
+        return_value={
+            "s": "ok",
+            "d": {
+                "accountDetailsData": [
+                    1000.0,
+                    1005.5,
+                    995.5,
+                    0.0,
+                    1000.0,
+                    0.0,
+                    995.5,
+                    0.0,
+                    0.0,
+                    10.0,
+                    8.0,
+                    90.0,
+                    0.0,
+                    0.0,
+                    100.0,
+                    0.0,
+                    995.5,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    5.5,
+                    5.5,
+                    1,
+                    0,
+                ]
+            },
+        }
+    )
+
+    balance = await client.get_balance()
+
+    assert balance.balance == 1000.0
+    assert balance.equity == 1005.5
+    assert balance.margin == 10.0
+    assert balance.free_margin == 995.5
+    assert balance.currency == "USD"
+
+
 async def test_quote_parsing_returns_broker_model(client: TradeLockerClient) -> None:
     client._ensure_auth = AsyncMock()
     client._resolve_symbol_meta = AsyncMock(
@@ -164,6 +211,35 @@ async def test_quote_parsing_returns_broker_model(client: TradeLockerClient) -> 
     assert quote.bid == 1.08101
     assert quote.ask == 1.08103
     assert quote.timestamp_ms == 1726200032067
+
+
+async def test_quote_parsing_handles_live_bp_ap_payload(client: TradeLockerClient) -> None:
+    client._ensure_auth = AsyncMock()
+    client._resolve_symbol_meta = AsyncMock(
+        return_value={
+            "tradableInstrumentId": "TI-EURUSD",
+            "infoRouteId": "948733",
+            "tradeRouteId": "948735",
+        }
+    )
+    client._request = AsyncMock(
+        return_value={
+            "s": "ok",
+            "d": {
+                "bp": 1.08101,
+                "ap": 1.08103,
+                "bs": 100000.0,
+                "as": 100000.0,
+            },
+        }
+    )
+
+    quote = await client.get_quote("EURUSD")
+
+    assert quote.symbol == "EURUSD"
+    assert quote.bid == 1.08101
+    assert quote.ask == 1.08103
+    assert quote.timestamp_ms == 0
 
 
 async def test_instrument_parsing_returns_broker_model(client: TradeLockerClient) -> None:
@@ -200,6 +276,49 @@ async def test_instrument_parsing_returns_broker_model(client: TradeLockerClient
     assert instruments[0].price_precision == 5
 
 
+async def test_instrument_parsing_handles_live_nested_payload_and_symbol_suffixes(
+    client: TradeLockerClient,
+) -> None:
+    client._account_request = AsyncMock(
+        return_value={
+            "s": "ok",
+            "d": {
+                "instruments": [
+                    {
+                        "name": "EURUSD+",
+                        "description": "Euro vs US Dollar",
+                        "type": "FOREX",
+                        "sessionOpen": True,
+                        "volumeMin": "0.01",
+                        "volumeMax": "50",
+                        "volumeStep": "0.01",
+                        "volumePrecision": 2,
+                        "pricePrecision": 5,
+                        "sizeOfOnePoint": "0.00001",
+                        "contractSize": "100000",
+                        "leverage": "100",
+                        "tradableInstrumentId": 6119,
+                        "routes": [
+                            {"id": 948735, "type": "TRADE"},
+                            {"id": 948733, "type": "INFO"},
+                        ],
+                    }
+                ]
+            },
+        }
+    )
+
+    instruments = await client.get_effective_instruments()
+
+    assert len(instruments) == 1
+    assert instruments[0].symbol == "EURUSD"
+    assert instruments[0].alias == "EURUSD+"
+    assert client._symbol_meta["EURUSD"]["tradableInstrumentId"] == "6119"
+    assert client._symbol_meta["EURUSD"]["infoRouteId"] == "948733"
+    assert client._symbol_meta["EURUSD"]["tradeRouteId"] == "948735"
+    assert client._symbol_meta["EURUSD+"]["tradableInstrumentId"] == "6119"
+
+
 async def test_open_positions_parsing_returns_broker_model(client: TradeLockerClient) -> None:
     client._account_request = AsyncMock(
         return_value=[
@@ -226,6 +345,36 @@ async def test_open_positions_parsing_returns_broker_model(client: TradeLockerCl
     assert positions[0].volume == 0.1
     assert positions[0].sl_price == 1.07
     assert positions[0].tp_price == 1.09
+
+
+async def test_open_positions_parsing_handles_live_nested_payload(
+    client: TradeLockerClient,
+) -> None:
+    client._account_request = AsyncMock(
+        return_value={
+            "s": "ok",
+            "d": {
+                "positions": [
+                    {
+                        "id": "POS-1",
+                        "symbol": "EURUSD+",
+                        "side": "BUY",
+                        "qty": "0.10",
+                        "avgPrice": "1.0800",
+                        "unrealizedPl": "10.5",
+                    }
+                ]
+            },
+        }
+    )
+
+    positions = await client.get_open_positions()
+
+    assert len(positions) == 1
+    assert positions[0].position_id == "POS-1"
+    assert positions[0].symbol == "EURUSD"
+    assert positions[0].volume == 0.1
+    assert positions[0].profit == 10.5
 
 
 async def test_closed_positions_parsing_returns_broker_model(client: TradeLockerClient) -> None:

@@ -162,7 +162,16 @@ class TradeLockerClient:
 
     async def get_balance(self) -> BrokerBalanceInfo:
         payload = await self._account_request("GET", "/trade/accounts/{account_id}/state")
-        state = payload if isinstance(payload, dict) else {}
+        state = self._extract_object(payload)
+        details = state.get("accountDetailsData")
+        if isinstance(details, list):
+            return BrokerBalanceInfo(
+                balance=self._value_at(details, 0),
+                equity=self._value_at(details, 1),
+                margin=self._value_at(details, 9),
+                free_margin=self._value_at(details, 2),
+                currency=str(state.get("currency", "USD")),
+            )
         return BrokerBalanceInfo(
             balance=self._as_float(state.get("balance")),
             equity=self._as_float(state.get("equity")),
@@ -180,8 +189,9 @@ class TradeLockerClient:
 
         instruments: list[BrokerInstrumentInfo] = []
         for row in rows:
-            symbol = str(row.get("symbol", row.get("name", "")))
-            routes = row.get("routes", {})
+            raw_symbol = str(row.get("symbol", row.get("name", "")))
+            symbol = self._normalize_symbol(raw_symbol)
+            routes = self._extract_routes(row.get("routes", {}))
             info_route_id = str(row.get("infoRouteId", routes.get("INFO", "")))
             trade_route_id = str(row.get("tradeRouteId", routes.get("TRADE", "")))
             tradable_instrument_id = str(
@@ -189,16 +199,19 @@ class TradeLockerClient:
             )
 
             if symbol:
-                self._symbol_meta[symbol.upper()] = {
+                meta = {
                     "tradableInstrumentId": tradable_instrument_id,
                     "infoRouteId": info_route_id,
                     "tradeRouteId": trade_route_id,
                 }
+                self._symbol_meta[symbol.upper()] = meta
+                if raw_symbol:
+                    self._symbol_meta[raw_symbol.upper()] = meta
 
             instruments.append(
                 BrokerInstrumentInfo(
                     symbol=symbol,
-                    alias=str(row.get("alias", symbol)),
+                    alias=str(row.get("alias", raw_symbol or symbol)),
                     description=str(row.get("description", "")),
                     type=str(row.get("type", "")),
                     base_currency=str(row.get("baseCurrency", "")),
@@ -232,12 +245,14 @@ class TradeLockerClient:
         )
         quote = self._extract_quote(payload)
         return BrokerQuoteInfo(
-            symbol=str(quote.get("symbol", symbol)),
-            bid=self._as_float(quote.get("bid")),
-            ask=self._as_float(quote.get("ask")),
-            high=self._as_float(quote.get("high")),
-            low=self._as_float(quote.get("low")),
-            timestamp_ms=self._as_int(quote.get("timestampMs", quote.get("timestamp", 0))),
+            symbol=self._normalize_symbol(str(quote.get("symbol", symbol))),
+            bid=self._as_float(quote.get("bid", quote.get("bp"))),
+            ask=self._as_float(quote.get("ask", quote.get("ap"))),
+            high=self._as_float(quote.get("high", quote.get("hp"))),
+            low=self._as_float(quote.get("low", quote.get("lp"))),
+            timestamp_ms=self._as_int(
+                quote.get("timestampMs", quote.get("timestamp", quote.get("t", 0)))
+            ),
         )
 
     async def get_open_positions(self) -> list[BrokerPositionInfo]:
@@ -249,7 +264,9 @@ class TradeLockerClient:
             positions.append(
                 BrokerPositionInfo(
                     position_id=str(row.get("positionId", row.get("id", ""))),
-                    symbol=str(row.get("symbol", row.get("instrument", ""))),
+                    symbol=self._normalize_symbol(
+                        str(row.get("symbol", row.get("instrument", "")))
+                    ),
                     side=self._normalize_side(str(row.get("side", row.get("direction", "")))),
                     volume=self._as_float(row.get("qty", row.get("volume", 0))),
                     open_price=self._as_float(row.get("openPrice", row.get("avgPrice", 0))),
@@ -278,7 +295,9 @@ class TradeLockerClient:
             closed.append(
                 BrokerClosedPosition(
                     position_id=str(row.get("positionId", row.get("id", ""))),
-                    symbol=str(row.get("symbol", row.get("instrument", ""))),
+                    symbol=self._normalize_symbol(
+                        str(row.get("symbol", row.get("instrument", "")))
+                    ),
                     side=self._normalize_side(str(row.get("side", row.get("direction", "")))),
                     volume=self._as_float(row.get("qty", row.get("volume", 0))),
                     open_price=self._as_float(row.get("openPrice", row.get("entryPrice", 0))),
@@ -593,6 +612,11 @@ class TradeLockerClient:
                     return [row for row in value if isinstance(row, dict)]
             if isinstance(payload.get("d"), list):
                 return [row for row in payload["d"] if isinstance(row, dict)]
+            if isinstance(payload.get("d"), dict):
+                for key in candidate_keys:
+                    value = payload["d"].get(key)
+                    if isinstance(value, list):
+                        return [row for row in value if isinstance(row, dict)]
         return []
 
     @staticmethod
@@ -601,6 +625,8 @@ class TradeLockerClient:
             if "quotes" in payload and isinstance(payload["quotes"], list) and payload["quotes"]:
                 first = payload["quotes"][0]
                 return first if isinstance(first, dict) else {}
+            if isinstance(payload.get("d"), dict):
+                return payload["d"]
             return payload
         if isinstance(payload, list) and payload:
             first = payload[0]
@@ -608,11 +634,44 @@ class TradeLockerClient:
         return {}
 
     @staticmethod
+    def _extract_object(payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            if isinstance(payload.get("d"), dict):
+                return payload["d"]
+            return payload
+        return {}
+
+    @staticmethod
+    def _extract_routes(routes: Any) -> dict[str, Any]:
+        if isinstance(routes, dict):
+            return routes
+        if isinstance(routes, list):
+            resolved: dict[str, Any] = {}
+            for route in routes:
+                if not isinstance(route, dict):
+                    continue
+                route_type = str(route.get("type", "")).upper()
+                if route_type:
+                    resolved[route_type] = route.get("id", "")
+            return resolved
+        return {}
+
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        return symbol.strip().rstrip(".+")
+
+    @staticmethod
     def _normalize_side(value: str) -> str:
         side = value.upper()
         if side in {"BUY", "SELL"}:
             return side
         return value
+
+    @staticmethod
+    def _value_at(values: list[Any], index: int) -> float:
+        if index < 0 or index >= len(values):
+            return 0.0
+        return TradeLockerClient._as_float(values[index])
 
     @staticmethod
     def _as_float(value: Any) -> float:
