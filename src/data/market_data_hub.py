@@ -347,8 +347,6 @@ class MarketDataHub:
             block_reason = "market_data.broker_quote_unavailable"
         elif not quote_available:
             block_reason = "market_data.quote_unavailable"
-        elif not bars_1h_fresh:
-            block_reason = "market_data.bars_1h_stale"
         elif bars_5m_result.bars.empty:
             requires_tactical_retry = True
             pending_reason = "market_data.startup_5m_bar_pending"
@@ -357,7 +355,6 @@ class MarketDataHub:
                 symbol=symbol,
                 websocket_state=websocket_state,
                 quote_available=quote_available,
-                bars_1h_fresh=bars_1h_fresh,
                 bars_5m_close_at=bars_5m_close_at,
                 current_trade_date=current_trade_date,
             ):
@@ -399,14 +396,13 @@ class MarketDataHub:
         symbol: str,
         websocket_state: str,
         quote_available: bool,
-        bars_1h_fresh: bool,
         bars_5m_close_at: datetime | None,
         current_trade_date: date,
     ) -> bool:
         """Detect cold-start windows before the first websocket 5m bar closes."""
         if symbol in self._forced_stale_symbols:
             return False
-        if websocket_state != "healthy" or not quote_available or not bars_1h_fresh:
+        if websocket_state != "healthy" or not quote_available:
             return False
         if bars_5m_close_at is not None and bars_5m_close_at.date() < current_trade_date:
             return False
