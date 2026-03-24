@@ -2358,6 +2358,109 @@ class TestStartStop:
         await kwargs["realtime_quote_provider"]("EURUSD")
         mock_realtime_provider.fetch_quote.assert_awaited_once()
 
+    async def test_initialize_market_data_hub_keeps_hub_when_websocket_disabled(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        monkeypatch,
+    ) -> None:
+        """Disabling websocket should not disable the market-data hub itself."""
+        monkeypatch.setenv("EODHD_API_KEY", "test-key")
+        config.websocket.enabled = False
+        config.websocket.symbols = ["EURUSD"]
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        sched._eodhd_realtime = MagicMock()
+
+        mock_hub = MagicMock()
+        mock_hub.warmup = AsyncMock()
+        mock_ws = MagicMock()
+        mock_ws.register_tick_callback = MagicMock()
+        mock_ws.run = AsyncMock(return_value=None)
+        created_tasks: list[MagicMock] = []
+
+        def _create_task_stub(coro):
+            if hasattr(coro, "close"):
+                coro.close()
+            task = MagicMock()
+            created_tasks.append(task)
+            return task
+
+        with (
+            patch("src.scheduler.scheduler.EODHDFXWebSocketClient", return_value=mock_ws),
+            patch("src.scheduler.scheduler.MarketDataHub", return_value=mock_hub) as hub_cls,
+            patch("src.scheduler.scheduler.asyncio.create_task", side_effect=_create_task_stub),
+        ):
+            await sched._initialize_market_data_hub()
+
+        assert hub_cls.called
+        mock_hub.warmup.assert_awaited_once()
+        mock_ws.run.assert_not_called()
+        assert len(created_tasks) == 1
+        assert sched._market_data_ready is True
+
+    async def test_poll_market_data_once_ingests_realtime_quotes_into_hub(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """One polling pass should ingest only valid realtime quotes into the hub."""
+        config.websocket.symbols = ["EURUSD", "GBPUSD"]
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        sched._eodhd_realtime = MagicMock()
+        sched._eodhd_realtime.fetch_quote = AsyncMock(
+            side_effect=[
+                {
+                    "symbol": "EURUSD",
+                    "bid": 1.1001,
+                    "ask": 1.1003,
+                    "mid": 1.1002,
+                    "timestamp_ms": 1774072200000,
+                },
+                None,
+            ]
+        )
+        sched._market_data_hub = MagicMock()
+        sched._market_data_hub.ingest_realtime_quote = MagicMock(return_value=True)
+
+        client = MagicMock()
+        await sched._poll_market_data_once(client)
+
+        assert sched._eodhd_realtime.fetch_quote.await_count == 2
+        sched._eodhd_realtime.fetch_quote.assert_any_await("EURUSD", client)
+        sched._eodhd_realtime.fetch_quote.assert_any_await("GBPUSD", client)
+        sched._market_data_hub.ingest_realtime_quote.assert_called_once_with(
+            symbol="EURUSD",
+            quote={
+                "symbol": "EURUSD",
+                "bid": 1.1001,
+                "ask": 1.1003,
+                "mid": 1.1002,
+                "timestamp_ms": 1774072200000,
+            },
+        )
+
 
 # ── Helper Method Tests ─────────────────────────────────────────────────────
 

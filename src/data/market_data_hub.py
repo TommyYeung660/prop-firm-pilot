@@ -353,7 +353,6 @@ class MarketDataHub:
         elif not bars_5m_fresh:
             if self._is_startup_5m_bar_pending(
                 symbol=symbol,
-                websocket_state=websocket_state,
                 quote_available=quote_available,
                 bars_5m_close_at=bars_5m_close_at,
                 current_trade_date=current_trade_date,
@@ -394,7 +393,6 @@ class MarketDataHub:
         self,
         *,
         symbol: str,
-        websocket_state: str,
         quote_available: bool,
         bars_5m_close_at: datetime | None,
         current_trade_date: date,
@@ -402,13 +400,36 @@ class MarketDataHub:
         """Detect cold-start windows before the first websocket 5m bar closes."""
         if symbol in self._forced_stale_symbols:
             return False
-        if websocket_state != "healthy" or not quote_available:
+        if not quote_available:
             return False
         if bars_5m_close_at is not None and bars_5m_close_at.date() < current_trade_date:
             return False
 
         self._aggregator.close_elapsed_bars(now=self._now_provider())
         return not self._aggregator.get_closed_bars(symbol, "5m", 1)
+
+    def ingest_realtime_quote(
+        self,
+        *,
+        symbol: str,
+        quote: dict[str, Any] | Any,
+    ) -> bool:
+        """Normalize and feed one live quote snapshot into the aggregator."""
+        normalized = self._normalize_quote_payload(symbol=symbol, payload=quote)
+        if normalized is None:
+            return False
+
+        timestamp_ms = normalized.get("timestamp_ms")
+        if not isinstance(timestamp_ms, int) or timestamp_ms <= 0:
+            return False
+
+        quote_time = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
+        age = self._now_provider() - quote_time
+        if age > timedelta(seconds=self._quote_ttl_seconds):
+            return False
+
+        self._feed_realtime_quote(symbol=symbol, quote=normalized)
+        return True
 
     def _bars_from_aggregator(
         self,

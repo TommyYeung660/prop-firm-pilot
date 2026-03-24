@@ -590,6 +590,30 @@ class TestTacticalVerdictSchema:
         assert result.summary_reason_code == "market_data.startup_5m_bar_pending"
         assert result.policy_hints["retryable"] is True
 
+    def test_waits_for_first_5m_bar_when_broker_quote_is_fresh_but_5m_bars_are_missing(
+        self,
+    ) -> None:
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        data = TacticalData(
+            bars_5min=pd.DataFrame(),
+            bars_1h=pd.DataFrame(),
+            current_spread=0.00015,
+            typical_spread=0.00015,
+            latest_bar_time=datetime.now(timezone.utc) - timedelta(seconds=20),
+            quote_source="broker_quote",
+            bars_5min_source="",
+            bars_1h_source="",
+            data_source="broker_quote",
+        )
+
+        result = validator.evaluate(side="BUY", data=data)
+
+        assert result.action == "WAIT"
+        assert result.resolution == "RETRY_PENDING"
+        assert result.summary_reason_code == "market_data.startup_5m_bar_pending"
+        assert result.policy_hints["retryable"] is True
+
     def test_hard_gate_wait_from_insufficient_1h_data_disallows_degrade(self) -> None:
         config = TacticalConfig()
         validator = TacticalValidator(config)

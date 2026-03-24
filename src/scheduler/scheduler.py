@@ -162,6 +162,7 @@ class Scheduler:
         self._websocket_client: EODHDFXWebSocketClient | None = None
         self._market_data_hub: MarketDataHub | None = None
         self._market_data_task: asyncio.Task[None] | None = None
+        self._market_data_poll_task: asyncio.Task[None] | None = None
         self._market_data_ready = False
         self._metrics = metrics or OperationalMetrics()
 
@@ -280,6 +281,9 @@ class Scheduler:
         if self._market_data_task is not None:
             self._market_data_task.cancel()
             self._market_data_task = None
+        if self._market_data_poll_task is not None:
+            self._market_data_poll_task.cancel()
+            self._market_data_poll_task = None
 
     def _build_metrics_snapshot(self) -> dict[str, Any]:
         """Build the current operational metrics snapshot with feed status."""
@@ -304,8 +308,6 @@ class Scheduler:
     async def _initialize_market_data_hub(self) -> None:
         """Warm up and start the hybrid market-data sidecar."""
         self._market_data_ready = False
-        if not self._config.websocket.enabled:
-            return
         if self._eodhd is None:
             logger.warning(
                 "Scheduler: websocket market data requested but EODHD provider unavailable"
@@ -337,8 +339,47 @@ class Scheduler:
         )
         self._volatility_monitor.set_market_data_hub(self._market_data_hub)
         await self._market_data_hub.warmup()
-        self._market_data_task = asyncio.create_task(self._websocket_client.run())
+        if self._eodhd_realtime is not None:
+            self._market_data_poll_task = asyncio.create_task(self._market_data_poll_loop())
+        if self._config.websocket.enabled:
+            self._market_data_task = asyncio.create_task(self._websocket_client.run())
         self._market_data_ready = True
+
+    def _market_data_poll_interval_seconds(self) -> int:
+        """Return the live quote polling cadence used to sustain aggregator bars."""
+        return max(1, self._config.websocket.quote_ttl_seconds // 3)
+
+    async def _poll_market_data_once(self, client: httpx.AsyncClient) -> None:
+        """Fetch one realtime quote snapshot per symbol and feed the market-data hub."""
+        if self._market_data_hub is None or self._eodhd_realtime is None:
+            return
+
+        symbols = self._config.websocket.symbols or list(self._config.symbols)
+        for symbol in symbols:
+            try:
+                quote = await self._eodhd_realtime.fetch_quote(symbol, client)
+            except Exception as e:
+                logger.debug("Scheduler: realtime polling failed for {}: {}", symbol, e)
+                continue
+            if quote is None:
+                continue
+            self._market_data_hub.ingest_realtime_quote(symbol=symbol, quote=quote)
+
+    async def _market_data_poll_loop(self) -> None:
+        """Continuously ingest realtime quotes into the shared tick aggregator."""
+        interval_seconds = self._market_data_poll_interval_seconds()
+        try:
+            async with httpx.AsyncClient() as client:
+                while self._running:
+                    try:
+                        await self._poll_market_data_once(client)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning("Scheduler: market-data polling loop error: {}", e)
+                    await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            raise
 
     async def _market_data_broker_quote_provider(self, symbol: str) -> Any | None:
         """Resolve broker quote for market-data hub primary quote path."""
@@ -1909,7 +1950,7 @@ class Scheduler:
                 hub_supplied_data = (
                     data.current_spread > 0 or not data.bars_5min.empty or not data.bars_1h.empty
                 )
-                if hub_supplied_data and hub_quote_has_timestamp:
+                if hub_quote_has_timestamp and not data.bars_5min.empty and not data.bars_1h.empty:
                     return data
             except Exception as e:
                 logger.warning("Failed to fetch hub intraday bars for {}: {}", symbol, e)
@@ -1919,31 +1960,34 @@ class Scheduler:
         broker_symbol = symbol
         if self._registry is not None:
             broker_symbol = self._registry.to_broker(symbol)
-        try:
-            quote = await self._matchtrader.get_quote(broker_symbol)
-            if quote:
-                if isinstance(quote, dict):
-                    ask = quote.get("ask", 0)
-                    bid = quote.get("bid", 0)
-                    ts_ms = quote.get("timestampMs", 0)
-                else:
-                    ask = getattr(quote, "ask", 0)
-                    bid = getattr(quote, "bid", 0)
-                    ts_ms = getattr(quote, "timestamp_ms", 0)
-                data.current_spread = abs(ask - bid)
-                # v1.3.9-fix: Use quote timestamp for data_freshness gate instead
-                # of EODHD bar time.  EODHD intraday bars can lag 10+ hours during
-                # DST transitions; MatchTrader quotes are real-time (<1 min delay).
-                if ts_ms:
-                    data.latest_bar_time = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-                    logger.debug(
-                        "Tactical: quote timestamp for {} = {} (age {:.0f}s)",
-                        symbol,
-                        data.latest_bar_time,
-                        (datetime.now(timezone.utc) - data.latest_bar_time).total_seconds(),
-                    )
-        except Exception as e:
-            logger.debug("Failed to fetch quote for {}: {}", symbol, e)
+        if not hub_quote_has_timestamp:
+            try:
+                quote = await self._matchtrader.get_quote(broker_symbol)
+                if quote:
+                    if isinstance(quote, dict):
+                        ask = quote.get("ask", 0)
+                        bid = quote.get("bid", 0)
+                        ts_ms = quote.get("timestampMs", 0)
+                    else:
+                        ask = getattr(quote, "ask", 0)
+                        bid = getattr(quote, "bid", 0)
+                        ts_ms = getattr(quote, "timestamp_ms", 0)
+                    data.current_spread = abs(ask - bid)
+                    # v1.3.9-fix: Use quote timestamp for data_freshness gate instead
+                    # of EODHD bar time.  EODHD intraday bars can lag 10+ hours during
+                    # DST transitions; MatchTrader quotes are real-time (<1 min delay).
+                    if ts_ms:
+                        data.latest_bar_time = datetime.fromtimestamp(
+                            ts_ms / 1000, tz=timezone.utc
+                        )
+                        logger.debug(
+                            "Tactical: quote timestamp for {} = {} (age {:.0f}s)",
+                            symbol,
+                            data.latest_bar_time,
+                            (datetime.now(timezone.utc) - data.latest_bar_time).total_seconds(),
+                        )
+            except Exception as e:
+                logger.debug("Failed to fetch quote for {}: {}", symbol, e)
 
         if hub_supplied_data:
             return data

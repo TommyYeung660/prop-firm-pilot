@@ -939,6 +939,68 @@ async def test_entry_readiness_marks_same_day_stale_5m_gap_as_retryable_even_whe
 
 
 @pytest.mark.asyncio
+async def test_entry_readiness_marks_same_day_stale_5m_gap_as_retryable_without_websocket_health(
+) -> None:
+    now = datetime(2026, 3, 24, 6, 45, 30, tzinfo=timezone.utc)
+    tick_time = datetime(2026, 3, 24, 6, 45, 5, tzinfo=timezone.utc)
+    hub = MarketDataHub(
+        aggregator=FXTickAggregator(),
+        websocket_client=EODHDFXWebSocketClient(
+            api_token="token",
+            symbols=["USDCAD"],
+            stale_after_seconds=45,
+        ),
+        rest_provider=DummyProvider([]),
+        symbols=["USDCAD"],
+        now_provider=lambda: now,
+        broker_quote_provider=AsyncMock(
+            return_value={
+                "bid": 1.3735,
+                "ask": 1.3737,
+                "timestampMs": int(tick_time.timestamp() * 1000),
+            }
+        ),
+    )
+    hub._warm_cache[("USDCAD", "5m")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-24T02:00:00Z"),
+                "open": 1.3720,
+                "high": 1.3740,
+                "low": 1.3710,
+                "close": 1.3735,
+                "volume": 0,
+            }
+        ]
+    )
+    hub._warm_cache[("USDCAD", "1h")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-24T02:00:00Z"),
+                "open": 1.3715,
+                "high": 1.3745,
+                "low": 1.3705,
+                "close": 1.3735,
+                "volume": 0,
+            }
+        ]
+    )
+
+    readiness = await hub.get_entry_readiness("USDCAD")
+
+    assert readiness.entry_safe is True
+    assert readiness.block_reason == ""
+    assert readiness.requires_tactical_retry is True
+    assert readiness.pending_reason == "market_data.startup_5m_bar_pending"
+    assert readiness.quote_source == "broker_quote"
+    assert readiness.quote_available is True
+    assert readiness.bars_5m_source == "rest_fallback"
+    assert readiness.bars_5m_fresh is False
+    assert readiness.bars_1h_fresh is False
+    assert readiness.websocket_state == "disconnected"
+
+
+@pytest.mark.asyncio
 async def test_entry_readiness_blocks_when_latest_5m_bar_is_from_previous_utc_day() -> None:
     now = datetime(2026, 3, 19, 0, 10, tzinfo=timezone.utc)
     tick_time = datetime(2026, 3, 19, 0, 9, 50, tzinfo=timezone.utc)
