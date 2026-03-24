@@ -17,10 +17,14 @@ PropFirmPilot `v1.5.0` 預設接受以下上游設定：
 
 - `profile = fx`
 - `scanner_version = v1.5.0`
-- `label_version = cost_aware_directional_return_v1`
+- `label_version = binary_forward_return_sign_v1`
 - `signal schema = fx_signal_v1`
 - `metrics schema = fx_metrics_v1`
 - `bundle version = fx_bundle_v1`
+
+這裡的 `label_version` 更新屬於 semantics repair，而不是模型行為升級。上游
+`qlib_market_scanner` 目前的 supervised target 仍是 binary forward-return
+sign，因此 downstream 應把 `binary_forward_return_sign_v1` 理解成「命名終於與現況一致」，而不是「已完成 true cost-aware supervised label」。
 
 凍結 universe：
 

@@ -9,12 +9,13 @@
 - `profile`: `fx`
 - `scanner_version`: `v1.5.0`
 - `signal schema`: `fx_signal_v1`
-- `label_version`: `cost_aware_directional_return_v1`
+- `label_version`: `binary_forward_return_sign_v1`
 - `FX baseline`: `EURUSD`, `GBPUSD`, `USDJPY`, `AUDUSD`, `NZDUSD`, `USDCAD`, `USDCHF`
 - `research cadences`: `1d`, `1h`, `4h+1h`, `1d+1h`
 
 補充定位:
 
+- 目前 active `label_version = binary_forward_return_sign_v1` 屬於 semantics repair；它只是把 downstream contract 對齊到上游現行的 binary forward-return sign supervised target，不代表模型已升級為 true cost-aware supervised label。
 - `entry funnel ablation / reality check` 屬於 `v1.5.x` validation accumulation，不是 `v1.5.0 stable` 的 minimum gate。
 - 現行 bounded live default 仍以 `scanner -> LLM -> tactical` 為主線；`tactical-only` 只屬實驗模式，不是新的預設架構。
 
@@ -56,6 +57,7 @@ PropFirmPilot 在 live ingest 前預期 scanner bundle 至少包含以下 artifa
 - `schema_versions.signals_csv = fx_signal_v1`
 - `schema_versions.metrics_json = fx_metrics_v1`
 - `bundle_version = fx_bundle_v1`
+- `label_version = binary_forward_return_sign_v1`
 
 ## Validation Gates
 
