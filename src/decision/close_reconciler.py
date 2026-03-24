@@ -48,6 +48,7 @@ class CloseReconciler:
 
         final_close_reason = self._resolve_final_close_reason(
             trigger_source=trigger_source,
+            action_kind=action_kind,
             close_price=close_price,
             pnl=pnl,
             execution_meta=execution_meta,
@@ -83,6 +84,7 @@ class CloseReconciler:
         self,
         *,
         trigger_source: str,
+        action_kind: str,
         close_price: float,
         pnl: float,
         execution_meta: dict[str, Any],
@@ -92,6 +94,16 @@ class CloseReconciler:
         """Resolve the canonical final close reason with fixed priority rules."""
         if trigger_source in {"emergency_close", "best_day_close", "reeval_close"}:
             return trigger_source
+        if trigger_source == "tactical_exit" and action_kind == "full_close":
+            close_control = execution_meta.get("close_control", {})
+            if isinstance(close_control, dict):
+                reason_code = str(close_control.get("reason_code", "") or "")
+                if reason_code:
+                    return reason_code
+            tactical_reason = str(execution_meta.get("tactical_exit_reason", "") or "")
+            if tactical_reason:
+                return tactical_reason
+            return "tactical_exit"
 
         broker_reason = broker_close_reason.upper()
         if broker_reason == "TAKE_PROFIT":

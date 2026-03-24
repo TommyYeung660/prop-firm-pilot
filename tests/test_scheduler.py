@@ -27,6 +27,7 @@ from src.config import (
     SchedulerConfig,
 )
 from src.decision.agent_bridge import AgentDecision
+from src.decision.close_models import CloseOutcome
 from src.decision.schemas import TradeIntent
 from src.decision_store.sqlite_store import DecisionStore, InvalidTransitionError
 from src.execution.broker_models import BrokerInstrumentInfo
@@ -4921,6 +4922,74 @@ async def test_handle_position_closed_exit_reason_from_close_price(
     call_kwargs = sched._alert_service.sl_tp_hit.call_args[1]
     assert call_kwargs["hit_type"] == "TP"
     assert call_kwargs["trigger_price"] == 1.0951
+
+
+async def test_handle_position_closed_preserves_tactical_exit_reason_over_positive_fallback_pnl(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+):
+    """Tactical full closes should not be re-labeled as tp_hit from fallback profit."""
+    import json
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+    sched._alert_service = AsyncMock()
+
+    opened = _advance_intent_to_opened(store, "CADJPY")
+    sched._last_known_profit["pos_123"] = 2.64
+    sched._pending_close_outcomes["pos_123"] = CloseOutcome(
+        trigger_source="tactical_exit",
+        action_kind="full_close",
+        execution_status="submitted",
+        readback_status="pending_reconcile",
+    )
+    store.update_execution_meta(
+        opened.id,
+        json.dumps(
+            {
+                "fill_price": 115.3500,
+                "volume": 1.05,
+                "side": "BUY",
+                "sl_price": 114.9500,
+                "tp_price": 116.0500,
+                "tactical_exit_reason": "severe_tactical_reversal",
+                "close_control": {
+                    "trigger_source": "tactical_exit",
+                    "action_kind": "full_close",
+                    "reason_code": "severe_tactical_reversal",
+                },
+            }
+        ),
+    )
+
+    mock_matchtrader.get_closed_positions = AsyncMock(return_value=[])
+    mock_matchtrader.get_balance.return_value = MagicMock(
+        balance=50002.64,
+        equity=50002.64,
+        margin=0.0,
+        free_margin=50002.64,
+    )
+
+    opened_intent = store.get_intent(opened.id)
+    await sched._handle_position_closed(opened_intent)
+
+    closed_intent = store.get_intent(opened.id)
+    assert closed_intent.status == "closed"
+    assert closed_intent.exit_reason == "severe_tactical_reversal"
+    sched._alert_service.sl_tp_hit.assert_not_called()
+    sched._alert_service.trade_closed.assert_called_once()
+    call_kwargs = sched._alert_service.trade_closed.call_args[1]
+    assert call_kwargs["reason"] == "Position closed (severe_tactical_reversal)"
 
 
 async def test_handle_position_closed_logs_unified_trade_closed_payload(

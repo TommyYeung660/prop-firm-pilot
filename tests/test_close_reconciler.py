@@ -113,3 +113,36 @@ def test_reconcile_best_day_close_outranks_negative_pnl_reinference() -> None:
     assert result.action_kind == "full_close"
     assert result.final_close_reason == "best_day_close"
     assert result.resolution_path == "best_day_close"
+
+
+def test_reconcile_tactical_full_close_preserves_reason_code_over_positive_fallback_pnl() -> None:
+    from src.decision.close_reconciler import CloseReconciler
+
+    reconciler = CloseReconciler(pip_size_resolver=_resolve_pip_size)
+    pending_outcome = CloseOutcome(
+        trigger_source="tactical_exit",
+        action_kind="full_close",
+        execution_status="submitted",
+        readback_status="pending_reconcile",
+    )
+
+    result = reconciler.reconcile(
+        symbol="CADJPY",
+        pending_outcome=pending_outcome,
+        broker_closed=None,
+        fallback_pnl=2.64,
+        execution_meta={
+            "tactical_exit_reason": "severe_tactical_reversal",
+            "close_control": {
+                "trigger_source": "tactical_exit",
+                "action_kind": "full_close",
+                "reason_code": "severe_tactical_reversal",
+            },
+        },
+        used_last_known=True,
+    )
+
+    assert result.trigger_source == "tactical_exit"
+    assert result.action_kind == "full_close"
+    assert result.final_close_reason == "severe_tactical_reversal"
+    assert result.resolution_path == "last_known_profit"
