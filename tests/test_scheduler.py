@@ -17,6 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
+from tests.scanner_contract_constants import ACTIVE_LABEL_VERSION
+
 from src.config import (
     AccountConfig,
     AppConfig,
@@ -187,7 +189,7 @@ def _make_mock_signal(
     signal.scanner_version = "v1.5.0_beta"
     signal.schema_version = schema_version
     signal.market_date = market_date
-    signal.label_version = "binary_forward_return_sign_v1"
+    signal.label_version = ACTIVE_LABEL_VERSION
     signal.side = side
     return signal
 
@@ -372,7 +374,7 @@ class TestScannerLoop:
         assert intent.scanner_version == "v1.5.0_beta"
         assert intent.scanner_schema_version == "fx_signal_v1"
         assert intent.scanner_market_date == Scheduler._today_str()
-        assert intent.scanner_label_version == "binary_forward_return_sign_v1"
+        assert intent.scanner_label_version == ACTIVE_LABEL_VERSION
 
     async def test_scanner_loop_creates_long_and_short_intents_with_side(
         self,

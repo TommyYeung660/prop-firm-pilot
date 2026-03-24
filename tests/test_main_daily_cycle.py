@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from tests.scanner_contract_constants import ACTIVE_LABEL_VERSION
+
 from src.config import AppConfig, ExecutionConfig, InstrumentConfig, ScannerConfig
 from src.decision.agent_bridge import AgentDecision
 from src.main import PropFirmPilot, _run_scheduler
@@ -68,7 +70,7 @@ def _make_signal(
         topk_spread=0.02,
         scanner_version="v1.5.0_beta",
         schema_version="fx_signal_v2",
-        label_version="binary_forward_return_sign_v1",
+        label_version=ACTIVE_LABEL_VERSION,
         market_date="2026-03-17",
         side=side,
     )
