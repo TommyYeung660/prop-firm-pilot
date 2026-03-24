@@ -68,7 +68,7 @@ def _make_signal(
         topk_spread=0.02,
         scanner_version="v1.5.0_beta",
         schema_version="fx_signal_v2",
-        label_version="cost_aware_directional_return_v1",
+        label_version="binary_forward_return_sign_v1",
         market_date="2026-03-17",
         side=side,
     )

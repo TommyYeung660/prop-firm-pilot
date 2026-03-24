@@ -187,7 +187,7 @@ def _make_mock_signal(
     signal.scanner_version = "v1.5.0_beta"
     signal.schema_version = schema_version
     signal.market_date = market_date
-    signal.label_version = "cost_aware_directional_return_v1"
+    signal.label_version = "binary_forward_return_sign_v1"
     signal.side = side
     return signal
 
@@ -372,7 +372,7 @@ class TestScannerLoop:
         assert intent.scanner_version == "v1.5.0_beta"
         assert intent.scanner_schema_version == "fx_signal_v1"
         assert intent.scanner_market_date == Scheduler._today_str()
-        assert intent.scanner_label_version == "cost_aware_directional_return_v1"
+        assert intent.scanner_label_version == "binary_forward_return_sign_v1"
 
     async def test_scanner_loop_creates_long_and_short_intents_with_side(
         self,

@@ -23,7 +23,7 @@
     "XAUUSD"
   ],
   "cadence": "1d",
-  "label_version": "cost_aware_directional_return_v1",
+  "label_version": "binary_forward_return_sign_v1",
   "validation": {
     "status": "passed"
   }

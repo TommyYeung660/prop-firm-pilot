@@ -31,7 +31,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures" / "scanner"
 DEFAULT_SCANNER_VERSION = "v1.5.0_beta"
 DEFAULT_SIGNAL_SCHEMA_VERSION = "fx_signal_v1"
 DEFAULT_SIGNAL_SCHEMA_VERSION_V2 = "fx_signal_v2"
-DEFAULT_LABEL_VERSION = "cost_aware_directional_return_v1"
+DEFAULT_LABEL_VERSION = "binary_forward_return_sign_v1"
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
