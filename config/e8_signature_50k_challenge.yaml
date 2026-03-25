@@ -38,7 +38,7 @@ execution:
   broker_backend: "tradelocker"  # E8 Signature 使用 TradeLocker-first runtime
   max_positions: 5  # 保留與現行 stable universe 相同的容量上限，避免為新帳號額外改 scheduler 節奏
   default_risk_pct: 0.005  # 保守預設單筆風險 0.5%（約 $250/trade）
-  max_risk_pct: 0.01  # bounded allocation uplift 上限 1.0%；避免 sparse-portfolio uplift 過大
+  max_risk_pct: 0.0075  # 保守 bounded allocation uplift 上限 0.75%；降低 sparse-portfolio 平均曝險擴張
   max_slippage_pips: 2.0  # 下單時可接受的最大滑價；過小可能拒單，過大會惡化成交品質
   random_delay_min: 0.5  # 下單前隨機延遲最小秒數；降低過度機械化的行為特徵
   random_delay_max: 2.0  # 下單前隨機延遲最大秒數；需大於等於 random_delay_min
