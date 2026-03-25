@@ -16,6 +16,7 @@ Usage:
 
 import asyncio
 import json
+import math
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -40,6 +41,11 @@ from src.execution.instrument_registry import InstrumentRegistry
 from src.execution.pip_value_resolver import (
     quote_to_reference_price,
     resolve_usd_pip_value_for_symbol,
+)
+from src.execution.portfolio_risk_guard import (
+    OpenPositionRiskSnapshot,
+    PortfolioRiskDecision,
+    PortfolioRiskGuard,
 )
 from src.execution.position_sizer import PositionSizer
 from src.monitor.alert_service import AlertService
@@ -100,6 +106,7 @@ class ExecutionEngine:
         self._sizer = sizer
         self._config = config
         self._capital_allocator = BoundedCapitalAllocator(config.execution)
+        self._portfolio_risk_guard = PortfolioRiskGuard(config.execution)
         self._alert_service = alert_service
         self._registry = instrument_registry
         self._trade_journal = trade_journal
@@ -170,7 +177,8 @@ class ExecutionEngine:
 
         # Step 2: Build account snapshot
         try:
-            account_snapshot = await self._get_account_snapshot()
+            broker_positions = await self._matchtrader.get_open_positions()
+            account_snapshot = await self._get_account_snapshot(broker_positions=broker_positions)
         except Exception as e:
             logger.error(
                 "ExecutionEngine: failed to build account snapshot for {}: {}",
@@ -229,9 +237,77 @@ class ExecutionEngine:
             )
             return
 
+        # Step 3.5: Execution-side portfolio risk guard
+        portfolio_risk_decision = await self._evaluate_portfolio_risk_decision(
+            intent=intent,
+            side=side,
+            next_risk_pct=allocation.effective_risk_pct,
+            broker_positions=broker_positions,
+        )
+        portfolio_risk_payload = portfolio_risk_decision.to_dict()
+
+        if not portfolio_risk_decision.allowed:
+            rejection_reason = portfolio_risk_decision.reason_code
+            compliance_result = ComplianceResult(
+                passed=False,
+                rule_name="PORTFOLIO_RISK",
+                reason=rejection_reason,
+                details={"portfolio_risk": portfolio_risk_payload},
+            )
+            compliance_snapshot = self._serialize_compliance(
+                compliance_result,
+                account_snapshot,
+                portfolio_risk_meta=portfolio_risk_payload,
+            )
+            execution_meta = self._build_execution_meta(
+                fill_price=None,
+                volume=trade_plan.volume,
+                side=side,
+                sl_price=None,
+                tp_price=None,
+                sl_pips=trade_plan.stop_loss,
+                tp_pips=trade_plan.take_profit,
+                pre_trade_bid=None,
+                pre_trade_ask=None,
+                slippage_pips=None,
+                execution_latency_ms=None,
+                random_delay_seconds=0.0,
+                compliance_passed=False,
+                order_raw_response={},
+                risk_pct=allocation.effective_risk_pct,
+                capital_allocation_meta=allocation.to_dict(),
+                portfolio_risk_meta=portfolio_risk_payload,
+            )
+            await asyncio.to_thread(
+                self._update_compliance_snapshot, intent_id, compliance_snapshot
+            )
+            await asyncio.to_thread(self._store.update_execution_meta, intent_id, execution_meta)
+            await asyncio.to_thread(self._store.mark_rejected, intent_id, rejection_reason)
+            await self._send_alert_rejection(symbol, side, rejection_reason)
+            self._log_trade_event(
+                "TRADE_REJECTED",
+                {
+                    "intent_id": intent_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "reason": rejection_reason,
+                    "portfolio_risk": portfolio_risk_payload,
+                },
+            )
+            logger.warning(
+                "ExecutionEngine: intent {} rejected by portfolio risk guard: {}",
+                intent_id,
+                rejection_reason,
+            )
+            return
+
         # Step 4: Compliance gate
         compliance_result = self._guard.check_all(trade_plan, account_snapshot)
-        compliance_snapshot = self._serialize_compliance(compliance_result, account_snapshot)
+        compliance_snapshot = self._serialize_compliance(
+            compliance_result,
+            account_snapshot,
+            portfolio_risk_meta=portfolio_risk_payload,
+        )
 
         if not compliance_result.passed:
             logger.warning(
@@ -239,10 +315,30 @@ class ExecutionEngine:
                 intent_id,
                 compliance_result.reason,
             )
+            execution_meta = self._build_execution_meta(
+                fill_price=None,
+                volume=trade_plan.volume,
+                side=side,
+                sl_price=None,
+                tp_price=None,
+                sl_pips=trade_plan.stop_loss,
+                tp_pips=trade_plan.take_profit,
+                pre_trade_bid=None,
+                pre_trade_ask=None,
+                slippage_pips=None,
+                execution_latency_ms=None,
+                random_delay_seconds=0.0,
+                compliance_passed=False,
+                order_raw_response={},
+                risk_pct=allocation.effective_risk_pct,
+                capital_allocation_meta=allocation.to_dict(),
+                portfolio_risk_meta=portfolio_risk_payload,
+            )
             # Store compliance snapshot before rejecting
             await asyncio.to_thread(
                 self._update_compliance_snapshot, intent_id, compliance_snapshot
             )
+            await asyncio.to_thread(self._store.update_execution_meta, intent_id, execution_meta)
             await asyncio.to_thread(self._store.mark_rejected, intent_id, compliance_result.reason)
             await self._send_alert_rejection(symbol, side, compliance_result.reason)
             self._log_trade_event(
@@ -423,6 +519,7 @@ class ExecutionEngine:
                     model_id=_ab_model_id,
                     risk_pct=allocation.effective_risk_pct,
                     capital_allocation_meta=allocation.to_dict(),
+                    portfolio_risk_meta=portfolio_risk_payload,
                 )
                 await asyncio.to_thread(
                     self._store.update_execution_meta, intent_id, execution_meta
@@ -566,14 +663,21 @@ class ExecutionEngine:
         )
         return resolved
 
-    async def _get_account_snapshot(self) -> AccountSnapshot:
+    async def _get_account_snapshot(
+        self,
+        broker_positions: list[Any] | None = None,
+    ) -> AccountSnapshot:
         """Fetch current account state from MatchTrader for compliance checks.
 
         Returns:
             AccountSnapshot with balance, equity, margin, and position count.
         """
         balance_info = await self._matchtrader.get_balance()
-        positions = await self._matchtrader.get_open_positions()
+        positions = (
+            broker_positions
+            if broker_positions is not None
+            else await self._matchtrader.get_open_positions()
+        )
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         today_intents = self._store.get_intents_by_date(today)
@@ -617,13 +721,20 @@ class ExecutionEngine:
         self._store._conn.commit()
 
     @staticmethod
-    def _serialize_compliance(result: ComplianceResult, snapshot: AccountSnapshot) -> str:
+    def _serialize_compliance(
+        result: ComplianceResult,
+        snapshot: AccountSnapshot,
+        portfolio_risk_meta: dict[str, Any] | None = None,
+    ) -> str:
         """Serialize compliance result and account snapshot for audit storage."""
+        details: dict[str, Any] = dict(result.details or {})
+        if portfolio_risk_meta is not None:
+            details["portfolio_risk"] = portfolio_risk_meta
         data: dict[str, Any] = {
             "passed": result.passed,
             "rule_name": result.rule_name,
             "reason": result.reason,
-            "details": result.details,
+            "details": details,
             "account": {
                 "balance": snapshot.balance,
                 "equity": snapshot.equity,
@@ -658,6 +769,7 @@ class ExecutionEngine:
         model_id: str = "",
         risk_pct: float | None = None,
         capital_allocation_meta: dict[str, Any] | None = None,
+        portfolio_risk_meta: dict[str, Any] | None = None,
     ) -> str:
         """Build execution metadata JSON string for persistence."""
         data: dict[str, Any] = {
@@ -682,7 +794,110 @@ class ExecutionEngine:
             data["risk_pct"] = risk_pct
         if capital_allocation_meta:
             data["capital_allocation"] = capital_allocation_meta
+        if portfolio_risk_meta is not None:
+            data["portfolio_risk"] = portfolio_risk_meta
         return json.dumps(data, default=str)
+
+    async def _evaluate_portfolio_risk_decision(
+        self,
+        *,
+        intent: TradeIntent,
+        side: Literal["BUY", "SELL"],
+        next_risk_pct: float,
+        broker_positions: list[Any],
+    ) -> PortfolioRiskDecision:
+        """Evaluate portfolio risk for the next entry; fail closed on any error."""
+        try:
+            open_snapshots = await self._build_open_position_risk_snapshots(broker_positions)
+            return self._portfolio_risk_guard.evaluate_next_entry(
+                next_symbol=intent.symbol,
+                next_side=side,
+                next_risk_pct=next_risk_pct,
+                open_positions=open_snapshots,
+            )
+        except Exception as e:
+            logger.error(
+                "ExecutionEngine: portfolio risk evaluation failed for {}: {}",
+                intent.id,
+                e,
+            )
+            return PortfolioRiskDecision(
+                allowed=False,
+                reason_code="portfolio_risk.invalid_input",
+                projected_total_open_risk_pct=0.0,
+                projected_same_direction_positions=0,
+                details={
+                    "error": "portfolio_risk_evaluation_failed",
+                    "message": str(e),
+                },
+            )
+
+    async def _build_open_position_risk_snapshots(
+        self,
+        broker_positions: list[Any],
+    ) -> list[OpenPositionRiskSnapshot]:
+        """Map current broker open positions into risk snapshots for guard evaluation."""
+        active_intents = self._store.get_active_positions()
+        intents_by_position_id: dict[str, TradeIntent] = {
+            str(intent.position_id): intent
+            for intent in active_intents
+            if intent.position_id
+        }
+
+        default_risk = max(float(self._config.execution.default_risk_pct), 0.0)
+        conservative_fallback_risk = max(float(self._config.execution.max_risk_pct), default_risk)
+        snapshots: list[OpenPositionRiskSnapshot] = []
+
+        for broker_position in broker_positions:
+            position_id = str(getattr(broker_position, "position_id", ""))
+            matched_intent = intents_by_position_id.get(position_id)
+            symbol = str(
+                getattr(broker_position, "symbol", "")
+                or (matched_intent.symbol if matched_intent is not None else "")
+            )
+            raw_side = str(
+                getattr(broker_position, "side", "")
+                or (matched_intent.suggested_side if matched_intent is not None else "")
+            )
+            side = raw_side.strip().upper()
+            if not symbol or side not in {"BUY", "SELL"}:
+                raise ValueError(
+                    "unmapped_broker_position:"
+                    f"{position_id}:symbol={symbol or '<missing>'}:side={side or '<missing>'}"
+                )
+
+            open_risk_pct = self._extract_execution_risk_pct(matched_intent)
+            if open_risk_pct is None:
+                open_risk_pct = conservative_fallback_risk
+
+            snapshots.append(
+                OpenPositionRiskSnapshot(
+                    symbol=symbol,
+                    side=side,
+                    open_risk_pct=open_risk_pct,
+                )
+            )
+
+        return snapshots
+
+    def _extract_execution_risk_pct(self, intent: TradeIntent | None) -> float | None:
+        """Extract risk_pct from decision execution_meta for an existing opened intent."""
+        if intent is None:
+            return None
+        try:
+            row = self._store._conn.execute(
+                "SELECT execution_meta FROM decisions WHERE intent_id = :intent_id",
+                {"intent_id": intent.id},
+            ).fetchone()
+            if row is None or not row["execution_meta"]:
+                return None
+            payload = json.loads(row["execution_meta"])
+            risk_pct = float(payload.get("risk_pct"))
+            if risk_pct <= 0.0 or not math.isfinite(risk_pct):
+                return None
+            return risk_pct
+        except (TypeError, ValueError, json.JSONDecodeError, KeyError):
+            return None
 
     # ── SL/TP Price Helpers ───────────────────────────────────────────────
 

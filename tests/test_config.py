@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from src.config import AppConfig, ScannerConfig, SchedulerConfig
+from src.config import AppConfig, ExecutionConfig, ScannerConfig, SchedulerConfig
 
 
 def _read_repo_file(relative_path: str) -> str:
@@ -145,6 +145,15 @@ def test_scheduler_threshold_override_defaults():
     assert override.enabled is False
     assert override.min_confidence == "medium"
     assert override.min_blended_confidence == 0.55
+
+
+def test_execution_config_portfolio_risk_defaults() -> None:
+    """ExecutionConfig should expose stable-gate portfolio risk defaults."""
+    config = ExecutionConfig()
+    assert config.max_total_open_risk_pct == 0.03
+    assert config.max_same_direction_positions == 2
+    assert config.max_currency_exposure_per_ccy == 3
+    assert config.reserve_risk_for_open_positions is True
 
 
 def test_e8_one_5k_threshold_override_from_config():

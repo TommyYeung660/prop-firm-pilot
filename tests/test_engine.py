@@ -209,6 +209,102 @@ def _make_closed_intent_today(
     return closed
 
 
+def _make_opened_intent_with_execution_risk(
+    store: DecisionStore,
+    *,
+    symbol: str,
+    side: str,
+    position_id: str,
+    risk_pct: float,
+) -> TradeIntent:
+    """Create an opened intent and persist execution_meta.risk_pct for risk guard tests."""
+    intent = TradeIntent(
+        trade_date="2026-02-16",
+        symbol=symbol,
+        scanner_score=0.80,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-opened")
+    assert claimed is not None
+    store.update_intent_decision(
+        intent.id,
+        side=side,
+        sl_pips=40.0,
+        tp_pips=80.0,
+        risk_report="opened test",
+        state_json="{}",
+    )
+    store.mark_ready_for_exec(intent.id)
+    store.mark_executing(intent.id)
+    store.mark_opened(intent.id, position_id=position_id)
+    execution_meta = ExecutionEngine._build_execution_meta(
+        fill_price=None,
+        volume=0.10,
+        side=side,
+        sl_price=None,
+        tp_price=None,
+        sl_pips=40.0,
+        tp_pips=80.0,
+        pre_trade_bid=None,
+        pre_trade_ask=None,
+        slippage_pips=None,
+        execution_latency_ms=None,
+        random_delay_seconds=0.0,
+        compliance_passed=True,
+        order_raw_response={"positionId": position_id},
+        risk_pct=risk_pct,
+    )
+    store.update_execution_meta(intent.id, execution_meta)
+    opened = store.get_intent(intent.id)
+    assert opened is not None
+    return opened
+
+
+def _make_opened_intent_without_execution_risk(
+    store: DecisionStore,
+    *,
+    symbol: str,
+    side: str,
+    position_id: str,
+) -> TradeIntent:
+    """Create an opened intent without execution_meta.risk_pct for fallback tests."""
+    intent = TradeIntent(
+        trade_date="2026-02-16",
+        symbol=symbol,
+        scanner_score=0.80,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-opened")
+    assert claimed is not None
+    store.update_intent_decision(
+        intent.id,
+        side=side,
+        sl_pips=40.0,
+        tp_pips=80.0,
+        risk_report="opened test",
+        state_json="{}",
+    )
+    store.mark_ready_for_exec(intent.id)
+    store.mark_executing(intent.id)
+    store.mark_opened(intent.id, position_id=position_id)
+    opened = store.get_intent(intent.id)
+    assert opened is not None
+    return opened
+
+
+def _get_execution_meta(store: DecisionStore, intent_id: str) -> dict[str, object]:
+    """Read execution_meta JSON from decision row."""
+    row = store._conn.execute(
+        "SELECT execution_meta FROM decisions WHERE intent_id = ?",
+        (intent_id,),
+    ).fetchone()
+    assert row is not None
+    raw = row["execution_meta"] or "{}"
+    return json.loads(raw)
+
+
 # ── Execution Pipeline Tests ───────────────────────────────────────────────
 
 
@@ -604,6 +700,240 @@ class TestPositionSizing:
         assert risk_call.kwargs["pip_value_override"] == pytest.approx(6.6667, abs=0.0001)
 
 
+class TestPortfolioRiskExecutionGate:
+    """Tests for execution-side portfolio risk guard integration."""
+
+    async def test_execute_ready_intents_rejects_when_portfolio_risk_guard_blocks(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Execution should reject when projected total open risk exceeds budget."""
+        _make_opened_intent_with_execution_risk(
+            store,
+            symbol="GBPUSD",
+            side="BUY",
+            position_id="pos_existing_1",
+            risk_pct=0.02,
+        )
+        ready = _make_ready_intent(store, symbol="EURUSD", side="BUY", scanner_confidence="high")
+
+        mock_matchtrader.get_open_positions.return_value = [
+            MagicMock(position_id="pos_existing_1", symbol="GBPUSD", side="BUY", profit=10.0),
+        ]
+
+        result = await engine.execute_ready_intents()
+        assert result == 1
+
+        updated = store.get_intent(ready.id)
+        assert updated is not None
+        assert updated.status == "rejected"
+        assert updated.execution_error == "portfolio_risk.total_open_risk_exceeded"
+        mock_matchtrader.open_position.assert_not_called()
+
+    async def test_portfolio_risk_rejection_reason_and_meta_are_deterministic(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Rejection reason should be stable and metadata should include guard payload."""
+        _make_opened_intent_with_execution_risk(
+            store,
+            symbol="GBPUSD",
+            side="BUY",
+            position_id="pos_existing_1",
+            risk_pct=0.02,
+        )
+        ready = _make_ready_intent(store, symbol="EURUSD", side="BUY", scanner_confidence="high")
+        mock_matchtrader.get_open_positions.return_value = [
+            MagicMock(position_id="pos_existing_1", symbol="GBPUSD", side="BUY", profit=10.0),
+        ]
+
+        await engine.execute_ready_intents()
+
+        updated = store.get_intent(ready.id)
+        assert updated is not None
+        assert updated.execution_error == "portfolio_risk.total_open_risk_exceeded"
+        meta = _get_execution_meta(store, ready.id)
+        assert meta["compliance_passed"] is False
+        assert meta["portfolio_risk"]["allowed"] is False
+        assert meta["portfolio_risk"]["reason_code"] == updated.execution_error
+
+    async def test_unmapped_broker_open_position_fails_closed_for_portfolio_risk(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Unknown broker open positions must not be silently skipped as zero risk."""
+        ready = _make_ready_intent(store, symbol="EURUSD", side="BUY", scanner_confidence="high")
+        mock_matchtrader.get_open_positions.return_value = [
+            MagicMock(position_id="external-pos-1", symbol="", side="", profit=5.0),
+        ]
+
+        result = await engine.execute_ready_intents()
+        assert result == 1
+
+        updated = store.get_intent(ready.id)
+        assert updated is not None
+        assert updated.status == "rejected"
+        assert updated.execution_error == "portfolio_risk.invalid_input"
+        mock_matchtrader.open_position.assert_not_called()
+
+    async def test_open_risk_within_budget_allows_bounded_uplift_execution(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+        mock_sizer: MagicMock,
+    ) -> None:
+        """High-confidence entries should still execute when portfolio risk stays within budget."""
+        _make_opened_intent_with_execution_risk(
+            store,
+            symbol="GBPUSD",
+            side="SELL",
+            position_id="pos_existing_1",
+            risk_pct=0.005,
+        )
+        ready = _make_ready_intent(store, symbol="EURUSD", side="BUY", scanner_confidence="high")
+        mock_matchtrader.get_open_positions.return_value = [
+            MagicMock(position_id="pos_existing_1", symbol="GBPUSD", side="SELL", profit=5.0),
+        ]
+
+        result = await engine.execute_ready_intents()
+        assert result == 1
+
+        updated = store.get_intent(ready.id)
+        assert updated is not None
+        assert updated.status == "opened"
+        mock_matchtrader.open_position.assert_called_once()
+        mock_sizer.calculate_volume.assert_called_once_with(
+            "EURUSD",
+            50000.0,
+            40.0,
+            risk_pct_override=pytest.approx(0.015),
+        )
+
+        meta = _get_execution_meta(store, ready.id)
+        assert meta["portfolio_risk"]["allowed"] is True
+        assert meta["portfolio_risk"]["reason_code"] == "portfolio_risk.allowed"
+
+    async def test_portfolio_risk_unmapped_broker_position_fails_closed(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Unmapped broker position should fail closed with deterministic invalid_input."""
+        _make_opened_intent_with_execution_risk(
+            store,
+            symbol="GBPUSD",
+            side="BUY",
+            position_id="pos_existing_1",
+            risk_pct=0.01,
+        )
+        ready = _make_ready_intent(store, symbol="EURUSD", side="BUY", scanner_confidence="high")
+        mock_matchtrader.get_open_positions.return_value = [
+            MagicMock(position_id="pos_existing_1", profit=10.0),
+        ]
+
+        await engine.execute_ready_intents()
+
+        updated = store.get_intent(ready.id)
+        assert updated is not None
+        assert updated.status == "rejected"
+        assert updated.execution_error == "portfolio_risk.invalid_input"
+        meta = _get_execution_meta(store, ready.id)
+        assert meta["portfolio_risk"]["reason_code"] == "portfolio_risk.invalid_input"
+        mock_matchtrader.open_position.assert_not_called()
+
+    async def test_open_risk_missing_execution_risk_pct_uses_conservative_fallback_and_blocks(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Missing stored risk_pct should fallback conservatively and block when budget exceeded."""
+        _make_opened_intent_without_execution_risk(
+            store,
+            symbol="GBPUSD",
+            side="SELL",
+            position_id="pos_existing_1",
+        )
+        ready = _make_ready_intent(store, symbol="EURUSD", side="BUY", scanner_confidence="high")
+        mock_matchtrader.get_open_positions.return_value = [
+            MagicMock(position_id="pos_existing_1", symbol="GBPUSD", side="SELL", profit=5.0),
+        ]
+
+        await engine.execute_ready_intents()
+
+        updated = store.get_intent(ready.id)
+        assert updated is not None
+        assert updated.status == "rejected"
+        assert updated.execution_error == "portfolio_risk.total_open_risk_exceeded"
+        meta = _get_execution_meta(store, ready.id)
+        assert meta["portfolio_risk"]["projected_total_open_risk_pct"] == pytest.approx(0.035)
+
+    async def test_open_risk_missing_execution_risk_pct_uses_conservative_fallback_and_allows(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Missing stored risk_pct should still allow when cap is explicitly widened."""
+        engine._config.execution.max_total_open_risk_pct = 0.05
+        _make_opened_intent_without_execution_risk(
+            store,
+            symbol="GBPUSD",
+            side="SELL",
+            position_id="pos_existing_1",
+        )
+        ready = _make_ready_intent(store, symbol="EURUSD", side="BUY", scanner_confidence="high")
+        mock_matchtrader.get_open_positions.return_value = [
+            MagicMock(position_id="pos_existing_1", symbol="GBPUSD", side="SELL", profit=5.0),
+        ]
+
+        await engine.execute_ready_intents()
+
+        updated = store.get_intent(ready.id)
+        assert updated is not None
+        assert updated.status == "opened"
+        meta = _get_execution_meta(store, ready.id)
+        assert meta["portfolio_risk"]["allowed"] is True
+        assert meta["portfolio_risk"]["projected_total_open_risk_pct"] == pytest.approx(0.035)
+
+    async def test_portfolio_risk_reuses_single_open_positions_read_per_intent(
+        self,
+        engine: ExecutionEngine,
+        store: DecisionStore,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Execution should reuse one broker open-positions snapshot for account + risk guard."""
+        _make_opened_intent_with_execution_risk(
+            store,
+            symbol="GBPUSD",
+            side="SELL",
+            position_id="pos_existing_1",
+            risk_pct=0.005,
+        )
+        _make_ready_intent(store, symbol="EURUSD", side="BUY", scanner_confidence="high")
+        mock_matchtrader.get_open_positions.return_value = [
+            MagicMock(position_id="pos_existing_1", symbol="GBPUSD", side="SELL", profit=5.0),
+        ]
+        mock_matchtrader.open_position.return_value = MagicMock(
+            success=True,
+            position_id="pos_123",
+            message="Position opened successfully",
+            raw_response={"openPrice": "1.00000"},
+        )
+
+        await engine.execute_ready_intents()
+
+        assert mock_matchtrader.get_open_positions.call_count == 1
+
+
 # ── Account Snapshot Tests ──────────────────────────────────────────────────
 
 
@@ -632,9 +962,12 @@ class TestAccountSnapshot:
         mock_guard: MagicMock,
     ) -> None:
         """Should count open positions in AccountSnapshot."""
+        engine._config.execution.max_total_open_risk_pct = 0.10
+        engine._config.execution.max_same_direction_positions = 10
+        engine._config.execution.max_currency_exposure_per_ccy = 10
         mock_matchtrader.get_open_positions.return_value = [
-            MagicMock(profit=50.0),
-            MagicMock(profit=-20.0),
+            MagicMock(position_id="pos-1", symbol="GBPUSD", side="BUY", profit=50.0),
+            MagicMock(position_id="pos-2", symbol="USDJPY", side="SELL", profit=-20.0),
         ]
 
         _make_ready_intent(store)
@@ -652,6 +985,9 @@ class TestAccountSnapshot:
         mock_guard: MagicMock,
     ) -> None:
         """Should estimate day_start_balance from balance minus realized PnL only."""
+        engine._config.execution.max_total_open_risk_pct = 0.10
+        engine._config.execution.max_same_direction_positions = 10
+        engine._config.execution.max_currency_exposure_per_ccy = 10
         mock_matchtrader.get_balance.return_value = MagicMock(
             balance=50100.0,
             equity=50100.0,
@@ -659,7 +995,7 @@ class TestAccountSnapshot:
             free_margin=50100.0,
         )
         mock_matchtrader.get_open_positions.return_value = [
-            MagicMock(profit=100.0),
+            MagicMock(position_id="pos-1", symbol="GBPUSD", side="BUY", profit=100.0),
         ]
 
         _make_ready_intent(store)
@@ -676,6 +1012,9 @@ class TestAccountSnapshot:
         mock_guard: MagicMock,
     ) -> None:
         """daily_pnl should include realized closed trades + current unrealized PnL."""
+        engine._config.execution.max_total_open_risk_pct = 0.10
+        engine._config.execution.max_same_direction_positions = 10
+        engine._config.execution.max_currency_exposure_per_ccy = 10
         _make_closed_intent_today(store, symbol="GBPUSD", realized_pnl=150.0)
         _make_ready_intent(store)
 
@@ -685,7 +1024,9 @@ class TestAccountSnapshot:
             margin=0.0,
             free_margin=50130.0,
         )
-        mock_matchtrader.get_open_positions.return_value = [MagicMock(profit=-20.0)]
+        mock_matchtrader.get_open_positions.return_value = [
+            MagicMock(position_id="pos-1", symbol="GBPUSD", side="BUY", profit=-20.0)
+        ]
 
         await engine.execute_ready_intents()
 
@@ -1562,9 +1903,28 @@ class TestTradeOpenedPriceAlert:
         mock_matchtrader.modify_position = AsyncMock(
             return_value=MagicMock(success=True, position_id="pos_fallback_1", message="OK")
         )
-        # Fallback: get_open_positions returns a position with open_price
-        mock_matchtrader.get_open_positions.return_value = [
-            MagicMock(position_id="pos_fallback_1", open_price=1.09234),
+        # Two pre-open queries see no positions.
+        # After the order opens, both SL/TP setup and alert price fallback
+        # query the broker position.
+        mock_matchtrader.get_open_positions.side_effect = [
+            [],
+            [],
+            [
+                MagicMock(
+                    position_id="pos_fallback_1",
+                    symbol="EURUSD",
+                    side="SELL",
+                    open_price=1.09234,
+                )
+            ],
+            [
+                MagicMock(
+                    position_id="pos_fallback_1",
+                    symbol="EURUSD",
+                    side="SELL",
+                    open_price=1.09234,
+                )
+            ],
         ]
 
         alert_service = AsyncMock()

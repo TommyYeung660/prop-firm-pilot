@@ -5872,6 +5872,143 @@ async def test_tactical_wait_from_market_data_insufficiency_times_out_on_retry_e
     assert mock_tac.await_count == 2
 
 
+async def test_tactical_retry_expiry_reason_code_and_final_resolution_preserved_for_market_data(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+    tmp_path,
+):
+    """Retry expiry must log a deterministic timeout verdict with preserved taxonomy fields."""
+    from src.decision.tactical_validator import TacticalResult
+    from src.monitor.trade_journal import TradeJournal
+
+    config.tactical.enabled = True
+    config.tactical.shadow_mode = False
+    config.tactical.retry.max_retries = 1
+    config.tactical.retry.interval_seconds = 0
+    config.tactical.retry.jitter_seconds = 0
+    config.tactical.retry.expire_action = "degrade"
+    journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+        trade_journal=journal,
+    )
+
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+
+    tactical_wait = TacticalResult(
+        action="WAIT",
+        resolution="RETRY_PENDING",
+        detail="1H bars are stale",
+        summary_reason_code="market_data.bars_1h_stale",
+        policy_hints={"retryable": True, "degrade_allowed": False},
+        provenance={
+            "quote_source": "rest_fallback",
+            "bars_5min_source": "rest_fallback",
+            "bars_1h_source": "rest_fallback",
+            "freshness_state": "stale",
+        },
+    )
+    with (
+        patch.object(sched, "_run_tactical_validation", new_callable=AsyncMock) as mock_tac,
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        mock_tac.side_effect = [tactical_wait, tactical_wait]
+        await sched._process_claimed_intent("llm-0", claimed)
+
+    final = store.get_intent(claimed.id)
+    assert final is not None
+    assert final.status == "timed_out"
+
+    lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+    events = [json.loads(line) for line in lines]
+    timeout_event = next(
+        event
+        for event in events
+        if event["type"] == "TACTICAL_RESULT" and event["resolution"] == "EXPIRE_TIMEOUT"
+    )
+    assert timeout_event["summary_reason_code"] == "market_data.bars_1h_stale"
+    assert timeout_event["retry_count"] == 1
+    assert timeout_event["policy_hints"]["retryable"] is False
+    assert timeout_event["policy_hints"]["degrade_allowed"] is False
+    assert timeout_event["provenance"]["freshness_state"] == "stale"
+    assert timeout_event["provenance"]["retry_count"] == 1
+    assert timeout_event["provenance"]["final_resolution"] == "EXPIRE_TIMEOUT"
+    assert not any(
+        event["type"] == "TACTICAL_RESULT" and event["resolution"] == "EXECUTE_DEGRADED"
+        for event in events
+    )
+
+
+async def test_tactical_result_event_does_not_coerce_freshness_state_from_basis(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+    tmp_path,
+):
+    """Missing freshness_state should remain explicit unknown, not degrade into a basis label."""
+    from src.decision.tactical_validator import TacticalResult
+    from src.monitor.trade_journal import TradeJournal
+
+    journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+        trade_journal=journal,
+    )
+    intent = TradeIntent(
+        trade_date=Scheduler._today_str(),
+        symbol="EURUSD",
+        scanner_score=0.85,
+        scanner_confidence="high",
+    )
+    result = TacticalResult(
+        action="WAIT",
+        detail="Need another bar",
+        provenance={
+            "quote_source": "rest_fallback",
+            "bars_5min_source": "rest_fallback",
+            "bars_1h_source": "warmup_cache",
+            "freshness_basis": "quote",
+        },
+    )
+
+    await sched._log_tactical_result(intent, "BUY", result)
+
+    lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+    events = [json.loads(line) for line in lines]
+    tactical_event = next(e for e in events if e["type"] == "TACTICAL_RESULT")
+    assert tactical_event["bars_5m_source"] == "rest_fallback"
+    assert tactical_event["provenance"]["bars_5min_source"] == "rest_fallback"
+    assert tactical_event["provenance"]["bars_5m_source"] == "rest_fallback"
+    assert tactical_event["provenance"]["freshness_basis"] == "quote"
+    assert tactical_event["provenance"]["freshness_state"] == "unknown"
+
+
 async def test_tactical_wait_execute_degraded_releases_directly_to_ready_for_exec(
     config: AppConfig,
     store: DecisionStore,
@@ -6412,6 +6549,7 @@ async def test_fetch_tactical_data_drops_stale_hub_5min_bars(
 
     assert data.bars_5min.empty
     assert data.bars_5min_source == ""
+    assert data.bars_5min_stale_filtered is True
     assert data.bars_1h.equals(bars_1h)
 
 

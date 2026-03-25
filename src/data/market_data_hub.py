@@ -348,8 +348,12 @@ class MarketDataHub:
         elif not quote_available:
             block_reason = "market_data.quote_unavailable"
         elif bars_5m_result.bars.empty:
-            requires_tactical_retry = True
-            pending_reason = "market_data.startup_5m_bar_pending"
+            # Only websocket-startup warmup is retryable; all other empty-tail cases fail closed.
+            if quote_result.source == "websocket_cache":
+                requires_tactical_retry = True
+                pending_reason = "market_data.startup_5m_bar_pending"
+            else:
+                block_reason = "market_data.bars_5m_stale"
         elif not bars_5m_fresh:
             if self._is_startup_5m_bar_pending(
                 symbol=symbol,

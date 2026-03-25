@@ -217,6 +217,34 @@ class TestBuildExecutionMeta:
         assert data["capital_allocation"]["effective_risk_pct"] == 0.02
         assert data["capital_allocation"]["uplift_applied"] is True
 
+    def test_includes_optional_portfolio_risk_payload(self) -> None:
+        """Portfolio-risk decision payload should be persisted when provided."""
+        result = ExecutionEngine._build_execution_meta(
+            fill_price=1.0856,
+            volume=0.1,
+            side="BUY",
+            sl_price=1.0806,
+            tp_price=1.0956,
+            sl_pips=50.0,
+            tp_pips=100.0,
+            pre_trade_bid=1.08555,
+            pre_trade_ask=1.08565,
+            slippage_pips=0.5,
+            execution_latency_ms=125.5,
+            random_delay_seconds=0.75,
+            compliance_passed=True,
+            order_raw_response={"positionId": "POS-123", "openPrice": 1.0856},
+            portfolio_risk_meta={
+                "allowed": False,
+                "reason_code": "portfolio_risk.total_open_risk_exceeded",
+                "projected_total_open_risk_pct": 0.04,
+            },
+        )
+
+        data = json.loads(result)
+        assert data["portfolio_risk"]["allowed"] is False
+        assert data["portfolio_risk"]["reason_code"] == "portfolio_risk.total_open_risk_exceeded"
+
 
 # ── Test update_execution_meta ──────────────────────────────────────────────
 

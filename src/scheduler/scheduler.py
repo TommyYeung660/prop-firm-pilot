@@ -1611,12 +1611,30 @@ class Scheduler:
         retry_count: int = 0,
     ) -> None:
         """Log and alert tactical validation results."""
+        raw_provenance = (
+            tactical_result.provenance if isinstance(tactical_result.provenance, dict) else {}
+        )
+        provenance = dict(raw_provenance)
+        if "bars_5min_source" not in provenance and "bars_5m_source" in provenance:
+            provenance["bars_5min_source"] = provenance.get("bars_5m_source", "")
+        provenance.setdefault("quote_source", "")
+        provenance.setdefault("bars_5min_source", "")
+        provenance.setdefault("bars_5m_source", provenance.get("bars_5min_source", ""))
+        provenance.setdefault("bars_1h_source", "")
+        provenance.setdefault("data_source", "")
+        freshness_state = provenance.get("freshness_state")
+        if not isinstance(freshness_state, str) or not freshness_state:
+            provenance["freshness_state"] = "unknown"
+        provenance["retry_count"] = retry_count
+        provenance["final_resolution"] = tactical_result.resolution
+
         if self._market_data_hub is not None:
             feed_status = self._market_data_hub.feed_status()
         else:
             feed_status = {}
         websocket_status = feed_status.get("websocket", {}) if isinstance(feed_status, dict) else {}
         payload = tactical_result.to_log_dict()
+        payload["provenance"] = provenance
         payload.update(
             {
                 "intent_id": intent.id,
@@ -1627,9 +1645,9 @@ class Scheduler:
                 "scanner_rejection_reason": self._get_scanner_rejection_reason_code(),
                 "feed_state": websocket_status.get("state", ""),
                 "ws_last_error": websocket_status.get("last_error", ""),
-                "quote_source": tactical_result.provenance.get("quote_source", ""),
-                "bars_5m_source": tactical_result.provenance.get("bars_5m_source", ""),
-                "bars_1h_source": tactical_result.provenance.get("bars_1h_source", ""),
+                "quote_source": provenance.get("quote_source", ""),
+                "bars_5m_source": provenance.get("bars_5m_source", ""),
+                "bars_1h_source": provenance.get("bars_1h_source", ""),
                 "tactical_deadline_at": intent.expires_at.isoformat() if intent.expires_at else "",
             }
         )
@@ -1640,7 +1658,7 @@ class Scheduler:
         self._metrics.record_tactical_result(
             action=tactical_result.action,
             resolution=tactical_result.resolution,
-            data_source=tactical_result.provenance.get("data_source", ""),
+            data_source=str(provenance.get("data_source", "")),
             retry_count=retry_count,
         )
         if tactical_result.resolution == "RETRY_PENDING":
@@ -1782,9 +1800,8 @@ class Scheduler:
                 )
                 return False
 
-        if retry_cfg.expire_action == "degrade" and self._tactical_wait_allows_degrade(
-            last_wait_result
-        ):
+        allows_degrade_on_expiry = self._tactical_wait_allows_degrade(last_wait_result)
+        if retry_cfg.expire_action == "degrade" and allows_degrade_on_expiry:
             degraded_result = TacticalResult(
                 action="WAIT",
                 resolution="EXECUTE_DEGRADED",
@@ -1823,13 +1840,38 @@ class Scheduler:
             )
             return True
 
+        timeout_policy_hints = dict(last_wait_result.policy_hints)
+        timeout_policy_hints["retryable"] = False
+        timeout_policy_hints["degrade_allowed"] = False
+        timeout_result = TacticalResult(
+            action="WAIT",
+            resolution="EXPIRE_TIMEOUT",
+            hard_gates=list(last_wait_result.hard_gates),
+            soft_gates=list(last_wait_result.soft_gates),
+            soft_score=last_wait_result.soft_score,
+            soft_required=last_wait_result.soft_required,
+            detail=last_wait_result.detail,
+            summary_reason_code=(
+                last_wait_result.summary_reason_code or "tactical.expire.retry_expired"
+            ),
+            policy_hints=timeout_policy_hints,
+            provenance=dict(last_wait_result.provenance),
+            context=dict(last_wait_result.context),
+            retry_count=retry_cfg.max_retries,
+        )
+        await self._log_tactical_result(
+            intent,
+            side,
+            timeout_result,
+            retry_count=retry_cfg.max_retries,
+        )
         await self._timeout_intent_safe(
             worker_id=worker_id,
             intent_id=intent.id,
             reason=f"Tactical gate WAIT: {last_wait_result.detail}",
             context=(
                 "tactical_retry_expired_market_data"
-                if not self._tactical_wait_allows_degrade(last_wait_result)
+                if not allows_degrade_on_expiry
                 else "tactical_retry_expired"
             ),
         )
@@ -1928,18 +1970,23 @@ class Scheduler:
                         self._config.websocket.warmup_1h_bars,
                     ),
                 )
-                bars_5min, bars_5min_source = self._sanitize_tactical_bars(
+                (
+                    bars_5min,
+                    bars_5min_source,
+                    bars_5min_stale_filtered,
+                ) = self._sanitize_tactical_bars(
                     symbol=symbol,
                     timeframe="5m",
                     bars=bars_5min_result.bars,
                     source=bars_5min_result.source,
                 )
-                bars_1h, bars_1h_source = self._sanitize_tactical_bars(
+                bars_1h, bars_1h_source, _ = self._sanitize_tactical_bars(
                     symbol=symbol,
                     timeframe="1h",
                     bars=bars_1h_result.bars,
                     source=bars_1h_result.source,
                 )
+                data.bars_5min_stale_filtered = bars_5min_stale_filtered
                 if not bars_5min.empty:
                     data.bars_5min = bars_5min
                     data.bars_5min_source = bars_5min_source
@@ -2009,18 +2056,23 @@ class Scheduler:
                         ),
                         self._eodhd.fetch_bars(symbol, start_1h, end_date, client, interval="1h"),
                     )
-                bars_5min, bars_5min_source = self._sanitize_tactical_bars(
+                (
+                    bars_5min,
+                    bars_5min_source,
+                    bars_5min_stale_filtered,
+                ) = self._sanitize_tactical_bars(
                     symbol=symbol,
                     timeframe="5m",
                     bars=bars_5min,
                     source="rest_fallback",
                 )
-                bars_1h, bars_1h_source = self._sanitize_tactical_bars(
+                bars_1h, bars_1h_source, _ = self._sanitize_tactical_bars(
                     symbol=symbol,
                     timeframe="1h",
                     bars=bars_1h,
                     source="rest_fallback",
                 )
+                data.bars_5min_stale_filtered = bars_5min_stale_filtered
                 if not bars_5min.empty:
                     data.bars_5min = bars_5min
                     data.bars_5min_source = bars_5min_source
@@ -4420,10 +4472,10 @@ class Scheduler:
         timeframe: str,
         bars: pd.DataFrame,
         source: str,
-    ) -> tuple[pd.DataFrame, str]:
+    ) -> tuple[pd.DataFrame, str, bool]:
         """Drop tactical bars that are too stale for live exit decisions."""
         if bars.empty:
-            return bars, source
+            return bars, source, False
 
         latest_bar_open_time = self._latest_tactical_bar_time(bars)
         if latest_bar_open_time is None:
@@ -4433,7 +4485,7 @@ class Scheduler:
                 symbol,
                 source or "unknown",
             )
-            return bars.iloc[0:0].copy(), ""
+            return bars.iloc[0:0].copy(), "", False
 
         latest_bar_close_time = self._latest_tactical_bar_close_time(timeframe, bars)
         if latest_bar_close_time is None:
@@ -4443,7 +4495,7 @@ class Scheduler:
                 symbol,
                 source or "unknown",
             )
-            return bars.iloc[0:0].copy(), ""
+            return bars.iloc[0:0].copy(), "", False
 
         max_age = self._tactical_bar_max_age(timeframe)
         now = self._now_utc()
@@ -4475,9 +4527,9 @@ class Scheduler:
                     age.total_seconds(),
                     max_age.total_seconds(),
                 )
-            return bars.iloc[0:0].copy(), ""
+            return bars.iloc[0:0].copy(), "", timeframe == "5m"
 
-        return bars, source
+        return bars, source, False
 
     @staticmethod
     def _refresh_tactical_data_source(data: TacticalData) -> None:
