@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 from src.diagnostics.analyze_preview_bundle import _choose_main_log
+from src.version import get_release_tag
 
 
 def test_choose_main_log_prefers_current_release_tag_over_latest_generic_log(
@@ -9,7 +10,7 @@ def test_choose_main_log_prefers_current_release_tag_over_latest_generic_log(
 ) -> None:
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    release_log = log_dir / "prop_firm_pilot_20260319_092004_v1.5.0_preview_2.log"
+    release_log = log_dir / f"prop_firm_pilot_20260319_092004_{get_release_tag()}.log"
     generic_log = log_dir / "prop_firm_pilot.log"
     release_log.write_text("release", encoding="utf-8")
     generic_log.write_text("generic", encoding="utf-8")
