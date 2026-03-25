@@ -305,7 +305,7 @@ def test_e8_signature_50k_config_loads_as_runnable_tradelocker_account(
     assert config.execution.broker_backend == "tradelocker"
     assert config.execution.max_positions == 5
     assert config.execution.default_risk_pct == 0.005
-    assert config.execution.max_risk_pct == 0.01
+    assert config.execution.max_risk_pct == 0.0075
     assert config.account.plan == "E8 Signature 50K Challenge"
     assert config.account.initial_balance == 50000
     assert config.compliance.profit_target == 0.06
