@@ -979,18 +979,44 @@ class TradeLockerClient:
         if position_id:
             return response_raw
 
-        recovered = await self._recover_recent_order(
-            existing_order_id=str(
-                response_raw.get(
-                    "orderId",
-                    response_raw.get("id", response_raw.get("order_id", "")),
-                )
-            ),
-            symbol=symbol,
-            side=side,
-            volume=volume,
-            tradable_instrument_id=tradable_instrument_id,
+        existing_order_id = str(
+            response_raw.get(
+                "orderId",
+                response_raw.get("id", response_raw.get("order_id", "")),
+            )
         )
+        recovered: dict[str, Any] = {}
+        recovery_error: Exception | None = None
+        try:
+            recovered = await self._recover_recent_order(
+                existing_order_id=existing_order_id,
+                symbol=symbol,
+                side=side,
+                volume=volume,
+                tradable_instrument_id=tradable_instrument_id,
+            )
+        except (TradeLockerError, RuntimeError, httpx.HTTPError) as exc:
+            recovery_error = exc
+            logger.warning(
+                "TradeLocker: ordersHistory recovery failed for {} {} {}: {}. "
+                "Trying open-positions fallback.",
+                side,
+                symbol,
+                volume,
+                exc,
+            )
+
+        if not recovered:
+            recovered = await self._recover_recent_position(
+                symbol=symbol,
+                side=side,
+                volume=volume,
+                tradable_instrument_id=tradable_instrument_id,
+            )
+
+        if not recovered and recovery_error is not None:
+            raise recovery_error
+
         if not recovered:
             return response_raw
 
@@ -1060,6 +1086,74 @@ class TradeLockerClient:
             if attempt < 2:
                 logger.warning(
                     "TradeLocker: order recovery pending for {} {} {} (attempt {}/3)",
+                    side,
+                    symbol,
+                    volume,
+                    attempt + 1,
+                )
+                await asyncio.sleep(0.5 * (attempt + 1))
+
+        return {}
+
+    async def _recover_recent_position(
+        self,
+        *,
+        symbol: str,
+        side: Literal["BUY", "SELL"],
+        volume: float,
+        tradable_instrument_id: str,
+    ) -> dict[str, Any]:
+        now_ms = int(time.time() * 1000)
+        tolerance = 1e-9
+
+        for attempt in range(3):
+            payload = await self._account_request(
+                "GET",
+                "/trade/accounts/{account_id}/positions",
+            )
+            rows = self._extract_rows(payload, ["positions", "data"])
+            matches: list[tuple[int, dict[str, Any]]] = []
+            for row in rows:
+                values = self._row_as_dict(row, POSITION_COLUMNS)
+                if not values:
+                    continue
+
+                row_instrument_id = str(
+                    values.get("tradableInstrumentId", values.get("instrumentId", ""))
+                ).strip()
+                if tradable_instrument_id and row_instrument_id != tradable_instrument_id:
+                    continue
+
+                row_symbol = self._resolve_position_symbol(values)
+                if row_symbol and row_symbol != self._normalize_symbol(symbol):
+                    continue
+
+                if self._normalize_side(str(values.get("side", ""))) != side:
+                    continue
+
+                row_volume = self._as_float(values.get("qty", values.get("volume", 0)))
+                if abs(row_volume - volume) > tolerance:
+                    continue
+
+                opened_at = self._as_int(
+                    values.get("openDate", values.get("openTime", values.get("createdAt", 0)))
+                )
+                if opened_at and opened_at < now_ms - 300000:
+                    continue
+
+                matches.append((opened_at, values))
+
+            if matches:
+                _, latest = max(matches, key=lambda item: item[0])
+                return {
+                    "positionId": str(latest.get("positionId", latest.get("id", ""))).strip(),
+                    "openPrice": self._as_float(latest.get("avgPrice", latest.get("openPrice", 0))),
+                    "price": self._as_float(latest.get("avgPrice", latest.get("openPrice", 0))),
+                }
+
+            if attempt < 2:
+                logger.warning(
+                    "TradeLocker: position recovery pending for {} {} {} (attempt {}/3)",
                     side,
                     symbol,
                     volume,

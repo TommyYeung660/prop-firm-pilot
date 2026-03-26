@@ -17,7 +17,7 @@ from src.execution.broker_models import (
     BrokerPositionInfo,
     BrokerQuoteInfo,
 )
-from src.execution.tradelocker_client import TradeLockerClient
+from src.execution.tradelocker_client import TradeLockerClient, TradeLockerError
 
 
 @pytest.fixture
@@ -737,6 +737,55 @@ async def test_market_order_open_recovers_position_id_and_fill_price_from_orders
         "GET",
         "/trade/accounts/{account_id}/ordersHistory",
     )
+
+
+async def test_market_order_open_falls_back_to_positions_when_orders_history_is_rate_limited(
+    client: TradeLockerClient,
+) -> None:
+    client._instrument_id_to_symbol = {"6118": "EURJPY"}
+    client._resolve_symbol_meta = AsyncMock(
+        return_value={
+            "tradableInstrumentId": "6118",
+            "infoRouteId": "948733",
+            "tradeRouteId": "948735",
+        }
+    )
+    client._account_request = AsyncMock(
+        side_effect=[
+            {"s": "ok", "d": {"orderId": "7421932185967885429"}},
+            TradeLockerError(
+                'TradeLocker API error 429: {"status":429,"error":"Too Many Requests",'
+                '"path":"/clientapi/v1/accounts/ACC-2/ordersHistory"}'
+            ),
+            {
+                "s": "ok",
+                "d": {
+                    "positions": [
+                        [
+                            "7421932185916212044",
+                            "6118",
+                            "948735",
+                            "buy",
+                            "0.92",
+                            "184.329",
+                            None,
+                            None,
+                            "",
+                            "0.0",
+                            "key-undefined",
+                        ]
+                    ]
+                },
+            },
+        ]
+    )
+
+    result = await client.open_position(symbol="EURJPY", side="BUY", volume=0.92)
+
+    assert result.success is True
+    assert result.position_id == "7421932185916212044"
+    assert result.raw_response["positionId"] == "7421932185916212044"
+    assert result.raw_response["openPrice"] == 184.329
 
 
 async def test_close_position_full_close_uses_qty_zero(client: TradeLockerClient) -> None:
