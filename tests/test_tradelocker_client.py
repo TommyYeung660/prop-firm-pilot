@@ -4,7 +4,7 @@ Tests for src/execution/tradelocker_client.py.
 These tests lock the stable broker-neutral surface for TradeLocker.
 """
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -786,6 +786,109 @@ async def test_market_order_open_falls_back_to_positions_when_orders_history_is_
     assert result.position_id == "7421932185916212044"
     assert result.raw_response["positionId"] == "7421932185916212044"
     assert result.raw_response["openPrice"] == 184.329
+
+
+async def test_account_request_throttles_same_route_within_rate_limit_window(
+    client: TradeLockerClient,
+) -> None:
+    client._access_token = "access-token"
+    client._account_id = "ACC-2"
+    client._acc_num = "10002"
+    client._rate_limits_loaded = True
+    client._route_rate_limits = {
+        "GET_ORDERS": {
+            "limit": 1,
+            "interval_seconds": 1.0,
+        }
+    }
+    client._send_request = AsyncMock(
+        return_value=httpx.Response(200, json={"s": "ok", "d": {"orders": []}})
+    )
+
+    with patch(
+        "src.execution.tradelocker_client.time.monotonic",
+        side_effect=[100.0, 100.2, 100.2, 101.2, 101.2],
+    ):
+        with patch(
+            "src.execution.tradelocker_client.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep:
+            await client._account_request("GET", "/trade/accounts/{account_id}/orders")
+            await client._account_request("GET", "/trade/accounts/{account_id}/orders")
+
+    assert client._send_request.await_count == 2
+    sleep.assert_awaited_once()
+    assert sleep.await_args.args[0] == pytest.approx(0.8)
+
+
+async def test_account_request_retries_after_429_using_route_interval(
+    client: TradeLockerClient,
+) -> None:
+    client._access_token = "access-token"
+    client._account_id = "ACC-2"
+    client._acc_num = "10002"
+    client._rate_limits_loaded = True
+    client._route_rate_limits = {
+        "GET_ORDERS": {
+            "limit": 1,
+            "interval_seconds": 1.0,
+        }
+    }
+    client._send_request = AsyncMock(
+        side_effect=[
+            httpx.Response(
+                429,
+                json={
+                    "timestamp": "2026-03-26T02:19:58.328Z",
+                    "status": 429,
+                    "error": "Too Many Requests",
+                    "path": "/clientapi/v1/accounts/ACC-2/orders",
+                },
+            ),
+            httpx.Response(200, json={"s": "ok", "d": {"orders": []}}),
+        ]
+    )
+
+    with patch("src.execution.tradelocker_client.asyncio.sleep", new_callable=AsyncMock) as sleep:
+        payload = await client._account_request("GET", "/trade/accounts/{account_id}/orders")
+
+    assert payload == {"s": "ok", "d": {"orders": []}}
+    assert client._send_request.await_count == 2
+    sleep.assert_awaited_once()
+    assert sleep.await_args.args[0] == pytest.approx(1.0)
+
+
+async def test_prime_rate_limits_loads_trade_config_limits(client: TradeLockerClient) -> None:
+    client._access_token = "access-token"
+    client._account_id = "ACC-2"
+    client._acc_num = "10002"
+    client._send_request = AsyncMock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "s": "ok",
+                "d": {
+                    "rateLimits": [
+                        {
+                            "rateLimitType": "GET_ORDERS",
+                            "measure": "SECONDS",
+                            "intervalNum": 2,
+                            "limit": 3,
+                        }
+                    ]
+                },
+            },
+        )
+    )
+
+    await client.prime_rate_limits()
+
+    assert client._rate_limits_loaded is True
+    assert client._route_rate_limits["GET_ORDERS"] == {
+        "limit": 3,
+        "interval_seconds": 2.0,
+    }
+    client._send_request.assert_awaited_once()
 
 
 async def test_close_position_full_close_uses_qty_zero(client: TradeLockerClient) -> None:

@@ -253,6 +253,8 @@ class PropFirmPilot:
             # Step 1: Authenticate
             try:
                 await client.login()
+                if hasattr(client, "prime_rate_limits"):
+                    await client.prime_rate_limits()
             except Exception as e:
                 logger.critical("PropFirmPilot: login failed: {}", e)
                 await self.alert_service.system_error(f"Login failed: {e}")
@@ -522,6 +524,8 @@ class PropFirmPilot:
 
         async with build_broker_client(self.config, store=None) as client:
             await client.login()
+            if hasattr(client, "prime_rate_limits"):
+                await client.prime_rate_limits()
             balance = await client.get_balance()
 
             async def get_equity() -> float:
@@ -622,6 +626,8 @@ async def _run_scheduler(config: AppConfig) -> None:
 
     async with build_broker_client(config, store=store) as client:
         await client.login()
+        if hasattr(client, "prime_rate_limits"):
+            await client.prime_rate_limits()
 
         # ── Build InstrumentRegistry from effective instruments ────────
         registry = await InstrumentRegistry.from_broker(client, config.symbols)

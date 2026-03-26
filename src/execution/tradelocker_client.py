@@ -71,6 +71,25 @@ ORDERS_HISTORY_COLUMNS = (
     "strategyId",
 )
 
+RATE_LIMIT_MEASURE_SECONDS = {
+    "SECONDS": 1.0,
+    "MINUTES": 60.0,
+    "HOURS": 3600.0,
+    "DAYS": 86400.0,
+}
+
+DEFAULT_ROUTE_RATE_LIMITS: dict[str, dict[str, float]] = {
+    "GET_ORDERS": {"limit": 1, "interval_seconds": 1.0},
+    "GET_ORDERS_HISTORY": {"limit": 1, "interval_seconds": 1.0},
+    "GET_POSITIONS": {"limit": 1, "interval_seconds": 1.0},
+    "GET_ACCOUNTS_STATE": {"limit": 4, "interval_seconds": 2.0},
+    "GET_INSTRUMENTS": {"limit": 2, "interval_seconds": 1.0},
+    "QUOTES": {"limit": 10, "interval_seconds": 1.0},
+    "PLACE_ORDER": {"limit": 5, "interval_seconds": 1.0},
+    "MODIFY_ORDER": {"limit": 5, "interval_seconds": 1.0},
+    "MODIFY_POSITION": {"limit": 5, "interval_seconds": 1.0},
+}
+
 
 class TradeLockerClient:
     """Async TradeLocker client that exposes the broker protocol surface.
@@ -106,6 +125,13 @@ class TradeLockerClient:
         self._acc_num = ""
         self._symbol_meta: dict[str, dict[str, str]] = {}
         self._instrument_id_to_symbol: dict[str, str] = {}
+        self._route_rate_limits = {
+            key: value.copy() for key, value in DEFAULT_ROUTE_RATE_LIMITS.items()
+        }
+        self._route_rate_limit_timestamps: dict[str, list[float]] = {}
+        self._route_rate_limit_locks: dict[str, asyncio.Lock] = {}
+        self._rate_limits_loaded = False
+        self._rate_limits_lock = asyncio.Lock()
 
     # ── Context Manager ─────────────────────────────────────────────────
 
@@ -615,9 +641,61 @@ class TradeLockerClient:
             resolved_path,
             params=params,
             json=json,
-                authenticated=True,
-                account_scoped=True,
-            )
+            authenticated=True,
+            account_scoped=True,
+        )
+
+    async def prime_rate_limits(self) -> None:
+        """Load live route limits from /trade/config once per client session."""
+        if self._rate_limits_loaded:
+            return
+
+        async with self._rate_limits_lock:
+            if self._rate_limits_loaded:
+                return
+
+            try:
+                response = await self._send_request(
+                    "GET",
+                    "/trade/config",
+                    authenticated=True,
+                    account_scoped=True,
+                )
+                if response.status_code >= 400:
+                    raise TradeLockerError(
+                        f"TradeLocker API error {response.status_code}: {response.text[:500]}"
+                    )
+
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = {}
+
+                rate_limits = {
+                    key: value.copy() for key, value in DEFAULT_ROUTE_RATE_LIMITS.items()
+                }
+                for item in self._extract_list(payload, ["rateLimits"]):
+                    route_type = str(item.get("rateLimitType", "")).strip()
+                    limit = self._as_int(item.get("limit", 0))
+                    interval_seconds = self._rate_limit_interval_seconds(item)
+                    if route_type and limit > 0 and interval_seconds > 0:
+                        rate_limits[route_type] = {
+                            "limit": limit,
+                            "interval_seconds": interval_seconds,
+                        }
+                self._route_rate_limits = rate_limits
+                logger.info(
+                    "TradeLocker: loaded {} route rate limits from /trade/config",
+                    len(rate_limits),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "TradeLocker: failed to load /trade/config rate limits: {}. "
+                    "Using conservative defaults.",
+                    exc,
+                )
+            finally:
+                self._rate_limits_loaded = True
 
     async def _request(
         self,
@@ -630,21 +708,15 @@ class TradeLockerClient:
         account_scoped: bool = False,
         allow_reauth: bool = True,
     ) -> Any:
-        response = await self._send_request(
-            method,
-            path,
-            params=params,
-            json=json,
-            authenticated=authenticated,
-            account_scoped=account_scoped,
-        )
-        if response.status_code == 401 and authenticated and allow_reauth:
-            logger.warning(
-                "TradeLocker: auth failed for {} {}, re-logging in and retrying once",
-                method,
-                path,
-            )
-            await self.login(_quiet=True)
+        reauth_attempted = False
+        rate_limit_retry_attempted = False
+        skip_throttle = False
+
+        while True:
+            if not skip_throttle:
+                await self._throttle_request(method, path)
+            skip_throttle = False
+
             response = await self._send_request(
                 method,
                 path,
@@ -653,6 +725,41 @@ class TradeLockerClient:
                 authenticated=authenticated,
                 account_scoped=account_scoped,
             )
+
+            if (
+                response.status_code == 401
+                and authenticated
+                and allow_reauth
+                and not reauth_attempted
+            ):
+                logger.warning(
+                    "TradeLocker: auth failed for {} {}, re-logging in and retrying once",
+                    method,
+                    path,
+                )
+                await self.login(_quiet=True)
+                reauth_attempted = True
+                continue
+
+            if response.status_code == 429 and not rate_limit_retry_attempted:
+                wait_seconds = self._rate_limit_retry_after_seconds(
+                    method=method,
+                    path=path,
+                    response=response,
+                )
+                logger.warning(
+                    "TradeLocker: rate limited on {} {}, retrying in {:.2f}s",
+                    method,
+                    path,
+                    wait_seconds,
+                )
+                await asyncio.sleep(wait_seconds)
+                rate_limit_retry_attempted = True
+                skip_throttle = True
+                continue
+
+            break
+
         if response.status_code == 401:
             raise TradeLockerAuthError("TradeLocker authentication failed (401).")
         if response.status_code >= 400:
@@ -697,6 +804,102 @@ class TradeLockerClient:
         if account_scoped and self._acc_num:
             headers["accNum"] = self._acc_num
         return headers
+
+    @staticmethod
+    def _classify_route_limit_type(method: str, path: str) -> str | None:
+        normalized_method = method.upper()
+        normalized_path = path.split("?", 1)[0]
+
+        if normalized_method == "GET":
+            if normalized_path.endswith("/state"):
+                return "GET_ACCOUNTS_STATE"
+            if normalized_path.endswith("/instruments"):
+                return "GET_INSTRUMENTS"
+            if normalized_path.endswith("/positions"):
+                return "GET_POSITIONS"
+            if normalized_path.endswith("/ordersHistory"):
+                return "GET_ORDERS_HISTORY"
+            if normalized_path.endswith("/orders"):
+                return "GET_ORDERS"
+            if normalized_path == "/trade/quotes":
+                return "QUOTES"
+
+        if normalized_method == "POST" and normalized_path.endswith("/orders"):
+            return "PLACE_ORDER"
+        if normalized_method == "PATCH" and normalized_path.startswith("/trade/orders/"):
+            return "MODIFY_ORDER"
+        if normalized_method == "PATCH" and normalized_path.startswith("/trade/positions/"):
+            return "MODIFY_POSITION"
+
+        return None
+
+    @staticmethod
+    def _rate_limit_interval_seconds(rate_limit: dict[str, Any]) -> float:
+        measure = str(rate_limit.get("measure", "")).strip().upper()
+        multiplier = RATE_LIMIT_MEASURE_SECONDS.get(measure)
+        interval_num = float(rate_limit.get("intervalNum", 0) or 0)
+        if multiplier is None or interval_num <= 0:
+            return 0.0
+        return interval_num * multiplier
+
+    def _get_route_rate_limit(self, route_type: str) -> tuple[int, float]:
+        rate_limit = self._route_rate_limits.get(route_type, {})
+        limit = int(rate_limit.get("limit", 0) or 0)
+        interval_seconds = float(rate_limit.get("interval_seconds", 0.0) or 0.0)
+        return limit, interval_seconds
+
+    async def _throttle_request(self, method: str, path: str) -> None:
+        route_type = self._classify_route_limit_type(method, path)
+        if route_type is None:
+            return
+
+        limit, interval_seconds = self._get_route_rate_limit(route_type)
+        if limit <= 0 or interval_seconds <= 0:
+            return
+
+        lock = self._route_rate_limit_locks.setdefault(route_type, asyncio.Lock())
+        async with lock:
+            timestamps = self._route_rate_limit_timestamps.setdefault(route_type, [])
+            now = time.monotonic()
+            cutoff = now - interval_seconds
+            timestamps[:] = [timestamp for timestamp in timestamps if timestamp > cutoff]
+
+            while len(timestamps) >= limit:
+                wait_seconds = max(0.0, timestamps[0] + interval_seconds - now)
+                if wait_seconds <= 0:
+                    break
+                logger.debug(
+                    "TradeLocker: throttling {} for {:.2f}s to respect route limit",
+                    route_type,
+                    wait_seconds,
+                )
+                await asyncio.sleep(wait_seconds)
+                now = max(time.monotonic(), timestamps[0] + interval_seconds)
+                cutoff = now - interval_seconds
+                timestamps[:] = [timestamp for timestamp in timestamps if timestamp > cutoff]
+
+            timestamps.append(now)
+
+    def _rate_limit_retry_after_seconds(
+        self,
+        *,
+        method: str,
+        path: str,
+        response: httpx.Response,
+    ) -> float:
+        retry_after = response.headers.get("Retry-After", "").strip()
+        if retry_after:
+            try:
+                return max(float(retry_after), 0.0)
+            except ValueError:
+                logger.debug("TradeLocker: invalid Retry-After header '{}'", retry_after)
+
+        route_type = self._classify_route_limit_type(method, path)
+        if route_type is not None:
+            _, interval_seconds = self._get_route_rate_limit(route_type)
+            if interval_seconds > 0:
+                return interval_seconds
+        return 1.0
 
     # ── Parsing Helpers ─────────────────────────────────────────────────
 
