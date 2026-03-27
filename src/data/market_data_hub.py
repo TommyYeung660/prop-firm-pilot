@@ -213,13 +213,27 @@ class MarketDataHub:
                 limit=limit,
             )
             if websocket_bars is not None:
-                self._record_market_data_read("websocket_cache")
-                return BarResult(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    source="websocket_cache",
-                    bars=websocket_bars,
-                )
+                prefer_websocket = True
+                if timeframe == "1h" and limit > 0:
+                    # Tactical ATR needs history depth after restart. If the stale API cache
+                    # still has a longer 1H window than the fresh websocket tail, refresh/use
+                    # the API-backed path instead of truncating to the short websocket sample.
+                    warm_has_deeper_history = (
+                        warm is not None
+                        and not warm.empty
+                        and len(warm) > len(websocket_bars)
+                        and len(websocket_bars) < limit
+                    )
+                    if warm_has_deeper_history:
+                        prefer_websocket = False
+                if prefer_websocket:
+                    self._record_market_data_read("websocket_cache")
+                    return BarResult(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        source="websocket_cache",
+                        bars=websocket_bars,
+                    )
 
         rows_fetched = 0
         bars, rows_fetched, refreshed = await self._refresh_rest_cache_serialized(

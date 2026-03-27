@@ -1,7 +1,7 @@
 """Tests for the market-data hub and symbol-level fallback behavior."""
 
 import asyncio
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -128,6 +128,48 @@ async def test_market_data_hub_prefers_fresh_closed_1h_websocket_bar_before_rest
     assert bars.source == "websocket_cache"
     assert len(bars.bars) == 1
     assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_market_data_hub_does_not_prefer_short_1h_websocket_history_over_stale_rest_cache(
+) -> None:
+    provider = DummyProvider([])
+    aggregator = FXTickAggregator()
+    tick_time = datetime(2026, 3, 27, 1, 5, tzinfo=timezone.utc)
+    end_time = datetime(2026, 3, 27, 4, 4, tzinfo=timezone.utc)
+    while tick_time <= end_time:
+        aggregator.add_tick(_tick("EURUSD", 1.10, 1.11, tick_time))
+        tick_time += timedelta(minutes=1)
+    now = datetime(2026, 3, 27, 4, 5, tzinfo=timezone.utc)
+    aggregator.close_elapsed_bars(now=now)
+
+    hub = MarketDataHub(
+        aggregator=aggregator,
+        websocket_client=EODHDFXWebSocketClient(api_token="token", symbols=["EURUSD"]),
+        rest_provider=provider,
+        symbols=["EURUSD"],
+        bar_cache_max_age_seconds=3600,
+        now_provider=lambda: now,
+    )
+    hub._warm_cache[("EURUSD", "1h")] = pd.DataFrame(
+        [
+            {
+                "datetime": pd.Timestamp("2026-03-23T19:00:00Z") + pd.Timedelta(hours=idx),
+                "open": 1.10,
+                "high": 1.11,
+                "low": 1.09,
+                "close": 1.105,
+                "volume": 0,
+            }
+            for idx in range(80)
+        ]
+    )
+
+    bars = await hub.get_bars("EURUSD", "1h", 80)
+
+    assert bars.source == "rest_fallback"
+    assert len(bars.bars) == 80
+    assert provider.calls == [("EURUSD", "1h", date(2026, 3, 27), date(2026, 3, 27))]
 
 
 @pytest.mark.asyncio
