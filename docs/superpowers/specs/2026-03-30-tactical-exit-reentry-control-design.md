@@ -42,8 +42,8 @@ Behavior:
 
 - Before creating a new scanner intent for `symbol`, query the store for a recently closed intent for that same `symbol`.
 - The cooldown applies to all close reasons, not just losses.
-- The authoritative timestamp is `closed_at`.
-- For backward compatibility with legacy rows, the query may fall back to `updated_at` if `closed_at` is null.
+- The authoritative timestamp is `decisions.closed_at`.
+- The cooldown query should read from the close-audit path that `mark_closed()` already writes, rather than inferring close time from entry lifecycle timestamps.
 
 Reasoning:
 

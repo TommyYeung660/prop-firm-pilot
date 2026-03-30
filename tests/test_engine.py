@@ -147,10 +147,11 @@ def _make_ready_intent(
     sl_pips: float = 40.0,
     tp_pips: float = 80.0,
     scanner_confidence: str = "high",
+    trade_date: str = "2026-02-16",
 ) -> TradeIntent:
     """Create and advance an intent to ready_for_exec state."""
     intent = TradeIntent(
-        trade_date="2026-02-16",
+        trade_date=trade_date,
         symbol=symbol,
         scanner_score=0.85,
         scanner_confidence=scanner_confidence,
@@ -511,6 +512,48 @@ class TestFailureHandling:
         assert updated is not None
         assert updated.status == "failed"
         assert "Insufficient margin" in updated.execution_error
+
+    @pytest.mark.parametrize("broker_position_id", ["", None])
+    async def test_execute_ready_intent_marks_failed_when_broker_returns_blank_position_id(
+        self,
+        store: DecisionStore,
+        config: AppConfig,
+        mock_guard: MagicMock,
+        mock_matchtrader: AsyncMock,
+        mock_sizer: MagicMock,
+        broker_position_id: str | None,
+    ) -> None:
+        mock_matchtrader.open_position.return_value = MagicMock(
+            success=True,
+            position_id=broker_position_id,
+            message="Position opened successfully",
+            raw_response={"orderId": "ORD-1", "positionId": broker_position_id},
+        )
+        mock_matchtrader.get_open_positions.return_value = []
+        mock_matchtrader.get_balance.return_value = MagicMock(balance=50000.0, equity=50000.0)
+        engine = ExecutionEngine(
+            store=store,
+            guard=mock_guard,
+            matchtrader=mock_matchtrader,
+            sizer=mock_sizer,
+            config=config,
+        )
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        _make_ready_intent(
+            store,
+            symbol="EURUSD",
+            side="BUY",
+            trade_date=today,
+        )
+        await engine.execute_ready_intents()
+
+        failed = store.get_pending_intents()
+        assert failed == []
+        intents = store.get_intents_by_date(today)
+        assert intents[0].status == "failed"
+        assert "missing broker position_id" in (intents[0].execution_error or "")
+        mock_matchtrader.modify_position.assert_not_called()
 
     async def test_account_snapshot_error_marks_failed(
         self,

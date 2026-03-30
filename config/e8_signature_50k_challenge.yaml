@@ -146,6 +146,8 @@ tactical:
     profit_protection_tp_atr_multiplier: 0.75  # 趨勢轉弱時收緊 TP 的 ATR 倍數
     partial_close_ratio: 0.5  # 部分平倉時一次關掉多少比例倉位
     partial_close_min_r: 0.8  # 浮盈至少達多少 R 才允許 partial close
+    severe_reversal_min_hold_seconds: 900  # severe reversal 觸發強制平倉前，至少持倉 15 分鐘
+    severe_reversal_min_r: 0.5  # severe reversal 觸發強制平倉前，浮盈至少需達 0.5R
     modify_cooldown_seconds: 300  # 連續修改 SL/TP 的冷卻時間；避免頻繁改單
     tp_reprice_cooldown_seconds: 600  # 連續重設 TP 的冷卻時間；降低抖動與 API 壓力
     min_sl_improvement_pips: 2.0  # SL 至少改善多少 pip 才值得送出修改

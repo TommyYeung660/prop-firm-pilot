@@ -521,6 +521,14 @@ class TacticalExitConfig(BaseModel):
         default=True,
         description="Require a strong opposing 5m candle before defensive initial-risk exit",
     )
+    severe_reversal_min_hold_seconds: int = Field(
+        default=900,
+        description="Minimum hold time in seconds before severe reversal can force immediate exit",
+    )
+    severe_reversal_min_r: float = Field(
+        default=0.5,
+        description="Minimum unrealized R before severe reversal can force immediate exit",
+    )
     modify_cooldown_seconds: int = Field(
         default=300, description="Cooldown between SL/TP modifying actions"
     )

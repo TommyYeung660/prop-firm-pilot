@@ -82,6 +82,8 @@ CONFIDENCE_MAP: dict[str, float] = {"high": 0.9, "medium": 0.6, "low": 0.3}
 TACTICAL_EXIT_LOG_HEARTBEAT = timedelta(minutes=15)
 TACTICAL_STALE_BAR_LOG_HEARTBEAT = timedelta(minutes=15)
 TACTICAL_ALERT_HEARTBEAT = timedelta(minutes=15)
+OPENED_POSITION_ID_GRACE_SECONDS = 90
+OPENED_POSITION_ID_MISS_THRESHOLD = 2
 
 
 class Scheduler:
@@ -213,6 +215,9 @@ class Scheduler:
         self._last_tactical_exit_cycle_log_at: datetime | None = None
         self._last_tactical_stale_bar_warning: dict[tuple[str, str, str], tuple[str, datetime]] = {}
         self._last_tactical_alert: dict[str, tuple[str, datetime]] = {}
+        self._opened_reconciliation_misses: dict[str, int] = {}
+        self._opened_reconciliation_pending_symbols: dict[str, str] = {}
+        self._opened_reconciliation_bootstrapped = False
 
         # v1.2.0: Event-driven re-scan when a position closes (frees a slot)
         self._rescan_event = asyncio.Event()
@@ -538,16 +543,21 @@ class Scheduler:
 
                 # ── Capacity check: avoid creating intents beyond max_positions ──
                 max_pos = self._config.execution.max_positions
-                open_count = len(await asyncio.to_thread(self._store.get_active_positions))
+                open_count = await self._count_blocking_open_positions_for_admission()
                 pipeline_count = await asyncio.to_thread(self._store.count_pipeline_intents)
-                total_occupied = open_count + pipeline_count
+                pending_reconciliation_count = (
+                    await self._pending_reconciliation_count_for_admission()
+                )
+                total_occupied = open_count + pipeline_count + pending_reconciliation_count
                 available_slots = max_pos - total_occupied
                 if available_slots <= 0:
                     logger.info(
-                        "Scanner loop: at capacity ({} open + {} pipeline >= {} max), "
+                        "Scanner loop: at capacity "
+                        "({} open + {} pipeline + {} pending_reconciliation >= {} max), "
                         "skipping intent creation",
                         open_count,
                         pipeline_count,
+                        pending_reconciliation_count,
                         max_pos,
                     )
                 else:
@@ -583,14 +593,37 @@ class Scheduler:
                         # This prevents wasted LLM calls for symbols already held.
                         # The duplicate_entry_guard in _process_claimed_intent is a
                         # backup; this early check avoids ~50% of unnecessary LLM spend.
-                        has_active = await asyncio.to_thread(
-                            self._store.has_active_position_for_symbol,
-                            signal.instrument,
+                        has_active = await self._has_active_position_for_symbol_admission(
+                            signal.instrument
                         )
                         if has_active:
                             logger.info(
                                 "Scanner loop: {} already has active position, skipping intent",
                                 signal.instrument,
+                            )
+                            continue
+
+                        close_cooldown_seconds = (
+                            self._config.tactical.intent_dedup.cooldown_after_close_seconds
+                        )
+                        recently_closed = await asyncio.to_thread(
+                            self._store.has_recent_closed_intent_for_symbol,
+                            signal.instrument,
+                            cooldown_seconds=close_cooldown_seconds,
+                        )
+                        if recently_closed:
+                            self._log_trade_event(
+                                "SCANNER_SKIP",
+                                {
+                                    "symbol": signal.instrument,
+                                    "reason": "recent_close_cooldown",
+                                    "cooldown_seconds": close_cooldown_seconds,
+                                },
+                            )
+                            logger.info(
+                                "Scanner loop: {} closed within {}s cooldown, skipping intent",
+                                signal.instrument,
+                                close_cooldown_seconds,
                             )
                             continue
 
@@ -652,7 +685,7 @@ class Scheduler:
                         daily_sl_limit = self._config.scheduler.daily_sl_hit_limit
                         if daily_sl_limit > 0:
                             daily_sl_count = await asyncio.to_thread(
-                                self._store.count_sl_hits_today, today
+                                self._store.count_sl_like_losses_today, today
                             )
                             if daily_sl_count >= daily_sl_limit:
                                 logger.warning(
@@ -673,7 +706,7 @@ class Scheduler:
                         symbol_sl_limit = self._config.scheduler.symbol_loss_limit
                         if symbol_sl_limit > 0:
                             symbol_sl_count = await asyncio.to_thread(
-                                self._store.count_symbol_losses_today,
+                                self._store.count_symbol_sl_like_losses_today,
                                 signal.instrument,
                                 today,
                             )
@@ -1234,10 +1267,7 @@ class Scheduler:
                 return
 
             # P2.6: Same-symbol active position check
-            has_active = await asyncio.to_thread(
-                self._store.has_active_position_for_symbol,
-                intent.symbol,
-            )
+            has_active = await self._has_active_position_for_symbol_admission(intent.symbol)
             if has_active:
                 await self._cancel_intent_safe(
                     worker_id=worker_id,
@@ -1897,6 +1927,7 @@ class Scheduler:
                 code.startswith("market_data.")
                 or code.startswith("data.reject.")
                 or code.startswith("freshness.")
+                or code.startswith("spread.")
                 or code == "atr.fail.insufficient_1h_data"
             ):
                 return False
@@ -2024,9 +2055,7 @@ class Scheduler:
                     # of EODHD bar time.  EODHD intraday bars can lag 10+ hours during
                     # DST transitions; MatchTrader quotes are real-time (<1 min delay).
                     if ts_ms:
-                        data.latest_bar_time = datetime.fromtimestamp(
-                            ts_ms / 1000, tz=timezone.utc
-                        )
+                        data.latest_bar_time = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
                         logger.debug(
                             "Tactical: quote timestamp for {} = {} (age {:.0f}s)",
                             symbol,
@@ -2482,6 +2511,19 @@ class Scheduler:
                             open_positions,
                             opened_intents,
                         )
+                        claimed_position_ids = self._claimed_opened_position_ids(opened_intents)
+                        expiry_candidates = self._collect_opened_intents_ready_for_expiry(
+                            open_positions,
+                            opened_intents,
+                            claimed_position_ids=claimed_position_ids,
+                        )
+                        if expiry_candidates:
+                            await self._expire_unresolved_opened_intents(
+                                open_positions,
+                                expiry_candidates,
+                                claimed_position_ids=claimed_position_ids,
+                            )
+                        self._opened_reconciliation_bootstrapped = True
                         open_position_ids = {str(p.position_id) for p in open_positions}
 
                         # Update BestDayTracker with current unrealized PnL
@@ -2504,6 +2546,10 @@ class Scheduler:
 
                         if open_positions:
                             await self._run_tactical_exit_cycle(open_positions, opened_intents)
+                    else:
+                        self._opened_reconciliation_misses.clear()
+                        self._opened_reconciliation_pending_symbols.clear()
+                        self._opened_reconciliation_bootstrapped = True
 
             except asyncio.CancelledError:
                 logger.info("Position monitor loop: cancelled")
@@ -3202,6 +3248,15 @@ class Scheduler:
     ) -> TacticalExitSnapshot:
         """Build the pure tactical-exit snapshot for one open position."""
         meta = self._load_execution_meta_dict(intent)
+        opened_at = intent.executed_at or intent.created_at
+        hold_seconds: int | None = None
+        if isinstance(opened_at, datetime):
+            opened_at_utc = (
+                opened_at.replace(tzinfo=timezone.utc)
+                if opened_at.tzinfo is None
+                else opened_at.astimezone(timezone.utc)
+            )
+            hold_seconds = max(int((self._now_utc() - opened_at_utc).total_seconds()), 0)
         original_sl_price = (
             self._coerce_numeric(meta.get("sl_price"), fallback=pos.sl_price or 0.0) or None
         )
@@ -3221,6 +3276,7 @@ class Scheduler:
             original_tp_price=original_tp_price,
             unrealized_r=self._compute_tactical_exit_unrealized_r(pos, meta),
             partial_close_done=bool(meta.get("partial_close_done", False)),
+            hold_seconds=hold_seconds,
             bars_5min=tactical_data.bars_5min,
             bars_1h=tactical_data.bars_1h,
             prior_trailing_sl=self._coerce_numeric(
@@ -3454,13 +3510,13 @@ class Scheduler:
         ]
 
         if decision.action == "MOVE_TO_BREAKEVEN":
-            lines.append(f"• SL → { _format_price(decision.new_sl) }")
+            lines.append(f"• SL → {_format_price(decision.new_sl)}")
         elif decision.action == "TRAIL_SL":
-            lines.append(f"• SL → { _format_price(decision.new_sl) }")
+            lines.append(f"• SL → {_format_price(decision.new_sl)}")
             if decision.new_tp is not None:
-                lines.append(f"• TP → { _format_price(decision.new_tp) }")
+                lines.append(f"• TP → {_format_price(decision.new_tp)}")
         elif decision.action == "REPRICE_TP":
-            lines.append(f"• TP → { _format_price(decision.new_tp) }")
+            lines.append(f"• TP → {_format_price(decision.new_tp)}")
         elif decision.action == "PARTIAL_CLOSE":
             executed_volume = close_volume if close_volume is not None else 0.0
             lines.append(f"• Close Volume: {executed_volume:.2f} lots")
@@ -3798,12 +3854,190 @@ class Scheduler:
                     matched_position_id,
                 )
             except Exception as e:
+                self._opened_reconciliation_misses.pop(intent.id, None)
+                self._opened_reconciliation_pending_symbols[intent.id] = (
+                    str(intent.symbol or "").strip().upper()
+                )
                 logger.warning(
                     "Position monitor: failed to repair missing position_id for intent {} ({}): {}",
                     intent.id,
                     intent.symbol,
                     e,
                 )
+
+    @staticmethod
+    def _claimed_opened_position_ids(opened_intents: list[TradeIntent]) -> set[str]:
+        """Return broker position ids already claimed by opened intents."""
+        return {
+            str(intent.position_id).strip()
+            for intent in opened_intents
+            if isinstance(intent.position_id, str) and intent.position_id.strip()
+        }
+
+    def _collect_opened_intents_ready_for_expiry(
+        self,
+        open_positions: list[Any],
+        opened_intents: list[TradeIntent],
+        *,
+        claimed_position_ids: set[str] | None = None,
+    ) -> list[TradeIntent]:
+        """Collect stale unresolved opened intents that exceeded miss threshold."""
+        now = self._now_utc()
+        if claimed_position_ids is None:
+            claimed_position_ids = self._claimed_opened_position_ids(opened_intents)
+        unresolved_ids: set[str] = set()
+        ready: list[TradeIntent] = []
+        for intent in opened_intents:
+            current_position_id = str(intent.position_id or "").strip()
+            if current_position_id:
+                self._opened_reconciliation_misses.pop(intent.id, None)
+                self._opened_reconciliation_pending_symbols.pop(intent.id, None)
+                continue
+
+            executed_at = intent.executed_at
+            if executed_at is None:
+                self._opened_reconciliation_misses.pop(intent.id, None)
+                self._opened_reconciliation_pending_symbols.pop(intent.id, None)
+                continue
+            if (now - executed_at).total_seconds() < OPENED_POSITION_ID_GRACE_SECONDS:
+                self._opened_reconciliation_misses.pop(intent.id, None)
+                self._opened_reconciliation_pending_symbols.pop(intent.id, None)
+                continue
+
+            unresolved_ids.add(intent.id)
+            matched = self._match_open_position_for_intent(
+                intent,
+                open_positions,
+                claimed_position_ids=claimed_position_ids,
+            )
+            if matched is not None:
+                self._opened_reconciliation_misses.pop(intent.id, None)
+                continue
+
+            misses = self._opened_reconciliation_misses.get(intent.id, 0) + 1
+            self._opened_reconciliation_misses[intent.id] = misses
+            self._opened_reconciliation_pending_symbols[intent.id] = (
+                str(intent.symbol or "").strip().upper()
+            )
+            if misses >= OPENED_POSITION_ID_MISS_THRESHOLD:
+                ready.append(intent)
+
+        stale_ids = [
+            intent_id
+            for intent_id in self._opened_reconciliation_misses
+            if intent_id not in unresolved_ids
+        ]
+        for intent_id in stale_ids:
+            self._opened_reconciliation_misses.pop(intent_id, None)
+            self._opened_reconciliation_pending_symbols.pop(intent_id, None)
+
+        return ready
+
+    def _pending_reconciliation_count(self) -> int:
+        """Return unresolved-opened intents currently pending reconciliation/failure."""
+        return len(self._opened_reconciliation_pending_symbols)
+
+    async def _pending_reconciliation_count_for_admission(self) -> int:
+        """Count only pending reconciliation intents not already counted by store helpers."""
+        if not self._opened_reconciliation_bootstrapped:
+            return 0
+        cutoff = self._now_utc() - timedelta(seconds=self._admission_unresolved_grace_seconds())
+        count = 0
+        for intent_id in self._opened_reconciliation_pending_symbols:
+            intent = await asyncio.to_thread(self._store.get_intent, intent_id)
+            if intent is None:
+                continue
+            if str(intent.position_id or "").strip():
+                continue
+            if intent.executed_at is not None and intent.executed_at < cutoff:
+                count += 1
+        return count
+
+    def _has_pending_reconciliation_for_symbol(self, symbol: str) -> bool:
+        """Check whether the symbol has an opened intent pending reconciliation."""
+        target = str(symbol).strip().upper()
+        if not target:
+            return False
+        return target in self._opened_reconciliation_pending_symbols.values()
+
+    async def _count_blocking_open_positions_for_admission(self) -> int:
+        """Count opened intents that should occupy scanner capacity."""
+        if self._opened_reconciliation_bootstrapped:
+            admission_grace = self._admission_unresolved_grace_seconds()
+            return await asyncio.to_thread(
+                self._store.count_blocking_open_positions,
+                unresolved_grace_seconds=admission_grace,
+            )
+        opened = await asyncio.to_thread(self._store.get_active_positions)
+        return len(opened)
+
+    async def _has_active_position_for_symbol_admission(self, symbol: str) -> bool:
+        """Check symbol activity for scanner/LLM admission with bootstrap safeguards."""
+        if self._opened_reconciliation_bootstrapped:
+            admission_grace = self._admission_unresolved_grace_seconds()
+            has_active = await asyncio.to_thread(
+                self._store.has_active_position_for_symbol,
+                symbol,
+                unresolved_grace_seconds=admission_grace,
+            )
+            if not has_active and self._has_pending_reconciliation_for_symbol(symbol):
+                has_active = True
+            return has_active
+
+        opened = await asyncio.to_thread(self._store.get_active_positions)
+        target = str(symbol).strip().upper()
+        for intent in opened:
+            if str(intent.symbol or "").strip().upper() == target:
+                return True
+        return self._has_pending_reconciliation_for_symbol(symbol)
+
+    def _admission_unresolved_grace_seconds(self) -> int:
+        """Use grace long enough for at least one monitor cadence after bootstrap."""
+        return max(
+            OPENED_POSITION_ID_GRACE_SECONDS,
+            self._config.scheduler.position_monitor_interval_seconds,
+        )
+
+    async def _expire_unresolved_opened_intents(
+        self,
+        open_positions: list[Any],
+        opened_intents: list[TradeIntent],
+        *,
+        claimed_position_ids: set[str] | None = None,
+    ) -> None:
+        """Fail stale opened intents that still lack recoverable broker position ids."""
+        now = self._now_utc()
+        if claimed_position_ids is None:
+            claimed_position_ids = self._claimed_opened_position_ids(opened_intents)
+        for intent in opened_intents:
+            current_position_id = str(intent.position_id or "").strip()
+            if current_position_id:
+                continue
+            executed_at = intent.executed_at
+            if executed_at is None:
+                continue
+            if (now - executed_at).total_seconds() < OPENED_POSITION_ID_GRACE_SECONDS:
+                continue
+            matched = self._match_open_position_for_intent(
+                intent,
+                open_positions,
+                claimed_position_ids=claimed_position_ids,
+            )
+            if matched is not None:
+                continue
+            reason = "intent opened without recoverable broker position_id"
+            await asyncio.to_thread(
+                self._store.mark_opened_reconciliation_failed,
+                intent.id,
+                reason,
+            )
+            self._opened_reconciliation_misses.pop(intent.id, None)
+            self._opened_reconciliation_pending_symbols.pop(intent.id, None)
+            logger.error(
+                "Position monitor: expiring unresolved opened intent {} ({}) after grace window",
+                intent.id,
+                intent.symbol,
+            )
 
     def _match_open_position_for_intent(
         self,
@@ -3815,9 +4049,9 @@ class Scheduler:
         """Return the unique live broker position that matches an opened intent."""
         meta = self._load_execution_meta_dict(intent)
         expected_symbol = str(intent.symbol or "").strip().upper()
-        expected_side = str(
-            getattr(intent, "suggested_side", "") or meta.get("side", "")
-        ).strip().upper()
+        expected_side = (
+            str(getattr(intent, "suggested_side", "") or meta.get("side", "")).strip().upper()
+        )
         expected_volume = self._coerce_numeric(meta.get("volume"), fallback=0.0)
         expected_fill_price = self._coerce_numeric(meta.get("fill_price"), fallback=0.0)
 

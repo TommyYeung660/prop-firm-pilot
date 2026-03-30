@@ -17,8 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
-from tests.scanner_contract_constants import ACTIVE_LABEL_VERSION
-
 from src.config import (
     AccountConfig,
     AppConfig,
@@ -36,6 +34,7 @@ from src.execution.broker_models import BrokerInstrumentInfo
 from src.execution.tradelocker_client import TradeLockerError
 from src.optimize.optimization_state import OptimizationState, Thresholds
 from src.scheduler.scheduler import Scheduler
+from tests.scanner_contract_constants import ACTIVE_LABEL_VERSION
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -504,6 +503,134 @@ class TestScannerLoop:
         assert skip_event["reason"] == "low_confidence_cooldown"
         assert skip_event["consecutive_cancels"] == 2
 
+    async def test_scanner_skips_symbol_when_recent_close_cooldown_active(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+        tmp_path,
+    ) -> None:
+        from src.monitor.trade_journal import TradeJournal
+
+        journal = TradeJournal(tmp_path / "trade_journal.jsonl")
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+            trade_journal=journal,
+        )
+        today = Scheduler._today_str()
+        _advance_intent_to_closed(
+            store,
+            trade_date=today,
+            symbol="EURUSD",
+            realized_pnl=25.0,
+        )
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("EURUSD", market_date=today)]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(today)
+        assert len(intents) == 1
+        assert intents[0].status == "closed"
+        assert intents[0].symbol == "EURUSD"
+
+        lines = journal._path.read_text(encoding="utf-8").strip().splitlines()
+        events = [json.loads(line) for line in lines]
+        skip_event = next(e for e in events if e["type"] == "SCANNER_SKIP")
+        assert skip_event["symbol"] == "EURUSD"
+        assert skip_event["reason"] == "recent_close_cooldown"
+        assert (
+            skip_event["cooldown_seconds"]
+            == config.tactical.intent_dedup.cooldown_after_close_seconds
+        )
+
+    async def test_symbol_loss_breaker_counts_initial_risk_structure_failure_losses(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        config.scheduler.daily_sl_hit_limit = 0
+        config.scheduler.symbol_loss_limit = 1
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        today = Scheduler._today_str()
+        _advance_intent_to_closed(
+            store,
+            trade_date=today,
+            symbol="EURUSD",
+            realized_pnl=-12.5,
+            exit_reason="initial_risk_structure_failure",
+        )
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("EURUSD", market_date=today),
+            _make_mock_signal("GBPUSD", market_date=today),
+        ]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        symbols = {
+            intent.symbol
+            for intent in store.get_intents_by_date(today)
+            if intent.status == "pending"
+        }
+        assert symbols == {"GBPUSD"}
+
+    async def test_daily_loss_breaker_counts_initial_risk_structure_failure_losses(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        config.scheduler.daily_sl_hit_limit = 1
+        config.scheduler.symbol_loss_limit = 0
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        today = Scheduler._today_str()
+        _advance_intent_to_closed(
+            store,
+            trade_date=today,
+            symbol="USDJPY",
+            realized_pnl=-20.0,
+            exit_reason="initial_risk_structure_failure",
+        )
+        mock_scanner.run_pipeline.return_value = [
+            _make_mock_signal("EURUSD", market_date=today),
+            _make_mock_signal("GBPUSD", market_date=today),
+        ]
+
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        pending = [
+            intent for intent in store.get_intents_by_date(today) if intent.status == "pending"
+        ]
+        assert pending == []
+
     async def test_blocks_intent_creation_when_market_data_entry_not_safe(
         self,
         config: AppConfig,
@@ -749,8 +876,9 @@ class TestScannerLoop:
         ]
 
         with (
-            patch.object(sched._best_day_tracker, "reset", wraps=sched._best_day_tracker.reset)
-            as reset_spy,
+            patch.object(
+                sched._best_day_tracker, "reset", wraps=sched._best_day_tracker.reset
+            ) as reset_spy,
             patch.object(Scheduler, "_today_str", return_value="2026-03-19"),
         ):
             sched._maybe_rollover_best_day_tracker()
@@ -981,6 +1109,409 @@ class TestScannerLoop:
 
 class TestScannerCapacityCheck:
     """Tests for BUG #4 fix: scanner loop respects max_positions capacity."""
+
+    async def test_pre_bootstrap_stale_blank_opened_counts_toward_capacity(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Before first reconciliation pass, stale blank opened should still occupy capacity."""
+        config_1 = config.model_copy(update={"execution": ExecutionConfig(max_positions=1)})
+        sched = Scheduler(
+            config=config_1,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+
+        intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "SELL", 20.0, 40.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id="")
+        store._conn.execute(
+            "UPDATE intents SET executed_at = ? WHERE id = ?",
+            ("2026-03-28T04:09:29+00:00", intent.id),
+        )
+        store._conn.commit()
+
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("GBPUSD")]
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        symbols = {item.symbol for item in intents}
+        assert len(intents) == 1
+        assert symbols == {"AUDUSD"}
+
+    async def test_pre_bootstrap_stale_blank_opened_blocks_same_symbol_reentry(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Before reconciliation bootstrap, same-symbol scanner re-entry stays blocked."""
+        config_3 = config.model_copy(update={"execution": ExecutionConfig(max_positions=3)})
+        sched = Scheduler(
+            config=config_3,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+
+        intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "SELL", 20.0, 40.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id="")
+        store._conn.execute(
+            "UPDATE intents SET executed_at = ? WHERE id = ?",
+            ("2026-03-28T04:09:29+00:00", intent.id),
+        )
+        store._conn.commit()
+
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("AUDUSD", score=0.91)]
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        audusd_intents = [item for item in intents if item.symbol == "AUDUSD"]
+        assert len(audusd_intents) == 1
+        assert audusd_intents[0].status == "opened"
+
+    async def test_post_bootstrap_pre_first_miss_still_blocks_with_monitor_cadence_grace(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """After bootstrap, rows within monitor cadence should still block before first miss."""
+        scheduler_cfg = config.scheduler.model_copy(
+            update={"position_monitor_interval_seconds": 120}
+        )
+        config_1 = config.model_copy(
+            update={
+                "execution": ExecutionConfig(max_positions=1),
+                "scheduler": scheduler_cfg,
+            }
+        )
+        sched = Scheduler(
+            config=config_1,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        sched._opened_reconciliation_bootstrapped = True
+
+        intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "SELL", 20.0, 40.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id="")
+        stale_but_within_cadence = datetime.now(timezone.utc) - timedelta(seconds=95)
+        store._conn.execute(
+            "UPDATE intents SET executed_at = ? WHERE id = ?",
+            (stale_but_within_cadence.isoformat(), intent.id),
+        )
+        store._conn.commit()
+
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("GBPUSD")]
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        symbols = {item.symbol for item in intents}
+        assert len(intents) == 1
+        assert symbols == {"AUDUSD"}
+
+    async def test_pending_reconciliation_overlap_window_does_not_double_count_capacity(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """A pending intent still inside admission grace should only consume one slot."""
+        scheduler_cfg = config.scheduler.model_copy(
+            update={"position_monitor_interval_seconds": 120}
+        )
+        config_2 = config.model_copy(
+            update={
+                "execution": ExecutionConfig(max_positions=2),
+                "scheduler": scheduler_cfg,
+            }
+        )
+        sched = Scheduler(
+            config=config_2,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        sched._market_hours = MagicMock()
+        sched._market_hours.should_force_close.return_value = False
+        sched._market_hours.is_market_open.return_value = True
+        sched._run_tactical_exit_cycle = AsyncMock()
+
+        intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "SELL", 20.0, 40.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id="")
+        stale_but_within_cadence = datetime.now(timezone.utc) - timedelta(seconds=95)
+        store._conn.execute(
+            "UPDATE intents SET executed_at = ? WHERE id = ?",
+            (stale_but_within_cadence.isoformat(), intent.id),
+        )
+        store._conn.commit()
+
+        mock_matchtrader.get_open_positions.return_value = []
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("GBPUSD")]
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        symbols = {item.symbol for item in intents}
+        assert len(intents) == 2
+        assert symbols == {"AUDUSD", "GBPUSD"}
+
+    async def test_pending_reconciliation_counts_toward_capacity_after_first_miss(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """After first unresolved miss, scanner should still treat slot as occupied."""
+        config_1 = config.model_copy(update={"execution": ExecutionConfig(max_positions=1)})
+        sched = Scheduler(
+            config=config_1,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        sched._market_hours = MagicMock()
+        sched._market_hours.should_force_close.return_value = False
+        sched._market_hours.is_market_open.return_value = True
+        sched._run_tactical_exit_cycle = AsyncMock()
+
+        intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "SELL", 20.0, 40.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id="")
+        store._conn.execute(
+            "UPDATE intents SET executed_at = ? WHERE id = ?",
+            ("2026-03-28T04:09:29+00:00", intent.id),
+        )
+        store._conn.commit()
+
+        mock_matchtrader.get_open_positions.return_value = []
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("GBPUSD")]
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        symbols = {item.symbol for item in intents}
+        assert len(intents) == 1
+        assert symbols == {"AUDUSD"}
+
+    async def test_repair_failure_keeps_admission_blocking_until_repair_succeeds(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Live match with DB repair failure must remain admission-blocking."""
+        config_1 = config.model_copy(update={"execution": ExecutionConfig(max_positions=1)})
+        sched = Scheduler(
+            config=config_1,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        sched._market_hours = MagicMock()
+        sched._market_hours.should_force_close.return_value = False
+        sched._market_hours.is_market_open.return_value = True
+        sched._run_tactical_exit_cycle = AsyncMock()
+        sched._opened_reconciliation_bootstrapped = True
+
+        intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "SELL", 20.0, 40.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id="")
+        store._conn.execute(
+            "UPDATE intents SET executed_at = ? WHERE id = ?",
+            ("2026-03-28T04:09:29+00:00", intent.id),
+        )
+        store._conn.commit()
+
+        live_position = SimpleNamespace(
+            position_id="POS-LIVE-1",
+            symbol="AUDUSD",
+            side="SELL",
+            volume=0.01,
+            open_price=0.6543,
+            profit=0.0,
+        )
+        mock_matchtrader.get_open_positions.return_value = [live_position]
+        sched._store.repair_opened_position_id = MagicMock(
+            side_effect=RuntimeError("repair failed")
+        )
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+        assert sched._opened_reconciliation_pending_symbols.get(intent.id) == "AUDUSD"
+
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("GBPUSD", score=0.91)]
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        symbols = {item.symbol for item in intents}
+        assert len(intents) == 1
+        assert symbols == {"AUDUSD"}
+
+    async def test_pending_reconciliation_blocks_same_symbol_scanner_reentry(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Same-symbol scanner re-entry should stay blocked while reconciliation is pending."""
+        config_3 = config.model_copy(update={"execution": ExecutionConfig(max_positions=3)})
+        sched = Scheduler(
+            config=config_3,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        sched._market_hours = MagicMock()
+        sched._market_hours.should_force_close.return_value = False
+        sched._market_hours.is_market_open.return_value = True
+        sched._run_tactical_exit_cycle = AsyncMock()
+
+        intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "SELL", 20.0, 40.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id="")
+        store._conn.execute(
+            "UPDATE intents SET executed_at = ? WHERE id = ?",
+            ("2026-03-28T04:09:29+00:00", intent.id),
+        )
+        store._conn.commit()
+
+        mock_matchtrader.get_open_positions.return_value = []
+        await _run_loop_once(sched, sched._position_monitor_loop())
+
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("AUDUSD", score=0.91)]
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        audusd_intents = [item for item in intents if item.symbol == "AUDUSD"]
+        assert len(audusd_intents) == 1
+        assert audusd_intents[0].status == "opened"
+
+    async def test_pending_reconciliation_stays_blocking_when_expiry_transition_fails(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """If expiry transition fails, pending reconciliation must keep blocking admission."""
+        config_1 = config.model_copy(update={"execution": ExecutionConfig(max_positions=1)})
+        sched = Scheduler(
+            config=config_1,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        sched._market_hours = MagicMock()
+        sched._market_hours.should_force_close.return_value = False
+        sched._market_hours.is_market_open.return_value = True
+        sched._run_tactical_exit_cycle = AsyncMock()
+
+        intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "SELL", 20.0, 40.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id="")
+        store._conn.execute(
+            "UPDATE intents SET executed_at = ? WHERE id = ?",
+            ("2026-03-28T04:09:29+00:00", intent.id),
+        )
+        store._conn.commit()
+
+        mock_matchtrader.get_open_positions.side_effect = [[], []]
+        await _run_loop_once(sched, sched._position_monitor_loop())
+        assert sched._opened_reconciliation_pending_symbols.get(intent.id) == "AUDUSD"
+
+        sched._store.mark_opened_reconciliation_failed = MagicMock(
+            side_effect=RuntimeError("forced expiry failure")
+        )
+        await _run_loop_once(sched, sched._position_monitor_loop())
+        assert sched._opened_reconciliation_pending_symbols.get(intent.id) == "AUDUSD"
+
+        mock_scanner.run_pipeline.return_value = [_make_mock_signal("GBPUSD", score=0.91)]
+        await _run_loop_once(sched, sched._scanner_loop())
+
+        intents = store.get_intents_by_date(Scheduler._today_str())
+        symbols = {item.symbol for item in intents}
+        assert len(intents) == 1
+        assert symbols == {"AUDUSD"}
 
     async def test_skips_all_when_positions_at_max(
         self,
@@ -2847,6 +3378,7 @@ def _advance_intent_to_closed(
     trade_date: str,
     symbol: str = "EURUSD",
     realized_pnl: float = 0.0,
+    exit_reason: str = "tp_hit",
 ) -> TradeIntent:
     """Insert and fully close an intent with realized PnL."""
     intent = TradeIntent(
@@ -2868,14 +3400,158 @@ def _advance_intent_to_closed(
     store.mark_ready_for_exec(intent.id)
     store.mark_executing(intent.id)
     store.mark_opened(intent.id, position_id=f"closed-{symbol}")
-    store.mark_closed(intent.id, realized_pnl=realized_pnl, exit_reason="tp_hit")
+    store.mark_closed(intent.id, realized_pnl=realized_pnl, exit_reason=exit_reason)
     closed = store.get_intent(intent.id)
     assert closed is not None
     return closed
 
 
+async def test_position_monitor_marks_blank_opened_intent_failed_after_repair_grace(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+) -> None:
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+    intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+    store.insert_intent(intent)
+    store.claim_next_pending("llm-0")
+    store.update_intent_decision(intent.id, "SELL", 20.0, 40.0, "report", "{}")
+    store.mark_ready_for_exec(intent.id)
+    store.mark_executing(intent.id)
+    store.mark_opened(intent.id, position_id="")
+    store._conn.execute(
+        "UPDATE intents SET executed_at = ? WHERE id = ?",
+        ("2026-03-28T04:09:29+00:00", intent.id),
+    )
+    store._conn.commit()
+
+    await sched._expire_unresolved_opened_intents(
+        open_positions=[],
+        opened_intents=store.get_active_positions(),
+    )
+
+    failed = store.get_intent(intent.id)
+    assert failed is not None
+    assert failed.status == "failed"
+    assert "opened without recoverable broker position_id" in (failed.execution_error or "")
+
+
+async def test_expire_unresolved_opened_intents_keeps_intent_when_live_match_exists(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+) -> None:
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+    intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+    store.insert_intent(intent)
+    store.claim_next_pending("llm-0")
+    store.update_intent_decision(intent.id, "SELL", 20.0, 40.0, "report", "{}")
+    store.mark_ready_for_exec(intent.id)
+    store.mark_executing(intent.id)
+    store.mark_opened(intent.id, position_id="")
+    store._conn.execute(
+        "UPDATE intents SET executed_at = ? WHERE id = ?",
+        ("2026-03-28T04:09:29+00:00", intent.id),
+    )
+    store._conn.commit()
+
+    live_position = SimpleNamespace(
+        position_id="POS-LIVE-1",
+        symbol="AUDUSD",
+        side="SELL",
+        volume=0.01,
+        open_price=0.6543,
+    )
+    await sched._expire_unresolved_opened_intents(
+        open_positions=[live_position],
+        opened_intents=store.get_active_positions(),
+    )
+
+    persisted = store.get_intent(intent.id)
+    assert persisted is not None
+    assert persisted.status == "opened"
+    assert persisted.execution_error is None
+
+
 class TestPositionMonitorLoop:
     """Tests for Scheduler._position_monitor_loop()."""
+
+    async def test_does_not_fail_stale_blank_opened_intent_on_single_miss_before_repair(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """A single unmatched snapshot after grace should not permanently fail the intent."""
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        sched._market_hours = MagicMock()
+        sched._market_hours.should_force_close.return_value = False
+        sched._market_hours.is_market_open.return_value = True
+        sched._run_tactical_exit_cycle = AsyncMock()
+
+        intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "SELL", 20.0, 40.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id="")
+        store._conn.execute(
+            "UPDATE intents SET executed_at = ? WHERE id = ?",
+            ("2026-03-28T04:09:29+00:00", intent.id),
+        )
+        store._conn.commit()
+
+        live_position = SimpleNamespace(
+            position_id="POS-LIVE-1",
+            symbol="AUDUSD",
+            side="SELL",
+            volume=0.01,
+            open_price=0.6543,
+            profit=0.0,
+        )
+        mock_matchtrader.get_open_positions.side_effect = [[], [live_position]]
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+        first = store.get_intent(intent.id)
+        assert first is not None
+        assert first.status == "opened"
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+        repaired = store.get_intent(intent.id)
+        assert repaired is not None
+        assert repaired.status == "opened"
+        assert repaired.position_id == "POS-LIVE-1"
 
     async def test_does_not_crash_when_broker_has_no_private_rate_limiter(
         self,
@@ -2908,6 +3584,120 @@ class TestPositionMonitorLoop:
             if call.args and "Position monitor: API budget critical" in str(call.args[0])
         ]
         assert budget_warnings == []
+
+    async def test_fails_stale_blank_opened_intent_after_consecutive_misses(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Stale blank opened intents should fail only after repeated unmatched snapshots."""
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        sched._market_hours = MagicMock()
+        sched._market_hours.should_force_close.return_value = False
+        sched._market_hours.is_market_open.return_value = True
+        sched._run_tactical_exit_cycle = AsyncMock()
+
+        intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "SELL", 20.0, 40.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id="")
+        store._conn.execute(
+            "UPDATE intents SET executed_at = ? WHERE id = ?",
+            ("2026-03-28T04:09:29+00:00", intent.id),
+        )
+        store._conn.commit()
+
+        mock_matchtrader.get_open_positions.side_effect = [[], []]
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+        first = store.get_intent(intent.id)
+        assert first is not None
+        assert first.status == "opened"
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+        failed = store.get_intent(intent.id)
+        assert failed is not None
+        assert failed.status == "failed"
+        assert "opened without recoverable broker position_id" in (failed.execution_error or "")
+
+    async def test_consecutive_misses_fail_even_when_other_intent_claims_live_position(
+        self,
+        config: AppConfig,
+        store: DecisionStore,
+        mock_scanner: MagicMock,
+        mock_agents: MagicMock,
+        mock_engine: AsyncMock,
+        mock_matchtrader: AsyncMock,
+    ) -> None:
+        """Expiry should not treat another intent's claimed live position as a valid match."""
+        sched = Scheduler(
+            config=config,
+            store=store,
+            scanner=mock_scanner,
+            agents=mock_agents,
+            engine=mock_engine,
+            matchtrader=mock_matchtrader,
+        )
+        sched._market_hours = MagicMock()
+        sched._market_hours.should_force_close.return_value = False
+        sched._market_hours.is_market_open.return_value = True
+        sched._run_tactical_exit_cycle = AsyncMock()
+
+        claimed = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+        store.insert_intent(claimed)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(claimed.id, "SELL", 20.0, 40.0, "report", "{}")
+        store.mark_ready_for_exec(claimed.id)
+        store.mark_executing(claimed.id)
+        store.mark_opened(claimed.id, position_id="POS-LIVE-1")
+
+        orphan = TradeIntent(trade_date=Scheduler._today_str(), symbol="AUDUSD")
+        store.insert_intent(orphan)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(orphan.id, "SELL", 20.0, 40.0, "report", "{}")
+        store.mark_ready_for_exec(orphan.id)
+        store.mark_executing(orphan.id)
+        store.mark_opened(orphan.id, position_id="")
+        store._conn.execute(
+            "UPDATE intents SET executed_at = ? WHERE id = ?",
+            ("2026-03-28T04:09:29+00:00", orphan.id),
+        )
+        store._conn.commit()
+
+        live_position = SimpleNamespace(
+            position_id="POS-LIVE-1",
+            symbol="AUDUSD",
+            side="SELL",
+            volume=0.01,
+            open_price=0.6543,
+            profit=0.0,
+        )
+        mock_matchtrader.get_open_positions.side_effect = [[live_position], [live_position]]
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+        first = store.get_intent(orphan.id)
+        assert first is not None
+        assert first.status == "opened"
+
+        await _run_loop_once(sched, sched._position_monitor_loop())
+        failed = store.get_intent(orphan.id)
+        assert failed is not None
+        assert failed.status == "failed"
+        assert "opened without recoverable broker position_id" in (failed.execution_error or "")
 
     async def test_detects_closed_position(
         self,
@@ -5870,6 +6660,100 @@ async def test_tactical_wait_from_market_data_insufficiency_times_out_on_retry_e
     assert final.status == "timed_out"
     assert "Tactical gate WAIT" in (final.execution_error or "")
     assert mock_tac.await_count == 2
+
+
+async def test_spread_hard_gate_retry_expiry_times_out_instead_of_execute_degraded(
+    config: AppConfig,
+    store: DecisionStore,
+    mock_scanner: MagicMock,
+    mock_agents: MagicMock,
+    mock_engine: AsyncMock,
+    mock_matchtrader: AsyncMock,
+) -> None:
+    """Spread hard-gate WAIT must time out after retry exhaustion, not execute degraded."""
+    from src.decision.tactical_validator import TacticalData, TacticalValidator
+
+    config.tactical.enabled = True
+    config.tactical.shadow_mode = False
+    config.tactical.retry.max_retries = 1
+    config.tactical.retry.interval_seconds = 0
+    config.tactical.retry.jitter_seconds = 0
+    config.tactical.retry.expire_action = "degrade"
+
+    sched = Scheduler(
+        config=config,
+        store=store,
+        scanner=mock_scanner,
+        agents=mock_agents,
+        engine=mock_engine,
+        matchtrader=mock_matchtrader,
+    )
+    intent = TradeIntent(trade_date=Scheduler._today_str(), symbol="USDJPY", scanner_score=0.7)
+    store.insert_intent(intent)
+    claimed = store.claim_next_pending("llm-0")
+    assert claimed is not None
+
+    now = datetime.now(timezone.utc)
+    spread_wait = TacticalValidator(config.tactical).evaluate(
+        side="BUY",
+        data=TacticalData(
+            bars_5min=pd.DataFrame(
+                [
+                    {
+                        "datetime": now - timedelta(minutes=20 - idx),
+                        "open": 110.10,
+                        "high": 110.12,
+                        "low": 110.08,
+                        "close": 110.11,
+                    }
+                    for idx in range(20)
+                ]
+            ),
+            bars_1h=pd.DataFrame(),
+            current_spread=0.050,
+            typical_spread=0.015,
+            latest_bar_time=now - timedelta(seconds=20),
+            quote_source="broker_quote",
+            data_source="mixed",
+        ),
+    )
+    assert spread_wait.action == "WAIT"
+    assert spread_wait.summary_reason_code == "spread.fail.ratio_too_wide"
+
+    with (
+        patch.object(sched, "_run_tactical_validation", new_callable=AsyncMock) as mock_tac,
+        patch("asyncio.sleep", new_callable=AsyncMock),
+    ):
+        mock_tac.side_effect = [spread_wait, spread_wait]
+        await sched._process_claimed_intent("llm-0", claimed)
+
+    final = store.get_intent(claimed.id)
+    assert final is not None
+    assert final.status == "timed_out"
+
+
+def test_tactical_wait_fallback_classifier_blocks_spread_without_degrade_hint() -> None:
+    """Fallback classifier must treat spread hard-gate failures as non-degradable."""
+    from src.decision.tactical_validator import GateResult, TacticalResult
+
+    spread_wait = TacticalResult(
+        action="WAIT",
+        resolution="RETRY_PENDING",
+        detail="Hard gates failed: spread",
+        summary_reason_code="spread.fail.ratio_too_wide",
+        hard_gates=[
+            GateResult(
+                gate_name="spread",
+                passed=False,
+                status="FAIL",
+                reason_code="spread.fail.ratio_too_wide",
+                detail="spread_ratio=3.33, limit=2.0x",
+            )
+        ],
+        policy_hints={"retryable": True},
+    )
+
+    assert Scheduler._tactical_wait_allows_degrade(spread_wait) is False
 
 
 async def test_tactical_retry_expiry_reason_code_and_final_resolution_preserved_for_market_data(

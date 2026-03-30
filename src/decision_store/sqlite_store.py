@@ -156,6 +156,12 @@ INSERT INTO decisions (
 ) VALUES (:intent_id, :created_at, :status)
 """
 
+SL_LIKE_EXIT_REASONS = (
+    "sl_hit",
+    "initial_risk_structure_failure",
+    "severe_tactical_reversal",
+)
+
 
 # ── Helper Functions ────────────────────────────────────────────────────────
 
@@ -843,13 +849,127 @@ class DecisionStore:
         ).fetchone()
         return row["cnt"] if row else 0
 
-    def has_active_position_for_symbol(self, symbol: str) -> bool:
-        """Check if there's a currently open position for this symbol."""
+    def has_recent_closed_intent_for_symbol(self, symbol: str, *, cooldown_seconds: int) -> bool:
+        """Check if a symbol has a recently closed intent within cooldown seconds."""
+        if cooldown_seconds <= 0:
+            return False
+
+        cutoff = _dt_to_str(datetime.now(timezone.utc) - timedelta(seconds=cooldown_seconds))
         row = self._conn.execute(
-            "SELECT 1 FROM intents WHERE symbol = :symbol AND status = 'opened' LIMIT 1",
-            {"symbol": symbol},
+            """SELECT 1
+               FROM decisions AS d
+               INNER JOIN intents AS i ON i.id = d.intent_id
+               WHERE i.symbol = :symbol
+                 AND i.status = 'closed'
+                 AND d.status = 'closed'
+                 AND d.closed_at IS NOT NULL
+                 AND d.closed_at > :cutoff
+               LIMIT 1""",
+            {"symbol": symbol, "cutoff": cutoff},
         ).fetchone()
         return row is not None
+
+    def count_sl_like_losses_today(self, trade_date: str) -> int:
+        """Count today's closed intents with SL-like loss outcomes."""
+        row = self._conn.execute(
+            """SELECT COUNT(*) as cnt FROM intents
+               WHERE trade_date = :td
+                 AND status = 'closed'
+                 AND realized_pnl < 0
+                 AND exit_reason IN (:reason_1, :reason_2, :reason_3)""",
+            {
+                "td": trade_date,
+                "reason_1": SL_LIKE_EXIT_REASONS[0],
+                "reason_2": SL_LIKE_EXIT_REASONS[1],
+                "reason_3": SL_LIKE_EXIT_REASONS[2],
+            },
+        ).fetchone()
+        return row["cnt"] if row else 0
+
+    def count_symbol_sl_like_losses_today(self, symbol: str, trade_date: str) -> int:
+        """Count today's symbol-scoped closed intents with SL-like loss outcomes."""
+        row = self._conn.execute(
+            """SELECT COUNT(*) as cnt FROM intents
+               WHERE symbol = :symbol
+                 AND trade_date = :td
+                 AND status = 'closed'
+                 AND realized_pnl < 0
+                 AND exit_reason IN (:reason_1, :reason_2, :reason_3)""",
+            {
+                "symbol": symbol,
+                "td": trade_date,
+                "reason_1": SL_LIKE_EXIT_REASONS[0],
+                "reason_2": SL_LIKE_EXIT_REASONS[1],
+                "reason_3": SL_LIKE_EXIT_REASONS[2],
+            },
+        ).fetchone()
+        return row["cnt"] if row else 0
+
+    def has_active_position_for_symbol(
+        self,
+        symbol: str,
+        *,
+        unresolved_grace_seconds: int = 90,
+    ) -> bool:
+        """Check if there's a currently open position for this symbol."""
+        cutoff = _dt_to_str(
+            datetime.now(timezone.utc) - timedelta(seconds=unresolved_grace_seconds)
+        )
+        row = self._conn.execute(
+            """SELECT 1 FROM intents
+               WHERE symbol = :symbol
+                 AND status = 'opened'
+                 AND (
+                     TRIM(COALESCE(position_id, '')) != ''
+                     OR executed_at IS NULL
+                     OR executed_at >= :cutoff
+                 )
+               LIMIT 1""",
+            {"symbol": symbol, "cutoff": cutoff},
+        ).fetchone()
+        return row is not None
+
+    def count_blocking_open_positions(self, *, unresolved_grace_seconds: int = 90) -> int:
+        """Count opened intents that should block scanner admission."""
+        cutoff = _dt_to_str(
+            datetime.now(timezone.utc) - timedelta(seconds=unresolved_grace_seconds)
+        )
+        row = self._conn.execute(
+            """SELECT COUNT(*) AS cnt FROM intents
+               WHERE status = 'opened'
+                 AND (
+                     TRIM(COALESCE(position_id, '')) != ''
+                     OR executed_at IS NULL
+                     OR executed_at >= :cutoff
+                 )""",
+            {"cutoff": cutoff},
+        ).fetchone()
+        return row["cnt"] if row else 0
+
+    def mark_opened_reconciliation_failed(self, intent_id: str, reason: str) -> None:
+        """Mark an opened intent as failed when monitor-side reconciliation expires."""
+        now = datetime.now(timezone.utc)
+        updated = self._conn.execute(
+            """UPDATE intents
+               SET status = 'failed',
+                   execution_error = :reason,
+                   executed_at = COALESCE(executed_at, :executed_at)
+               WHERE id = :id AND status = 'opened'""",
+            {"reason": reason, "executed_at": _dt_to_str(now), "id": intent_id},
+        ).rowcount
+        if not updated:
+            self._conn.rollback()
+            raise InvalidTransitionError(
+                f"Cannot mark {intent_id} reconciliation-failed: not in 'opened' state"
+            )
+        self._conn.execute(
+            """UPDATE decisions
+               SET status = 'failed',
+                   failure_reason = :reason
+               WHERE intent_id = :intent_id""",
+            {"reason": reason, "intent_id": intent_id},
+        )
+        self._conn.commit()
 
     def count_same_direction_today(
         self,

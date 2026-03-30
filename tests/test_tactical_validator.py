@@ -699,6 +699,37 @@ class TestTacticalVerdictSchema:
         assert result.policy_hints["retryable"] is True
         assert result.policy_hints["degrade_allowed"] is False
 
+    def test_spread_hard_gate_wait_disallows_degrade(self) -> None:
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        now = datetime.now(timezone.utc)
+        data = TacticalData(
+            bars_5min=pd.DataFrame(
+                [
+                    {
+                        "datetime": now - timedelta(minutes=20 - idx),
+                        "open": 1.1000,
+                        "high": 1.1008,
+                        "low": 1.0995,
+                        "close": 1.1002,
+                    }
+                    for idx in range(20)
+                ]
+            ),
+            bars_1h=pd.DataFrame(),
+            current_spread=0.00050,
+            typical_spread=0.00015,
+            latest_bar_time=now - timedelta(seconds=20),
+            quote_source="broker_quote",
+            data_source="mixed",
+        )
+
+        result = validator.evaluate(side="BUY", data=data)
+
+        assert result.action == "WAIT"
+        assert result.summary_reason_code == "spread.fail.ratio_too_wide"
+        assert result.policy_hints["degrade_allowed"] is False
+
     def test_market_data_reason_code_taxonomy_distinguishes_startup_pending_and_stale_wait(
         self,
     ) -> None:

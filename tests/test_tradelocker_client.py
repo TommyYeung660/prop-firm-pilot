@@ -788,6 +788,31 @@ async def test_market_order_open_falls_back_to_positions_when_orders_history_is_
     assert result.raw_response["openPrice"] == 184.329
 
 
+@pytest.mark.parametrize("unresolved_position_id", ["", None])
+async def test_market_order_open_returns_failure_when_position_recovery_stays_unresolved(
+    client: TradeLockerClient,
+    unresolved_position_id: str | None,
+) -> None:
+    client._resolve_symbol_meta = AsyncMock(
+        return_value={
+            "tradableInstrumentId": "TI-EURUSD",
+            "infoRouteId": "ROUTE-INFO",
+            "tradeRouteId": "ROUTE-TRADE",
+        }
+    )
+    client._account_request = AsyncMock(return_value={"orderId": "ORD-1"})
+    client._enrich_order_response = AsyncMock(
+        return_value={"orderId": "ORD-1", "positionId": unresolved_position_id, "openPrice": 0}
+    )
+
+    result = await client.open_position(symbol="EURUSD", side="BUY", volume=0.10)
+
+    assert result.success is False
+    assert result.position_id == ""
+    assert "position recovery unresolved" in result.message
+    assert result.raw_response["orderId"] == "ORD-1"
+
+
 async def test_account_request_throttles_same_route_within_rate_limit_window(
     client: TradeLockerClient,
 ) -> None:

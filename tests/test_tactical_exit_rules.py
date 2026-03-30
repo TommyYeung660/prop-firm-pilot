@@ -105,6 +105,7 @@ def _make_snapshot(
     tp_price: float | None = 1.1080,
     unrealized_r: float = 0.35,
     partial_close_done: bool = False,
+    hold_seconds: int | None = None,
     bars_5min: pd.DataFrame | None = None,
     bars_1h: pd.DataFrame | None = None,
 ) -> TacticalExitSnapshot:
@@ -121,6 +122,7 @@ def _make_snapshot(
         original_sl_price=1.0980,
         original_tp_price=1.1080,
         unrealized_r=unrealized_r,
+        hold_seconds=hold_seconds,
         partial_close_done=partial_close_done,
         bars_5min=bars_5min if bars_5min is not None else pd.DataFrame(),
         bars_1h=bars_1h if bars_1h is not None else pd.DataFrame(),
@@ -217,3 +219,55 @@ def test_no_defensive_exit_without_full_failure_confirmation() -> None:
     decision = choose_tactical_exit(snapshot, TacticalExitConfig(defensive_exit_loss_r=-0.35))
 
     assert decision.action != "EXIT_NOW"
+
+
+def test_severe_reversal_short_hold_falls_back_to_profit_protection() -> None:
+    """Severe reversal should not force-exit before minimum hold time is reached."""
+    snapshot = _make_snapshot(
+        current_price=1.1060,
+        unrealized_r=1.1,
+        hold_seconds=120,
+        partial_close_done=False,
+        bars_5min=_make_failed_buy_5min_bars(),
+        bars_1h=_make_trending_1h_bars(),
+    )
+
+    decision = choose_tactical_exit(snapshot, TacticalExitConfig())
+
+    assert decision.action == "PARTIAL_CLOSE"
+    assert decision.state == "PROFIT_PROTECTION"
+    assert decision.reason == "profit_protection_partial_close"
+
+
+def test_severe_reversal_insufficient_r_falls_back_to_protection() -> None:
+    """Severe reversal should not force-exit if unrealized R is below threshold."""
+    snapshot = _make_snapshot(
+        current_price=1.1035,
+        unrealized_r=0.35,
+        hold_seconds=3600,
+        bars_5min=_make_failed_buy_5min_bars(),
+        bars_1h=_make_trending_1h_bars(),
+    )
+
+    decision = choose_tactical_exit(snapshot, TacticalExitConfig())
+
+    assert decision.action == "MOVE_TO_BREAKEVEN"
+    assert decision.state == "PROTECTION"
+    assert decision.reason == "breakeven_threshold_reached"
+
+
+def test_severe_reversal_with_sufficient_hold_and_r_exits_now() -> None:
+    """Severe reversal should still force-exit when hold and R thresholds are met."""
+    snapshot = _make_snapshot(
+        current_price=1.1060,
+        unrealized_r=1.1,
+        hold_seconds=3600,
+        bars_5min=_make_failed_buy_5min_bars(),
+        bars_1h=_make_trending_1h_bars(),
+    )
+
+    decision = choose_tactical_exit(snapshot, TacticalExitConfig())
+
+    assert decision.action == "EXIT_NOW"
+    assert decision.state == "PROFIT_PROTECTION"
+    assert decision.reason == "severe_tactical_reversal"

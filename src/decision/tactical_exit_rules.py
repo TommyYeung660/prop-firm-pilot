@@ -53,6 +53,7 @@ class TacticalExitSnapshot:
     original_tp_price: float | None
     unrealized_r: float
     partial_close_done: bool
+    hold_seconds: int | None = None
     bars_5min: pd.DataFrame = field(default_factory=pd.DataFrame)
     bars_1h: pd.DataFrame = field(default_factory=pd.DataFrame)
     prior_trailing_sl: float | None = None
@@ -167,12 +168,21 @@ def build_exit_signal_context(snapshot: TacticalExitSnapshot) -> ExitSignalConte
 # ── State Classification ───────────────────────────────────────────────────
 
 
-def _is_severe_reversal(snapshot: TacticalExitSnapshot, context: ExitSignalContext) -> bool:
+def _is_severe_reversal(
+    snapshot: TacticalExitSnapshot,
+    context: ExitSignalContext,
+    config: TacticalExitConfig,
+) -> bool:
     """Return True when multiple tactical signals strongly contradict the position."""
     if context.ema_aligned is None:
         return False
+    if (
+        snapshot.hold_seconds is None
+        or snapshot.hold_seconds < config.severe_reversal_min_hold_seconds
+    ):
+        return False
     return (
-        snapshot.unrealized_r > 0
+        snapshot.unrealized_r >= config.severe_reversal_min_r
         and context.ema_aligned is False
         and (context.adverse_rsi or context.opposing_candle_strong)
     )
@@ -383,7 +393,7 @@ def choose_tactical_exit(
     context = build_exit_signal_context(snapshot)
     state = classify_tactical_exit_state(snapshot, config, context=context)
 
-    if _is_severe_reversal(snapshot, context):
+    if _is_severe_reversal(snapshot, context, config):
         return TacticalExitDecision(
             action="EXIT_NOW",
             state="PROFIT_PROTECTION",

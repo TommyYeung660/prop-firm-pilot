@@ -327,6 +327,7 @@ class TacticalValidator:
                 reason_code.startswith("market_data.")
                 or reason_code.startswith("data.reject.")
                 or reason_code.startswith("freshness.")
+                or reason_code.startswith("spread.")
                 or reason_code == "atr.fail.insufficient_1h_data"
             ):
                 return False

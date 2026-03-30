@@ -246,6 +246,8 @@ class TestTacticalConfig:
         assert tc.exit.partial_close_ratio == 0.5
         assert tc.exit.defensive_exit_loss_r == -0.35
         assert tc.exit.defensive_exit_require_strong_candle is True
+        assert tc.exit.severe_reversal_min_hold_seconds == 900
+        assert tc.exit.severe_reversal_min_r == 0.5
         assert tc.exit.use_llm_exception_path is True
 
 
@@ -316,6 +318,8 @@ def test_e8_signature_50k_config_loads_as_runnable_tradelocker_account(
     assert config.agents.enabled is False
     assert config.scheduler.entry_funnel_mode == "scanner_tactical"
     assert config.scheduler.market_hours.force_close_before_weekend is True
+    assert config.tactical.exit.severe_reversal_min_hold_seconds == 900
+    assert config.tactical.exit.severe_reversal_min_r == 0.5
     assert config.tactical.exit.use_llm_exception_path is False
     assert config.decision_store.db_path == "data/decisions_e8_signature_50k.db"
     assert config.monitor.trade_journal_path == "data/trade_journal_e8_signature_50k.jsonl"

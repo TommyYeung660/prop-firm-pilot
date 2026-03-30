@@ -466,6 +466,25 @@ class TestQueries:
         assert store.get_decision("nonexistent") is None
 
 
+def test_has_active_position_for_symbol_ignores_stale_opened_row_without_position_id(
+    store: DecisionStore,
+) -> None:
+    intent = TradeIntent(trade_date="2026-03-30", symbol="AUDUSD")
+    store.insert_intent(intent)
+    store.claim_next_pending("llm-0")
+    store.update_intent_decision(intent.id, "SELL", 20.0, 40.0, "report", "{}")
+    store.mark_ready_for_exec(intent.id)
+    store.mark_executing(intent.id)
+    store.mark_opened(intent.id, position_id="")
+    store._conn.execute(
+        "UPDATE intents SET executed_at = ? WHERE id = ?",
+        ("2026-03-28T04:09:29+00:00", intent.id),
+    )
+    store._conn.commit()
+
+    assert store.has_active_position_for_symbol("AUDUSD", unresolved_grace_seconds=90) is False
+
+
 # ── Idempotency Tests ───────────────────────────────────────────────────────
 
 
@@ -506,18 +525,24 @@ class TestIdempotency:
             )
         )
 
-        assert store.intent_exists(
-            "USDCHF",
-            "2026-02-16",
-            "scanner",
-            scanner_side="short",
-        ) is True
-        assert store.intent_exists(
-            "USDCHF",
-            "2026-02-16",
-            "scanner",
-            scanner_side="long",
-        ) is False
+        assert (
+            store.intent_exists(
+                "USDCHF",
+                "2026-02-16",
+                "scanner",
+                scanner_side="short",
+            )
+            is True
+        )
+        assert (
+            store.intent_exists(
+                "USDCHF",
+                "2026-02-16",
+                "scanner",
+                scanner_side="long",
+            )
+            is False
+        )
 
 
 # ── Claim Management Tests ──────────────────────────────────────────────────
@@ -1068,6 +1093,192 @@ class TestGetClosedIntents:
         assert closed[0].id == intent2.id
         assert closed[1].id == intent1.id
 
+
+# ── Cooldown + SL-Like Loss Query Tests ────────────────────────────────────
+
+
+class TestRecentClosedIntentForSymbol:
+    """Tests for has_recent_closed_intent_for_symbol()."""
+
+    def _open_and_close(self, store: DecisionStore, symbol: str) -> TradeIntent:
+        intent = TradeIntent(trade_date="2026-02-16", symbol=symbol)
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "BUY", 40.0, 80.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id=f"POS-{intent.id[:8]}")
+        store.mark_closed(intent.id, realized_pnl=-10.0, exit_reason="sl_hit")
+        return intent
+
+    def test_has_recent_closed_intent_for_symbol_true_within_cooldown(
+        self, store: DecisionStore
+    ) -> None:
+        intent = self._open_and_close(store, "EURUSD")
+
+        now_str = datetime.now(timezone.utc).isoformat()
+        store._conn.execute(
+            "UPDATE decisions SET closed_at = ? WHERE intent_id = ?",
+            (now_str, intent.id),
+        )
+        store._conn.commit()
+
+        assert store.has_recent_closed_intent_for_symbol("EURUSD", cooldown_seconds=300) is True
+
+    def test_has_recent_closed_intent_for_symbol_false_outside_cooldown(
+        self, store: DecisionStore
+    ) -> None:
+        intent = self._open_and_close(store, "EURUSD")
+
+        old_str = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        store._conn.execute(
+            "UPDATE decisions SET closed_at = ? WHERE intent_id = ?",
+            (old_str, intent.id),
+        )
+        store._conn.commit()
+
+        assert store.has_recent_closed_intent_for_symbol("EURUSD", cooldown_seconds=120) is False
+
+    def test_has_recent_closed_intent_for_symbol_ignores_non_closed_decision_status(
+        self, store: DecisionStore
+    ) -> None:
+        intent = self._open_and_close(store, "EURUSD")
+
+        now_str = datetime.now(timezone.utc).isoformat()
+        store._conn.execute(
+            "UPDATE decisions SET status = ?, closed_at = ? WHERE intent_id = ?",
+            ("opened", now_str, intent.id),
+        )
+        store._conn.commit()
+
+        assert store.has_recent_closed_intent_for_symbol("EURUSD", cooldown_seconds=300) is False
+
+
+class TestSlLikeLossCounts:
+    """Tests for SL-like loss counting query helpers."""
+
+    def _open_and_close(
+        self,
+        store: DecisionStore,
+        *,
+        symbol: str,
+        trade_date: str,
+        pnl: float,
+        exit_reason: str,
+    ) -> None:
+        intent = TradeIntent(trade_date=trade_date, symbol=symbol)
+        store.insert_intent(intent)
+        store.claim_next_pending("llm-0")
+        store.update_intent_decision(intent.id, "BUY", 40.0, 80.0, "report", "{}")
+        store.mark_ready_for_exec(intent.id)
+        store.mark_executing(intent.id)
+        store.mark_opened(intent.id, position_id=f"POS-{intent.id[:8]}")
+        store.mark_closed(intent.id, realized_pnl=pnl, exit_reason=exit_reason)
+
+    def test_count_sl_like_losses_today_counts_approved_negative_exit_reasons(
+        self, store: DecisionStore
+    ) -> None:
+        trade_date = "2026-02-16"
+        self._open_and_close(
+            store,
+            symbol="EURUSD",
+            trade_date=trade_date,
+            pnl=-5.0,
+            exit_reason="sl_hit",
+        )
+        self._open_and_close(
+            store,
+            symbol="GBPUSD",
+            trade_date=trade_date,
+            pnl=-7.0,
+            exit_reason="initial_risk_structure_failure",
+        )
+        self._open_and_close(
+            store,
+            symbol="USDJPY",
+            trade_date=trade_date,
+            pnl=-9.0,
+            exit_reason="severe_tactical_reversal",
+        )
+        self._open_and_close(
+            store,
+            symbol="AUDUSD",
+            trade_date=trade_date,
+            pnl=-3.0,
+            exit_reason="tp_hit",
+        )
+
+        assert store.count_sl_like_losses_today(trade_date) == 3
+
+    def test_count_symbol_sl_like_losses_today_scopes_symbol(
+        self, store: DecisionStore
+    ) -> None:
+        trade_date = "2026-02-16"
+        self._open_and_close(
+            store,
+            symbol="EURUSD",
+            trade_date=trade_date,
+            pnl=-5.0,
+            exit_reason="sl_hit",
+        )
+        self._open_and_close(
+            store,
+            symbol="EURUSD",
+            trade_date=trade_date,
+            pnl=-8.0,
+            exit_reason="initial_risk_structure_failure",
+        )
+        self._open_and_close(
+            store,
+            symbol="GBPUSD",
+            trade_date=trade_date,
+            pnl=-6.0,
+            exit_reason="severe_tactical_reversal",
+        )
+
+        assert store.count_symbol_sl_like_losses_today("EURUSD", trade_date) == 2
+
+    def test_count_sl_like_losses_today_excludes_positive_severe_tactical_reversal(
+        self, store: DecisionStore
+    ) -> None:
+        trade_date = "2026-02-16"
+        self._open_and_close(
+            store,
+            symbol="EURUSD",
+            trade_date=trade_date,
+            pnl=12.0,
+            exit_reason="severe_tactical_reversal",
+        )
+        self._open_and_close(
+            store,
+            symbol="GBPUSD",
+            trade_date=trade_date,
+            pnl=-4.0,
+            exit_reason="sl_hit",
+        )
+
+        assert store.count_sl_like_losses_today(trade_date) == 1
+
+    def test_count_symbol_sl_like_losses_today_excludes_positive_severe_tactical_reversal(
+        self, store: DecisionStore
+    ) -> None:
+        trade_date = "2026-02-16"
+        self._open_and_close(
+            store,
+            symbol="EURUSD",
+            trade_date=trade_date,
+            pnl=12.0,
+            exit_reason="severe_tactical_reversal",
+        )
+        self._open_and_close(
+            store,
+            symbol="EURUSD",
+            trade_date=trade_date,
+            pnl=-4.0,
+            exit_reason="sl_hit",
+        )
+
+        assert store.count_symbol_sl_like_losses_today("EURUSD", trade_date) == 1
 
 # ── v1.3.7: Tactical Pending Transitions ───────────────────────────────────
 

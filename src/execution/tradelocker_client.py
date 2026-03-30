@@ -476,14 +476,25 @@ class TradeLockerClient:
                 volume=volume,
                 tradable_instrument_id=meta["tradableInstrumentId"],
             )
+            raw_position_id = response_raw.get("positionId")
+            resolved_position_id = "" if raw_position_id is None else str(raw_position_id).strip()
+            if resolved_position_id.lower() in {"", "none", "null"}:
+                logger.error(
+                    "TradeLocker: open_position unresolved positionId for {} {} {}. raw={}",
+                    side,
+                    symbol,
+                    volume,
+                    response_raw,
+                )
+                return BrokerOrderResult(
+                    success=False,
+                    position_id="",
+                    message="TradeLocker position recovery unresolved",
+                    raw_response=response_raw,
+                )
             return BrokerOrderResult(
                 success=True,
-                position_id=str(
-                    response_raw.get(
-                        "positionId",
-                        response_raw.get("orderId", response_raw.get("id", "")),
-                    )
-                ),
+                position_id=resolved_position_id,
                 message="Position opened successfully",
                 raw_response=response_raw,
             )

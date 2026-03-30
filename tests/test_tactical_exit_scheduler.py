@@ -421,3 +421,63 @@ async def test_run_tactical_exit_cycle_logs_immediately_when_summary_changes(
     await scheduler._run_tactical_exit_cycle([_make_position()], [_make_opened_intent()])
 
     assert len(_tactical_cycle_log_calls(mock_info)) == 2
+
+
+@pytest.mark.asyncio
+async def test_tactical_exit_snapshot_includes_hold_seconds_from_executed_at(
+    scheduler: Scheduler,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot passed to tactical manager should include computed hold_seconds."""
+    scheduler._fetch_tactical_data = AsyncMock(return_value=TacticalData())
+    scheduler._handle_tactical_exit_evaluation = AsyncMock()
+    scheduler._tactical_exit_manager = MagicMock()
+    scheduler._tactical_exit_manager.evaluate_position.return_value = TacticalExitEvaluation(
+        decision=TacticalExitDecision(
+            action="HOLD",
+            state="INITIAL_RISK",
+            reason="no_tactical_exit_action",
+        )
+    )
+
+    now = datetime(2026, 3, 30, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(scheduler, "_now_utc", MagicMock(return_value=now))
+
+    intent = _make_opened_intent()
+    intent.executed_at = now - timedelta(seconds=1234)
+    intent.created_at = now - timedelta(seconds=2345)
+
+    await scheduler._run_tactical_exit_cycle([_make_position()], [intent])
+
+    snapshot = scheduler._tactical_exit_manager.evaluate_position.call_args.kwargs["snapshot"]
+    assert snapshot.hold_seconds == 1234
+
+
+@pytest.mark.asyncio
+async def test_tactical_exit_snapshot_includes_hold_seconds_from_created_at_when_not_executed(
+    scheduler: Scheduler,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot hold_seconds should fall back to created_at when executed_at is missing."""
+    scheduler._fetch_tactical_data = AsyncMock(return_value=TacticalData())
+    scheduler._handle_tactical_exit_evaluation = AsyncMock()
+    scheduler._tactical_exit_manager = MagicMock()
+    scheduler._tactical_exit_manager.evaluate_position.return_value = TacticalExitEvaluation(
+        decision=TacticalExitDecision(
+            action="HOLD",
+            state="INITIAL_RISK",
+            reason="no_tactical_exit_action",
+        )
+    )
+
+    now = datetime(2026, 3, 30, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(scheduler, "_now_utc", MagicMock(return_value=now))
+
+    intent = _make_opened_intent()
+    intent.executed_at = None
+    intent.created_at = now - timedelta(seconds=777)
+
+    await scheduler._run_tactical_exit_cycle([_make_position()], [intent])
+
+    snapshot = scheduler._tactical_exit_manager.evaluate_position.call_args.kwargs["snapshot"]
+    assert snapshot.hold_seconds == 777

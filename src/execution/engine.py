@@ -399,21 +399,54 @@ class ExecutionEngine:
             )
 
             if order.success:
-                await asyncio.to_thread(self._store.mark_opened, intent_id, order.position_id)
+                raw_position_id = order.position_id
+                resolved_position_id = (
+                    "" if raw_position_id is None else str(raw_position_id).strip()
+                )
+                if resolved_position_id.lower() in {"", "none", "null"}:
+                    missing_position_id_msg = (
+                        "Execution failed: missing broker position_id in successful open_position "
+                        "response"
+                    )
+                    await asyncio.to_thread(
+                        self._store.mark_failed,
+                        intent_id,
+                        missing_position_id_msg,
+                    )
+                    self._log_trade_event(
+                        "TRADE_FAILED",
+                        {
+                            "intent_id": intent_id,
+                            "symbol": symbol,
+                            "side": side,
+                            "reason": missing_position_id_msg,
+                            "raw_response": order.raw_response,
+                        },
+                    )
+                    logger.error(
+                        "ExecutionEngine: intent {} returned success but missing broker "
+                        "position_id. raw_response={}",
+                        intent_id,
+                        order.raw_response,
+                    )
+                    await self._send_alert_failed(symbol, side, missing_position_id_msg)
+                    return
+
+                await asyncio.to_thread(self._store.mark_opened, intent_id, resolved_position_id)
                 self._log_trade_event(
                     "TRADE_OPENED",
                     {
                         "intent_id": intent_id,
                         "symbol": symbol,
                         "side": side,
-                        "position_id": order.position_id,
+                        "position_id": resolved_position_id,
                         "volume": trade_plan.volume,
                     },
                 )
                 logger.info(
                     "ExecutionEngine: intent {} opened as position {} ({} {} {:.2f} lots)",
                     intent_id,
-                    order.position_id,
+                    resolved_position_id,
                     side,
                     broker_symbol,
                     trade_plan.volume,
@@ -458,7 +491,7 @@ class ExecutionEngine:
                                 )
                 # Set SL/TP on the opened position
                 sl_price, tp_price = await self._set_sl_tp_on_position(
-                    position_id=order.position_id,
+                    position_id=resolved_position_id,
                     broker_symbol=broker_symbol,
                     config_symbol=symbol,
                     side=side,
@@ -471,13 +504,13 @@ class ExecutionEngine:
                 # Extract fill price for alert
                 fill_price = self._extract_open_price(order.raw_response)
                 if fill_price is None:
-                    fill_price = await self._fetch_position_open_price(order.position_id)
+                    fill_price = await self._fetch_position_open_price(resolved_position_id)
                 await self._send_alert_opened(
                     symbol,
                     side,
                     trade_plan.volume,
                     account_snapshot.equity,
-                    order.position_id,
+                    resolved_position_id,
                     sl_price,
                     tp_price,
                     fill_price,
