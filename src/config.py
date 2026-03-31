@@ -541,6 +541,10 @@ class TacticalExitConfig(BaseModel):
     min_tp_improvement_pips: float = Field(
         default=3.0, description="Minimum take-profit delta required before writing"
     )
+    min_tp_improvement_atr_frac: float = Field(
+        default=0.15,
+        description="Minimum TP improvement as fraction of ATR before repricing is allowed",
+    )
     use_llm_exception_path: bool = Field(
         default=True, description="Allow LLM re-evaluation only for tactical exception cases"
     )

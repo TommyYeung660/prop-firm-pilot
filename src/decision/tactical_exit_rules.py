@@ -367,9 +367,9 @@ def calculate_dynamic_take_profit(
     if state == "TREND_EXTENSION":
         multiplier = config.trend_extension_tp_atr_multiplier
         if snapshot.side == "BUY":
-            candidate = max(reference, snapshot.current_price) + atr_distance * multiplier
+            candidate = snapshot.current_price + atr_distance * multiplier
         else:
-            candidate = min(reference, snapshot.current_price) - atr_distance * multiplier
+            candidate = snapshot.current_price - atr_distance * multiplier
     else:
         multiplier = config.profit_protection_tp_atr_multiplier
         if snapshot.side == "BUY":
@@ -379,6 +379,14 @@ def calculate_dynamic_take_profit(
 
     if not _tp_improves(snapshot, candidate, state):
         return None
+
+    # Minimum improvement threshold: skip noise reprices below ATR fraction
+    if config.min_tp_improvement_atr_frac > 0:
+        delta = abs(candidate - reference)
+        min_delta = atr_distance * config.min_tp_improvement_atr_frac
+        if delta < min_delta:
+            return None
+
     return candidate
 
 

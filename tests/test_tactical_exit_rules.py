@@ -271,3 +271,66 @@ def test_severe_reversal_with_sufficient_hold_and_r_exits_now() -> None:
     assert decision.action == "EXIT_NOW"
     assert decision.state == "PROFIT_PROTECTION"
     assert decision.reason == "severe_tactical_reversal"
+
+
+def test_dynamic_tp_blocked_when_improvement_below_atr_frac() -> None:
+    """TP reprice should be suppressed when price hasn't moved enough since last reprice."""
+    bars_1h = _make_trending_1h_bars()
+
+    # Simulate post-reprice state: TP already near current_price + ATR*1.5
+    # ATR ≈ 0.00180, multiplier=1.5 → extension ≈ 0.00270
+    # Set tp_price to where a prior reprice would have placed it (current-1pip + 0.00270)
+    snapshot = _make_snapshot(
+        current_price=1.1060,
+        sl_price=1.1058,
+        tp_price=1.10859,  # ≈ 1.1059 + 0.00270 (prior reprice when price was 1 pip lower)
+        unrealized_r=1.4,
+        bars_5min=_make_healthy_buy_5min_bars(),
+        bars_1h=bars_1h,
+    )
+
+    config = TacticalExitConfig(min_tp_improvement_atr_frac=0.15)
+    candidate = calculate_dynamic_take_profit(snapshot, config, state="TREND_EXTENSION")
+
+    # candidate = 1.1060 + 0.00270 = 1.10870
+    # delta = 1.10870 - 1.10859 = 0.00011 < ATR * 0.15 (≈ 0.00027) → blocked
+    assert candidate is None, (
+        f"Expected None when TP improvement is below ATR fraction, got {candidate}"
+    )
+
+
+def test_dynamic_tp_allowed_when_improvement_above_atr_frac() -> None:
+    """TP reprice should proceed when improvement exceeds min ATR fraction."""
+    snapshot = _make_snapshot(
+        current_price=1.1060,
+        sl_price=1.1058,
+        tp_price=1.1080,
+        unrealized_r=1.4,
+        bars_5min=_make_healthy_buy_5min_bars(),
+        bars_1h=_make_trending_1h_bars(),
+    )
+
+    config = TacticalExitConfig(min_tp_improvement_atr_frac=0.15)
+    candidate = calculate_dynamic_take_profit(snapshot, config, state="TREND_EXTENSION")
+
+    assert candidate is not None
+    assert candidate > 1.1080
+
+
+def test_dynamic_tp_atr_frac_zero_disables_threshold() -> None:
+    """Setting min_tp_improvement_atr_frac=0 should allow any directional improvement."""
+    bars_1h = _make_trending_1h_bars()
+    # Same near-candidate TP as the blocked test
+    snapshot = _make_snapshot(
+        current_price=1.1060,
+        sl_price=1.1058,
+        tp_price=1.10859,
+        unrealized_r=1.4,
+        bars_5min=_make_healthy_buy_5min_bars(),
+        bars_1h=bars_1h,
+    )
+
+    config_zero = TacticalExitConfig(min_tp_improvement_atr_frac=0.0)
+    candidate = calculate_dynamic_take_profit(snapshot, config_zero, state="TREND_EXTENSION")
+
+    assert candidate is not None, "Threshold=0 should allow any directional improvement"

@@ -172,6 +172,7 @@ tactical:
     tp_reprice_cooldown_seconds: 600  # 連續重設 TP 的冷卻時間；降低抖動與 API 壓力
     min_sl_improvement_pips: 2.0  # SL 至少改善多少 pip 才值得送出修改
     min_tp_improvement_pips: 3.0  # TP 至少改善多少 pip 才值得送出修改
+    min_tp_improvement_atr_frac: 0.15  # TP 須改善 ≥ 15% ATR 才觸發 reprice；過濾噪音
     use_llm_exception_path: false  # LLM 預設關閉時，不走 exception path，避免隱性依賴 TradingAgents
 
 # ── 低頻基礎參數 ────────────────────────────────────────────────────────────
