@@ -86,6 +86,11 @@ class TradeIntent(BaseModel):
     scanner_market_date: str = ""
     scanner_label_version: str = ""
     scanner_side: Literal["long", "short"] | None = None
+    scanner_confidence_quantile: float = 0.0
+    scanner_regime_rank_pct: float = 0.0
+    scanner_risk_rank_pct: float = 0.0
+    scanner_spread_cost_bps: float = 0.0
+    scanner_net_forward_return: float = 0.0
 
     # LLM decision (filled after claim)
     suggested_side: Literal["BUY", "SELL", "HOLD"] | None = None

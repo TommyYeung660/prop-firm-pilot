@@ -849,6 +849,11 @@ class Scheduler:
                             scanner_market_date=getattr(signal, "market_date", today),
                             scanner_label_version=getattr(signal, "label_version", ""),
                             scanner_side=scanner_side,
+                            scanner_confidence_quantile=getattr(signal, "confidence_quantile", 0.0),
+                            scanner_regime_rank_pct=getattr(signal, "regime_rank_pct", 0.0),
+                            scanner_risk_rank_pct=getattr(signal, "risk_rank_pct", 0.0),
+                            scanner_spread_cost_bps=getattr(signal, "spread_cost_bps", 0.0),
+                            scanner_net_forward_return=getattr(signal, "net_forward_return", 0.0),
                             source="scanner",
                             expires_at=self._now_utc() + timedelta(hours=4),
                         )
