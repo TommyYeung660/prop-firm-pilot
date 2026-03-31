@@ -3,8 +3,8 @@
   "bundle_version": "fx_bundle_v1",
   "scanner_version": "v1.5.0_beta",
   "schema_versions": {
-    "signals_csv": "fx_signal_v1",
-    "signals_json": "fx_signal_v1",
+    "signals_csv": "fx_signal_v3",
+    "signals_json": "fx_signal_v3",
     "metrics_json": "fx_metrics_v1",
     "manifest_json": "fx_bundle_v1"
   },
@@ -23,7 +23,7 @@
     "XAUUSD"
   ],
   "cadence": "1d",
-  "label_version": "binary_forward_return_sign_v1",
+  "label_version": "cost_aware_net_return_sign_v1",
   "validation": {
     "status": "passed"
   }
