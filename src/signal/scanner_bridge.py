@@ -15,7 +15,7 @@ from typing import Any
 
 from loguru import logger
 
-SUPPORTED_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v1", "fx_signal_v2"}
+SUPPORTED_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v1", "fx_signal_v2", "fx_signal_v3"}
 SUPPORTED_SCANNER_VERSIONS = {"v1.5.0", "v1.5.0_beta", "v1.5.0_beta_2"}
 PASSING_VALIDATION_STATUSES = {"", "ok", "pass", "passed", "ready", "success", "valid", "validated"}
 REQUIRED_SIGNAL_COLUMNS = {
@@ -36,7 +36,7 @@ REQUIRED_SIGNAL_COLUMNS = {
     "regime_label",
     "market_date",
 }
-SIDE_AWARE_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v2"}
+SIDE_AWARE_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v2", "fx_signal_v3"}
 
 
 @dataclass
