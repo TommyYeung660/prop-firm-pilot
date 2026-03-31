@@ -33,6 +33,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures" / "scanner"
 DEFAULT_SCANNER_VERSION = "v1.5.0_beta"
 DEFAULT_SIGNAL_SCHEMA_VERSION = "fx_signal_v1"
 DEFAULT_SIGNAL_SCHEMA_VERSION_V2 = "fx_signal_v2"
+DEFAULT_SIGNAL_SCHEMA_VERSION_V3 = "fx_signal_v3"
 DEFAULT_LABEL_VERSION = ACTIVE_LABEL_VERSION
 
 
@@ -130,7 +131,7 @@ def _seed_scanner_output_bundle(
     fixture_name: str = "signals_single.csv",
     *,
     scanner_version: str = DEFAULT_SCANNER_VERSION,
-    schema_version: str = DEFAULT_SIGNAL_SCHEMA_VERSION,
+    schema_version: str = DEFAULT_SIGNAL_SCHEMA_VERSION_V3,
     label_version: str = DEFAULT_LABEL_VERSION,
     cadence: str = "1d",
     validation_status: str = "passed",
@@ -180,6 +181,11 @@ def _write_signal_csv(
     score: float = 0.61,
     rank: int = 1,
     confidence: str = "high",
+    confidence_quantile: float = 0.0,
+    regime_rank_pct: float = 0.0,
+    risk_rank_pct: float = 0.0,
+    spread_cost_bps: float = 0.0,
+    net_forward_return: float = 0.0,
 ) -> None:
     header = (
         "datetime,instrument,score,rank,score_gap,drop_distance,topk_spread,"
@@ -194,6 +200,9 @@ def _write_signal_csv(
     if schema_version == DEFAULT_SIGNAL_SCHEMA_VERSION_V2:
         header = f"{header},side"
         row = f"{row},{'' if side is None else side}"
+    elif schema_version == DEFAULT_SIGNAL_SCHEMA_VERSION_V3:
+        header = f"{header},side,confidence_quantile,regime_rank_pct,risk_rank_pct,spread_cost_bps,net_forward_return"
+        row = f"{row},{'' if side is None else side},{confidence_quantile},{regime_rank_pct},{risk_rank_pct},{spread_cost_bps},{net_forward_return}"
     path.write_text(f"{header}\n{row}\n", encoding="utf-8")
 
 
@@ -233,7 +242,7 @@ class TestCSVParsing:
         first = signals[0]
 
         assert first.scanner_version == DEFAULT_SCANNER_VERSION
-        assert first.schema_version == DEFAULT_SIGNAL_SCHEMA_VERSION
+        assert first.schema_version == DEFAULT_SIGNAL_SCHEMA_VERSION_V3
         assert first.market_date == "2026-02-16"
         assert first.label_version == DEFAULT_LABEL_VERSION
 
@@ -301,6 +310,39 @@ class TestCSVParsing:
         assert signals == []
         assert chosen_date == ""
         assert bridge.get_last_rejection_reason_code() == "scanner.contract.invalid"
+
+    def test_load_signals_accepts_fx_signal_v3_with_new_columns(
+        self, bridge: ScannerBridge, tmp_path: Path
+    ) -> None:
+        """v3 signals with 5 new columns parse correctly."""
+        csv_path = tmp_path / "signals_v3.csv"
+        _write_signal_csv(
+            csv_path,
+            schema_version=DEFAULT_SIGNAL_SCHEMA_VERSION_V3,
+            side="long",
+            confidence_quantile=0.92,
+            regime_rank_pct=0.70,
+            risk_rank_pct=0.25,
+            spread_cost_bps=1.2,
+            net_forward_return=0.048,
+        )
+        _write_contract_sidecars(
+            tmp_path,
+            tmp_path,
+            schema_version=DEFAULT_SIGNAL_SCHEMA_VERSION_V3,
+        )
+
+        signals, chosen_date = bridge.load_signals_from_file(csv_path, target_date="2026-02-16")
+
+        assert chosen_date == "2026-02-16"
+        assert len(signals) == 1
+        s = signals[0]
+        assert s.side == "long"
+        assert s.confidence_quantile == pytest.approx(0.92)
+        assert s.regime_rank_pct == pytest.approx(0.70)
+        assert s.risk_rank_pct == pytest.approx(0.25)
+        assert s.spread_cost_bps == pytest.approx(1.2)
+        assert s.net_forward_return == pytest.approx(0.048)
 
     def test_load_single_signal(self, bridge: ScannerBridge) -> None:
         """signals_single.csv has 1 signal: EURUSD, score≈0.92, high confidence."""
@@ -396,6 +438,7 @@ class TestCSVParsing:
             tmp_path,
             tmp_path,
             scanner_version="v1.5.0_beta_2",
+            schema_version=DEFAULT_SIGNAL_SCHEMA_VERSION_V3,
         )
 
         signals, chosen_date = bridge.load_signals_from_file(csv_path, target_date="2026-02-16")
@@ -725,6 +768,11 @@ def _signal_to_intent(signal: ScannerSignal, trade_date: str) -> TradeIntent:
         scanner_market_date=signal.market_date,
         scanner_label_version=signal.label_version,
         scanner_side=signal.side,
+        scanner_confidence_quantile=signal.confidence_quantile,
+        scanner_regime_rank_pct=signal.regime_rank_pct,
+        scanner_risk_rank_pct=signal.risk_rank_pct,
+        scanner_spread_cost_bps=signal.spread_cost_bps,
+        scanner_net_forward_return=signal.net_forward_return,
         source="scanner",
         expires_at=datetime.now(timezone.utc) + timedelta(hours=4),
     )
@@ -756,7 +804,7 @@ class TestE2EPipeline:
             assert intent.scanner_score > 0
             assert intent.scanner_confidence in ("high", "medium", "low")
             assert intent.scanner_version == DEFAULT_SCANNER_VERSION
-            assert intent.scanner_schema_version == DEFAULT_SIGNAL_SCHEMA_VERSION
+            assert intent.scanner_schema_version == DEFAULT_SIGNAL_SCHEMA_VERSION_V3
             assert intent.scanner_market_date == trade_date
             assert intent.scanner_label_version == DEFAULT_LABEL_VERSION
 
@@ -813,6 +861,44 @@ class TestE2EPipeline:
 
         assert persisted is not None
         assert persisted.scanner_side == "short"
+
+    def test_v3_signal_to_intent_copies_new_fields(
+        self, bridge: ScannerBridge, store: DecisionStore, tmp_path: Path
+    ) -> None:
+        """v3 signal → intent preserves the 5 new scanner fields."""
+        csv_path = tmp_path / "signals_v3_full.csv"
+        _write_signal_csv(
+            csv_path,
+            schema_version=DEFAULT_SIGNAL_SCHEMA_VERSION_V3,
+            side="short",
+            instrument="USDCHF",
+            score=0.35,
+            confidence_quantile=0.88,
+            regime_rank_pct=0.60,
+            risk_rank_pct=0.15,
+            spread_cost_bps=1.6,
+            net_forward_return=0.032,
+        )
+        _write_contract_sidecars(
+            tmp_path,
+            tmp_path,
+            schema_version=DEFAULT_SIGNAL_SCHEMA_VERSION_V3,
+        )
+
+        signals, _ = bridge.load_signals_from_file(csv_path, target_date="2026-02-16")
+        assert len(signals) == 1
+
+        intent = _signal_to_intent(signals[0], "2026-02-16")
+        store.insert_intent(intent)
+        persisted = store.get_intent(intent.id)
+
+        assert persisted is not None
+        assert persisted.scanner_side == "short"
+        assert persisted.scanner_confidence_quantile == pytest.approx(0.88)
+        assert persisted.scanner_regime_rank_pct == pytest.approx(0.60)
+        assert persisted.scanner_risk_rank_pct == pytest.approx(0.15)
+        assert persisted.scanner_spread_cost_bps == pytest.approx(1.6)
+        assert persisted.scanner_net_forward_return == pytest.approx(0.032)
 
     def test_scanner_to_llm_to_execution(self, bridge: ScannerBridge, store: DecisionStore) -> None:
         """Full pipeline: signal → intent → claim → LLM BUY → ready_for_exec."""

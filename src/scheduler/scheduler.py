@@ -74,7 +74,7 @@ from src.scheduler.market_hours import MarketHoursChecker
 from src.scheduler.news_event_trigger import NewsEventTrigger
 from src.scheduler.session_cadence import SessionCadence
 from src.scheduler.volatility_monitor import VolatilityMonitor
-from src.signal.scanner_bridge import ScannerBridge
+from src.signal.scanner_bridge import SIDE_AWARE_SIGNAL_SCHEMA_VERSIONS, ScannerBridge
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
@@ -849,6 +849,11 @@ class Scheduler:
                             scanner_market_date=getattr(signal, "market_date", today),
                             scanner_label_version=getattr(signal, "label_version", ""),
                             scanner_side=scanner_side,
+                            scanner_confidence_quantile=getattr(signal, "confidence_quantile", 0.0),
+                            scanner_regime_rank_pct=getattr(signal, "regime_rank_pct", 0.0),
+                            scanner_risk_rank_pct=getattr(signal, "risk_rank_pct", 0.0),
+                            scanner_spread_cost_bps=getattr(signal, "spread_cost_bps", 0.0),
+                            scanner_net_forward_return=getattr(signal, "net_forward_return", 0.0),
                             source="scanner",
                             expires_at=self._now_utc() + timedelta(hours=4),
                         )
@@ -5096,13 +5101,13 @@ class Scheduler:
     def _signal_scanner_side(self, signal: Any) -> str | None:
         """Return side for fx_signal_v2 scanner rows, else None."""
         schema_version = str(getattr(signal, "schema_version", "") or "").strip()
-        if schema_version != "fx_signal_v2":
+        if schema_version not in SIDE_AWARE_SIGNAL_SCHEMA_VERSIONS:
             return None
         return self._normalize_scanner_side(getattr(signal, "side", None))
 
     def _intent_scanner_side(self, intent: TradeIntent) -> str | None:
         """Return normalized persisted side for side-aware intents."""
-        if intent.scanner_schema_version != "fx_signal_v2":
+        if intent.scanner_schema_version not in SIDE_AWARE_SIGNAL_SCHEMA_VERSIONS:
             return None
         return self._normalize_scanner_side(intent.scanner_side)
 

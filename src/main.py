@@ -55,7 +55,7 @@ from src.monitor.memory_journal import MemoryJournal
 from src.monitor.operational_metrics import OperationalMetrics
 from src.monitor.telegram_bot import TelegramBotHandler
 from src.monitor.trade_journal import TradeJournal
-from src.signal.scanner_bridge import ScannerBridge
+from src.signal.scanner_bridge import SIDE_AWARE_SIGNAL_SCHEMA_VERSIONS, ScannerBridge
 from src.version import get_release_tag
 
 
@@ -166,7 +166,7 @@ class PropFirmPilot:
     def _signal_scanner_side(self, signal: Any) -> str | None:
         """Return normalized side for side-aware scanner rows only."""
         schema_version = str(getattr(signal, "schema_version", "") or "").strip()
-        if schema_version != "fx_signal_v2":
+        if schema_version not in SIDE_AWARE_SIGNAL_SCHEMA_VERSIONS:
             return None
         return self._normalize_scanner_side(getattr(signal, "side", None))
 

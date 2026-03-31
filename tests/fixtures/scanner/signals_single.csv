@@ -1,2 +1,2 @@
-datetime,instrument,score,rank,score_gap,drop_distance,topk_spread,confidence,weight,profile,scanner_version,schema_version,cadence,label_version,regime_label,market_date
-2026-02-16,EURUSD,0.9200000000000000,1.0,0.150000,0.300000,0.150000,high,0.333,fx,v1.5.0_beta,fx_signal_v1,1d,binary_forward_return_sign_v1,trend,2026-02-16
+datetime,instrument,score,rank,score_gap,drop_distance,topk_spread,confidence,weight,profile,scanner_version,schema_version,cadence,label_version,regime_label,market_date,side,confidence_quantile,regime_rank_pct,risk_rank_pct,spread_cost_bps,net_forward_return
+2026-02-16,EURUSD,0.9200000000000000,1.0,0.150000,0.300000,0.150000,high,0.333,fx,v1.5.0_beta,fx_signal_v3,1d,cost_aware_net_return_sign_v1,trend,2026-02-16,long,0.90,0.70,0.20,1.0,0.055

@@ -15,7 +15,7 @@ from typing import Any
 
 from loguru import logger
 
-SUPPORTED_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v1", "fx_signal_v2"}
+SUPPORTED_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v1", "fx_signal_v2", "fx_signal_v3"}
 SUPPORTED_SCANNER_VERSIONS = {"v1.5.0", "v1.5.0_beta", "v1.5.0_beta_2"}
 PASSING_VALIDATION_STATUSES = {"", "ok", "pass", "passed", "ready", "success", "valid", "validated"}
 REQUIRED_SIGNAL_COLUMNS = {
@@ -36,7 +36,7 @@ REQUIRED_SIGNAL_COLUMNS = {
     "regime_label",
     "market_date",
 }
-SIDE_AWARE_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v2"}
+SIDE_AWARE_SIGNAL_SCHEMA_VERSIONS = {"fx_signal_v2", "fx_signal_v3"}
 
 
 @dataclass
@@ -77,6 +77,11 @@ class ScannerSignal:
         regime_label: str = "",
         market_date: str = "",
         side: str | None = None,
+        confidence_quantile: float = 0.0,
+        regime_rank_pct: float = 0.0,
+        risk_rank_pct: float = 0.0,
+        spread_cost_bps: float = 0.0,
+        net_forward_return: float = 0.0,
     ) -> None:
         self.instrument = instrument
         self.score = score
@@ -95,6 +100,11 @@ class ScannerSignal:
         self.regime_label = regime_label
         self.market_date = market_date
         self.side = side
+        self.confidence_quantile = confidence_quantile
+        self.regime_rank_pct = regime_rank_pct
+        self.risk_rank_pct = risk_rank_pct
+        self.spread_cost_bps = spread_cost_bps
+        self.net_forward_return = net_forward_return
 
     def directional_quality(self) -> float:
         if self.side == "short":
@@ -122,6 +132,9 @@ class ScannerSignal:
             "entry_timeframe": self.entry_timeframe,
             "scanner_side": self.side,
             "scanner_direction_quality": self.directional_quality(),
+            "scanner_confidence_quantile": self.confidence_quantile,
+            "scanner_spread_cost_bps": self.spread_cost_bps,
+            "scanner_net_forward_return": self.net_forward_return,
         }
 
     def __repr__(self) -> str:
@@ -694,6 +707,11 @@ class ScannerBridge:
                             regime_label=row.get("regime_label", ""),
                             market_date=row_date,
                             side=row_side,
+                            confidence_quantile=float(row.get("confidence_quantile", 0)),
+                            regime_rank_pct=float(row.get("regime_rank_pct", 0)),
+                            risk_rank_pct=float(row.get("risk_rank_pct", 0)),
+                            spread_cost_bps=float(row.get("spread_cost_bps", 0)),
+                            net_forward_return=float(row.get("net_forward_return", 0)),
                         )
 
                         if row_date not in all_signals:
