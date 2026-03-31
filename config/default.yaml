@@ -3,3 +3,6 @@ scheduler:
     enabled: false
     min_confidence: "medium"
     min_blended_confidence: 0.55
+
+scanner:
+  project_path: "../qlib_market_scanner"

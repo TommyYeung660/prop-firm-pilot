@@ -20,6 +20,16 @@ symbols:  # 本帳號啟用的交易標的；scanner、market data、execution�
   - EURJPY
   - AUDJPY
   - CADJPY
+  - GBPJPY
+  - NZDJPY
+  - EURGBP
+  - EURAUD
+  - EURCHF
+  - EURCAD
+  - GBPAUD
+  - GBPCAD
+  - GBPCHF
+  - AUDNZD
 
 scanner:
   topk: 5  # 每輪 daily scanner 最多保留前 5 個分數最高的 symbol 候選
@@ -58,6 +68,16 @@ websocket:
     - EURJPY
     - AUDJPY
     - CADJPY
+    - GBPJPY
+    - NZDJPY
+    - EURGBP
+    - EURAUD
+    - EURCHF
+    - EURCAD
+    - GBPAUD
+    - GBPCAD
+    - GBPCHF
+    - AUDNZD
   reconnect_base_seconds: 2  # 斷線後第一次重連等待秒數；配合 exponential backoff 使用
   reconnect_max_seconds: 300  # 斷線重連等待上限；避免供應商持續異常時打太兇
   stale_after_seconds: 45  # 超過多久沒 tick 就把 symbol 視為 stale；會觸發 fallback / block
@@ -251,6 +271,66 @@ instruments:  # 各交易標的的 pip 與 lot 規格；position sizing 與風�
     pip_size: 0.01
     pip_value: 6.67
     avg_spread_pips: 2.1
+    min_lot: 0.01
+    max_lot: 50.0
+  GBPJPY:
+    pip_size: 0.01
+    pip_value: 6.67
+    avg_spread_pips: 2.5
+    min_lot: 0.01
+    max_lot: 50.0
+  NZDJPY:
+    pip_size: 0.01
+    pip_value: 6.67
+    avg_spread_pips: 2.3
+    min_lot: 0.01
+    max_lot: 50.0
+  EURGBP:
+    pip_size: 0.0001
+    pip_value: 12.60
+    avg_spread_pips: 1.2
+    min_lot: 0.01
+    max_lot: 50.0
+  EURAUD:
+    pip_size: 0.0001
+    pip_value: 6.50
+    avg_spread_pips: 2.2
+    min_lot: 0.01
+    max_lot: 50.0
+  EURCHF:
+    pip_size: 0.0001
+    pip_value: 11.30
+    avg_spread_pips: 1.8
+    min_lot: 0.01
+    max_lot: 50.0
+  EURCAD:
+    pip_size: 0.0001
+    pip_value: 7.30
+    avg_spread_pips: 2.0
+    min_lot: 0.01
+    max_lot: 50.0
+  GBPAUD:
+    pip_size: 0.0001
+    pip_value: 6.50
+    avg_spread_pips: 3.0
+    min_lot: 0.01
+    max_lot: 50.0
+  GBPCAD:
+    pip_size: 0.0001
+    pip_value: 7.30
+    avg_spread_pips: 2.8
+    min_lot: 0.01
+    max_lot: 50.0
+  GBPCHF:
+    pip_size: 0.0001
+    pip_value: 11.30
+    avg_spread_pips: 2.5
+    min_lot: 0.01
+    max_lot: 50.0
+  AUDNZD:
+    pip_size: 0.0001
+    pip_value: 5.70
+    avg_spread_pips: 2.5
     min_lot: 0.01
     max_lot: 50.0
 
