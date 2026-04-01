@@ -455,6 +455,106 @@ class TestPassThroughWhenNoData:
         )
 
 
+# ── v1.5.1: ATR 5m Fallback Tests ─────────────────────────────────────────
+
+
+def _make_constant_range_bars(n: int = 30, range_size: float = 0.0010) -> pd.DataFrame:
+    """Create OHLC bars with constant range for predictable ATR."""
+    data = []
+    for i in range(n):
+        o = 1.1000 + i * 0.0001
+        h = o + range_size
+        low = o
+        c = o + range_size * 0.5
+        data.append({"open": o, "high": h, "low": low, "close": c})
+    return pd.DataFrame(data)
+
+
+class TestATR5mFallback:
+    """v1.5.1: ATR gate should use 5m bars when 1H bars are unavailable."""
+
+    def test_atr_gate_uses_5m_fallback_when_1h_empty(self) -> None:
+        """ATR gate uses 5m bars scaled by sqrt(12) when 1h empty."""
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        data = TacticalData(
+            bars_1h=pd.DataFrame(),
+            bars_5min=_make_constant_range_bars(n=30),
+            current_spread=0.00015,
+            typical_spread=0.00015,
+            latest_bar_time=datetime.now(timezone.utc),
+        )
+        results = validator.check_hard_gates(data)
+        atr_gate = next(r for r in results if r.gate_name == "atr_regime")
+        assert atr_gate.status != "SKIPPED"
+        assert "5m_fallback" in (atr_gate.reason_code or "")
+
+    def test_atr_gate_5m_fallback_passes_in_normal_regime(self) -> None:
+        """5m ATR fallback should PASS when bars have consistent range."""
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        bars = _make_constant_range_bars(n=30)
+        data = TacticalData(
+            bars_1h=pd.DataFrame(),
+            bars_5min=bars,
+            current_spread=0.00015,
+            typical_spread=0.00015,
+            latest_bar_time=datetime.now(timezone.utc),
+        )
+        results = validator.check_hard_gates(data)
+        atr_gate = next(r for r in results if r.gate_name == "atr_regime")
+        assert atr_gate.passed is True
+        assert "5m_fallback" in (atr_gate.reason_code or "")
+
+    def test_atr_gate_skips_when_both_1h_and_5m_empty(self) -> None:
+        """ATR gate should still skip (pass-through) when both timeframes empty."""
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        data = TacticalData(
+            bars_1h=pd.DataFrame(),
+            bars_5min=pd.DataFrame(),
+            current_spread=0.00015,
+            typical_spread=0.00015,
+            latest_bar_time=datetime.now(timezone.utc),
+        )
+        results = validator.check_hard_gates(data)
+        atr_gate = next(r for r in results if r.gate_name == "atr_regime")
+        assert atr_gate.status == "SKIPPED"
+        assert atr_gate.passed is True
+
+    def test_atr_gate_prefers_1h_over_5m(self) -> None:
+        """When both 1H and 5m data exist, ATR gate should use 1H."""
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        data = TacticalData(
+            bars_1h=_make_constant_range_bars(n=20),
+            bars_5min=_make_constant_range_bars(n=30),
+            current_spread=0.00015,
+            typical_spread=0.00015,
+            latest_bar_time=datetime.now(timezone.utc),
+        )
+        results = validator.check_hard_gates(data)
+        atr_gate = next(r for r in results if r.gate_name == "atr_regime")
+        assert "5m_fallback" not in (atr_gate.reason_code or "")
+
+    def test_atr_gate_5m_fallback_insufficient_data_skips(self) -> None:
+        """5m fallback should skip when 5m bars are too few for ATR(14)."""
+        config = TacticalConfig()
+        validator = TacticalValidator(config)
+        data = TacticalData(
+            bars_1h=pd.DataFrame(),
+            bars_5min=_make_constant_range_bars(n=5),  # Not enough for ATR(14)
+            current_spread=0.00015,
+            typical_spread=0.00015,
+            latest_bar_time=datetime.now(timezone.utc),
+        )
+        results = validator.check_hard_gates(data)
+        atr_gate = next(r for r in results if r.gate_name == "atr_regime")
+        # Not enough data → should skip (pass-through), not fail
+        assert atr_gate.passed is True
+        assert atr_gate.status == "SKIPPED"
+
+
 # ── v1.4.7: Verdict Schema Tests ─────────────────────────────────────────
 
 

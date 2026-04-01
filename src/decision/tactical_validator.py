@@ -497,16 +497,66 @@ class TacticalValidator:
                     )
                 )
         else:
-            # v1.3.8: Pass-through when no 1H data — don't block trades due to missing data
-            results.append(
-                GateResult(
-                    gate_name="atr_regime",
-                    passed=True,
-                    status="SKIPPED",
-                    reason_code="atr.skipped.no_1h_data",
-                    detail="ATR gate skipped — no 1H bar data available (pass-through)",
+            # v1.5.1: Try 5m ATR fallback before skipping entirely
+            if (
+                self._config.hard_gates.atr_5m_fallback_enabled
+                and not data.bars_5min.empty
+            ):
+                period = self._config.hard_gates.atr_period
+                atr_5m = compute_atr(data.bars_5min, period=period)
+                if not pd.isna(atr_5m) and len(data.bars_5min) > period:
+                    all_atrs_5m: list[Any] = []
+                    for i in range(period + 1, len(data.bars_5min) + 1):
+                        window = data.bars_5min.iloc[:i]
+                        a = compute_atr(window, period=period)
+                        if not pd.isna(a):
+                            all_atrs_5m.append(a)
+                    median_5m = (
+                        float(pd.Series(all_atrs_5m).median()) if all_atrs_5m else atr_5m
+                    )
+                    scale = self._config.hard_gates.atr_5m_to_1h_scale
+                    gate = self._check_atr_regime_gate(atr_5m * scale, median_5m * scale)
+                    results.append(
+                        GateResult(
+                            gate_name=gate.gate_name,
+                            passed=gate.passed,
+                            value=gate.value,
+                            threshold=gate.threshold,
+                            status=gate.status,
+                            reason_code=(
+                                f"atr.5m_fallback.{gate.reason_code}"
+                                if gate.reason_code
+                                else "atr.5m_fallback"
+                            ),
+                            detail=f"[5m fallback, scale={scale:.3f}] {gate.detail}",
+                        )
+                    )
+                    logger.info(
+                        "ATR gate: using 5m fallback (scale={:.3f}), atr_5m={:.6f}, "
+                        "scaled={:.6f}, median_scaled={:.6f}",
+                        scale, atr_5m, atr_5m * scale, median_5m * scale,
+                    )
+                else:
+                    results.append(
+                        GateResult(
+                            gate_name="atr_regime",
+                            passed=True,
+                            status="SKIPPED",
+                            reason_code="atr.skipped.insufficient_5m_data",
+                            detail="ATR gate skipped — 5m data insufficient for ATR",
+                        )
+                    )
+            else:
+                # Original v1.3.8 pass-through when no data at all
+                results.append(
+                    GateResult(
+                        gate_name="atr_regime",
+                        passed=True,
+                        status="SKIPPED",
+                        reason_code="atr.skipped.no_1h_data",
+                        detail="ATR gate skipped — no 1H bar data available (pass-through)",
+                    )
                 )
-            )
 
         # 3. Data freshness gate
         results.append(self._build_data_freshness_gate(data, evaluation_now=evaluation_now))

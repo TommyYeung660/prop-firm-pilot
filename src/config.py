@@ -444,6 +444,12 @@ class TacticalHardGatesConfig(BaseModel):
     )
     atr_period: int = Field(default=14, description="ATR lookback period")
     atr_timeframe: str = Field(default="1h", description="Timeframe for ATR calculation")
+    atr_5m_fallback_enabled: bool = Field(
+        default=True, description="Use 5-minute ATR as fallback when 1H bars unavailable"
+    )
+    atr_5m_to_1h_scale: float = Field(
+        default=3.464, description="Scale factor to convert 5m ATR to approx 1H ATR (sqrt(12))"
+    )
     data_max_age_seconds: int = Field(
         default=600, description="Max age of latest bar data in seconds"
     )
