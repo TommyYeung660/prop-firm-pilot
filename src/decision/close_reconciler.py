@@ -12,7 +12,13 @@ Usage:
 from collections.abc import Callable
 from typing import Any
 
+from loguru import logger
+
 from src.decision.close_models import CloseOutcome, CloseReconciliation
+
+# PnL threshold below which we trust broker/price-match over PnL sign.
+# Absorbs small commissions, swaps, and rounding near breakeven.
+_PNL_SIGN_OVERRIDE_THRESHOLD = 1.0
 
 
 class CloseReconciler:
@@ -92,8 +98,10 @@ class CloseReconciler:
         symbol: str,
     ) -> str:
         """Resolve the canonical final close reason with fixed priority rules."""
+        # Priority 1: Explicit triggers (unambiguous, no PnL check needed)
         if trigger_source in {"emergency_close", "best_day_close", "reeval_close"}:
             return trigger_source
+        # Priority 2: Tactical exit with reason code (unambiguous)
         if trigger_source == "tactical_exit" and action_kind == "full_close":
             close_control = execution_meta.get("close_control", {})
             if isinstance(close_control, dict):
@@ -105,14 +113,16 @@ class CloseReconciler:
                 return tactical_reason
             return "tactical_exit"
 
+        # Priority 3: Broker-reported reason (validate against PnL sign)
         broker_reason = broker_close_reason.upper()
         if broker_reason == "TAKE_PROFIT":
-            return "tp_hit"
+            return self._pnl_sign_override("tp_hit", pnl, symbol)
         if broker_reason == "STOP_LOSS":
-            return "sl_hit"
+            return self._pnl_sign_override("sl_hit", pnl, symbol)
         if broker_reason == "STOP_OUT":
             return "broker_stopout"
 
+        # Priority 4: Close price vs SL/TP prices (validate against PnL sign)
         sl_price = float(
             execution_meta.get("breakeven_sl")
             or execution_meta.get("trailing_sl")
@@ -124,15 +134,41 @@ class CloseReconciler:
 
         if close_price != 0.0:
             if tp_price and abs(close_price - tp_price) <= tolerance:
-                return "tp_hit"
+                return self._pnl_sign_override("tp_hit", pnl, symbol)
             if sl_price and abs(close_price - sl_price) <= tolerance:
-                return "sl_hit"
+                return self._pnl_sign_override("sl_hit", pnl, symbol)
 
+        # Priority 5: Fallback — PnL sign (consistent by definition)
         if pnl > 0:
             return "tp_hit"
         if pnl < 0:
             return "sl_hit"
         return "manual_close"
+
+    @staticmethod
+    def _pnl_sign_override(candidate_reason: str, pnl: float, symbol: str) -> str:
+        """Override candidate reason when PnL sign clearly contradicts it.
+
+        Only triggers when |PnL| exceeds the threshold, so tiny commissions
+        or swap charges near zero don't flip the reason.
+        """
+        if abs(pnl) <= _PNL_SIGN_OVERRIDE_THRESHOLD:
+            return candidate_reason
+        if candidate_reason == "tp_hit" and pnl < 0:
+            logger.warning(
+                "Close reason override: {} PnL={:.2f} contradicts tp_hit → sl_hit",
+                symbol,
+                pnl,
+            )
+            return "sl_hit"
+        if candidate_reason == "sl_hit" and pnl > 0:
+            logger.warning(
+                "Close reason override: {} PnL={:.2f} contradicts sl_hit → tp_hit",
+                symbol,
+                pnl,
+            )
+            return "tp_hit"
+        return candidate_reason
 
     @staticmethod
     def _determine_resolution_path(
