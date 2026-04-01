@@ -60,6 +60,11 @@ from src.diagnostics.analyze_entry_funnel_ablation import analyze_ablation
 from src.execution.broker_protocol import BrokerClientProtocol
 from src.execution.engine import ExecutionEngine
 from src.execution.instrument_registry import InstrumentRegistry
+from src.execution.portfolio_risk_guard import (
+    OpenPositionRiskSnapshot,
+    PortfolioRiskDecision,
+    PortfolioRiskGuard,
+)
 from src.monitor.alert_service import AlertService
 from src.monitor.equity_monitor import EquityMonitor
 from src.monitor.memory_journal import MemoryJournal
@@ -178,6 +183,7 @@ class Scheduler:
         )
         self._close_reconciler = CloseReconciler(pip_size_resolver=self._get_pip_size)
         self._pending_close_outcomes: dict[str, CloseOutcome] = {}
+        self._portfolio_risk_guard = PortfolioRiskGuard(config.execution)
         self._decision_cache = decision_cache or StrategicDecisionCache(
             ttl_seconds=config.tactical.decision_cache.ttl_seconds
         )
@@ -1375,6 +1381,36 @@ class Scheduler:
                     risk_report=decision.risk_report,
                     state_json=json.dumps(decision.final_state, default=str),
                 )
+                # ── v1.5.1: Portfolio risk pre-check (before expensive tactical) ──
+                precheck = await self._portfolio_risk_precheck(
+                    symbol=intent.symbol,
+                    side=decision.decision,
+                    risk_pct=float(self._config.execution.default_risk_pct),
+                )
+                if not precheck.allowed:
+                    logger.info(
+                        "Portfolio risk precheck rejected {} {} ({}), skipping tactical",
+                        intent.symbol,
+                        decision.decision,
+                        precheck.reason_code,
+                    )
+                    self._log_trade_event(
+                        "PORTFOLIO_RISK_PRECHECK_REJECTED",
+                        {
+                            "intent_id": intent.id,
+                            "symbol": intent.symbol,
+                            "side": decision.decision,
+                            "reason": precheck.reason_code,
+                        },
+                    )
+                    await self._cancel_intent_safe(
+                        worker_id=worker_id,
+                        intent_id=intent.id,
+                        reason=f"portfolio_precheck: {precheck.reason_code}",
+                        context="portfolio_risk_precheck",
+                    )
+                    return
+
                 # ── v1.3.7: Tactical validation (Shadow Mode) ──
                 if self._config.tactical.enabled:
                     tactical_result = await self._run_tactical_validation(
@@ -1937,6 +1973,41 @@ class Scheduler:
             ):
                 return False
         return True
+
+    async def _portfolio_risk_precheck(
+        self, *, symbol: str, side: str, risk_pct: float
+    ) -> PortfolioRiskDecision:
+        """Lightweight portfolio risk pre-check using current broker positions.
+
+        Runs BEFORE tactical validation to avoid wasting computation on
+        intents destined for portfolio rejection. Fail-open on any error —
+        the execution engine retains the authoritative fail-closed check.
+        """
+        try:
+            broker_positions = await self._matchtrader.get_open_positions()
+            snapshots = [
+                OpenPositionRiskSnapshot(
+                    symbol=str(getattr(p, "symbol", "")),
+                    side=str(getattr(p, "side", "")).upper(),
+                    open_risk_pct=risk_pct,
+                )
+                for p in broker_positions
+                if str(getattr(p, "side", "")).upper() in ("BUY", "SELL")
+            ]
+            return self._portfolio_risk_guard.evaluate_next_entry(
+                next_symbol=symbol,
+                next_side=side,
+                next_risk_pct=risk_pct,
+                open_positions=snapshots,
+            )
+        except Exception as e:
+            logger.warning("Portfolio risk precheck failed, allowing through: {}", e)
+            return PortfolioRiskDecision(
+                allowed=True,
+                reason_code="portfolio_risk.precheck_skipped",
+                projected_total_open_risk_pct=0.0,
+                projected_same_direction_positions=0,
+            )
 
     async def _run_tactical_validation(self, intent: TradeIntent, side: str) -> TacticalResult:
         """Fetch tactical data and run Hard/Soft gate validation.
@@ -2773,6 +2844,24 @@ class Scheduler:
                 exit_reason = "tp_hit"
             elif sl_price and abs(close_price - sl_price) <= tolerance:
                 exit_reason = "sl_hit"
+
+        # v1.5.1: PnL sign sanity check — close_price/broker match may disagree
+        if exit_reason == "tp_hit" and pnl < -1.0:
+            logger.warning(
+                "Position monitor: PnL sign contradicts tp_hit for {} (pnl={:.2f}),"
+                " overriding to sl_hit",
+                position_id,
+                pnl,
+            )
+            exit_reason = "sl_hit"
+        elif exit_reason == "sl_hit" and pnl > 1.0:
+            logger.warning(
+                "Position monitor: PnL sign contradicts sl_hit for {} (pnl={:.2f}),"
+                " overriding to tp_hit",
+                position_id,
+                pnl,
+            )
+            exit_reason = "tp_hit"
 
         pending_outcome = self._pending_close_outcomes.pop(position_id, None)
         if pending_outcome is None:

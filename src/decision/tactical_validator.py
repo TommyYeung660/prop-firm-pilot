@@ -272,9 +272,7 @@ class TacticalValidator:
         else:
             age_seconds = (current_time - authoritative_time).total_seconds()
             freshness_state = (
-                "fresh"
-                if age_seconds < self._config.hard_gates.data_max_age_seconds
-                else "stale"
+                "fresh" if age_seconds < self._config.hard_gates.data_max_age_seconds else "stale"
             )
         return {
             "quote_source": data.quote_source,
@@ -346,9 +344,7 @@ class TacticalValidator:
             value=ratio,
             threshold=f"< {self._config.hard_gates.spread_max_multiplier}×",
             status="PASS" if passed else "FAIL",
-            reason_code=(
-                "spread.pass.within_limit" if passed else "spread.fail.ratio_too_wide"
-            ),
+            reason_code=("spread.pass.within_limit" if passed else "spread.fail.ratio_too_wide"),
             detail=(
                 f"spread_ratio={ratio:.2f}, limit={self._config.hard_gates.spread_max_multiplier}×"
             ),
@@ -498,10 +494,7 @@ class TacticalValidator:
                 )
         else:
             # v1.5.1: Try 5m ATR fallback before skipping entirely
-            if (
-                self._config.hard_gates.atr_5m_fallback_enabled
-                and not data.bars_5min.empty
-            ):
+            if self._config.hard_gates.atr_5m_fallback_enabled and not data.bars_5min.empty:
                 period = self._config.hard_gates.atr_period
                 atr_5m = compute_atr(data.bars_5min, period=period)
                 if not pd.isna(atr_5m) and len(data.bars_5min) > period:
@@ -511,9 +504,7 @@ class TacticalValidator:
                         a = compute_atr(window, period=period)
                         if not pd.isna(a):
                             all_atrs_5m.append(a)
-                    median_5m = (
-                        float(pd.Series(all_atrs_5m).median()) if all_atrs_5m else atr_5m
-                    )
+                    median_5m = float(pd.Series(all_atrs_5m).median()) if all_atrs_5m else atr_5m
                     scale = self._config.hard_gates.atr_5m_to_1h_scale
                     gate = self._check_atr_regime_gate(atr_5m * scale, median_5m * scale)
                     results.append(
@@ -534,7 +525,10 @@ class TacticalValidator:
                     logger.info(
                         "ATR gate: using 5m fallback (scale={:.3f}), atr_5m={:.6f}, "
                         "scaled={:.6f}, median_scaled={:.6f}",
-                        scale, atr_5m, atr_5m * scale, median_5m * scale,
+                        scale,
+                        atr_5m,
+                        atr_5m * scale,
+                        median_5m * scale,
                     )
                 else:
                     results.append(
