@@ -6,7 +6,7 @@
 >
 > **適用範圍**: `prop-firm-pilot` 主線實作，以及它與 `qlib_market_scanner`、`TradingAgents`、`qlib_rd_agent` 的必要上下游邊界
 >
-> **當前主線狀態**: `main` 現已通過 `v1.5.2` 兩輪 production evidence 驗證（`prod_logs_20260401` + `prod_logs_20260408`），完成 6 項 production-driven 修復與優化。系統已從 stable baseline 進入 iterative production improvement 階段：close attribution 正確性、ATR resilience、portfolio pre-check、exit timing guard、modify readback retry、per-symbol tactical tuning 均已落地並部署
+> **當前主線狀態**: `main` 現已通過 `v1.5.0_stable 04-08 patch` 兩輪 production evidence 驗證（`prod_logs_20260401` + `prod_logs_20260408`），完成 6 項 production-driven 修復與優化。系統已從 stable baseline 進入 iterative production improvement 階段：close attribution 正確性、ATR resilience、portfolio pre-check、exit timing guard、modify readback retry、per-symbol tactical tuning 均已落地並部署
 >
 > **閱讀原則**: 若你只想知道目前 stable 主線已做了什麼、還差什麼，先看這份；若你要看一筆交易怎樣開始與結束，再看 `docs/PropFirmPilot_v1.5.0_stable_Report.md`
 
@@ -43,12 +43,12 @@
 | **Execution** | execution path 已具備 Best Day hard gate、compliance gate、bounded capital allocation、dynamic JPY pip-value sizing、pre-trade slippage check、execution meta persistence | 下單路徑已從單純「送單」收斂為風控 + audit path |
 | **Close lifecycle** | `CloseControlPlane`、`CloseReconciler`、canonical close facts 與 resolution path 已落地 | modify / partial / full close 與 post-close attribution 已統一 |
 | **Monitoring / ops** | equity monitor、position monitor、janitor、daily summary、volatility monitor、Telegram fallback、trade journal 均已在 scheduler mode 接線 | long-running runtime 不再只靠單一 loop + ad hoc log |
-| **Close verification** | `CloseControlPlane` 的 modify readback 已具備 retry-with-delay（default 0.5s + 1 retry），避免 broker propagation lag 導致的 false mismatch | v1.5.2: CADJPY 6+ 小時 verify_failed 問題已解決 |
-| **Tactical exit timing** | `_should_defensive_exit_initial_risk()` 已加入 `defensive_exit_min_hold_seconds` guard（production=300s），避免 5m 噪音在開倉後數分鐘內觸發 IRSF | v1.5.2: 4/6 trades premature IRSF exit 問題已解決 |
-| **Per-symbol tuning** | `SymbolTacticalOverride` + `TacticalConfig.symbol_overrides` 可 per-symbol 覆蓋 `defensive_exit_loss_r`、`defensive_exit_min_hold_seconds` | v1.5.2: EURCHF 低波動對特化配置已啟用 |
-| **Close attribution** | `CloseReconciler` 會驗證 PnL sign vs close reason 一致性，避免負 PnL 記為 `tp_hit` | v1.5.1: GBPJPY PnL sign contradiction 已修復 |
-| **ATR resilience** | `TacticalValidator` 在 1H bars 不可用時自動切換到 5m ATR fallback（×√12 scale） | v1.5.1: `insufficient_1h_data` 永久 SKIP 問題已解決 |
-| **Portfolio pre-check** | `PortfolioRiskGuard` 在 tactical validation 前做 portfolio risk 預檢（fail-open） | v1.5.1: 已知會被拒的交易不再白跑 pipeline |
+| **Close verification** | `CloseControlPlane` 的 modify readback 已具備 retry-with-delay（default 0.5s + 1 retry），避免 broker propagation lag 導致的 false mismatch | v1.5.0_stable 04-08 patch: CADJPY 6+ 小時 verify_failed 問題已解決 |
+| **Tactical exit timing** | `_should_defensive_exit_initial_risk()` 已加入 `defensive_exit_min_hold_seconds` guard（production=300s），避免 5m 噪音在開倉後數分鐘內觸發 IRSF | v1.5.0_stable 04-08 patch: 4/6 trades premature IRSF exit 問題已解決 |
+| **Per-symbol tuning** | `SymbolTacticalOverride` + `TacticalConfig.symbol_overrides` 可 per-symbol 覆蓋 `defensive_exit_loss_r`、`defensive_exit_min_hold_seconds` | v1.5.0_stable 04-08 patch: EURCHF 低波動對特化配置已啟用 |
+| **Close attribution** | `CloseReconciler` 會驗證 PnL sign vs close reason 一致性，避免負 PnL 記為 `tp_hit` | v1.5.0_stable 04-01 patch: GBPJPY PnL sign contradiction 已修復 |
+| **ATR resilience** | `TacticalValidator` 在 1H bars 不可用時自動切換到 5m ATR fallback（×√12 scale） | v1.5.0_stable 04-01 patch: `insufficient_1h_data` 永久 SKIP 問題已解決 |
+| **Portfolio pre-check** | `PortfolioRiskGuard` 在 tactical validation 前做 portfolio risk 預檢（fail-open） | v1.5.0_stable 04-01 patch: 已知會被拒的交易不再白跑 pipeline |
 
 ### 2.2 `TradingAgents` 在 stable 主線的正確定位
 
@@ -133,7 +133,7 @@
 
 | 工作流 | 目前狀態 | 需要的交付 |
 |---|---|---|
-| **Open-book worst-case risk guard** | `PortfolioRiskGuard` pre-check 已落地（v1.5.1），但 aggregate worst-case natural-SL 組合風險仍未完整約束 | portfolio-level open-risk reservation / aggregate worst-case guard |
+| **Open-book worst-case risk guard** | `PortfolioRiskGuard` pre-check 已落地（v1.5.0_stable 04-01 patch），但 aggregate worst-case natural-SL 組合風險仍未完整約束 | portfolio-level open-risk reservation / aggregate worst-case guard |
 | **Exposure / portfolio budget v1** | same-direction / correlated-pair limit 已透過 pre-check 前移，但完整 base/quote exposure budget 尚未 formalize | base/quote exposure budget、setup grouping |
 | **Trade-memory v1** | journal / reflection / execution meta 已運作，但尚未凍結成 stable memory schema 與 quality gate | raw event / reflection / retrieval 分層與 quality gate |
 | **Multi-day acceptance evidence** | 兩輪 prod log analysis 已完成（03/31→04/01 + 04/03→04/08），正在持續累積 incident-free evidence | acceptance bundle、run summary |
@@ -143,8 +143,8 @@
 
 `v1.5.x` 已從「版本 bump」轉為 **production-driven iterative improvement**：
 
-- v1.5.1 修復了 close attribution、ATR resilience、portfolio pre-check
-- v1.5.2 修復了 IRSF exit timing、modify readback、per-symbol tuning
+- v1.5.0_stable 04-01 patch 修復了 close attribution、ATR resilience、portfolio pre-check
+- v1.5.0_stable 04-08 patch 修復了 IRSF exit timing、modify readback、per-symbol tuning
 - 接下來的重點是 portfolio / memory / exposure closure，而不是再做大範圍架構變更
 
 ---
@@ -155,8 +155,8 @@ stable release closure 做完之後，`1.5.x` 的後續優先級應維持精簡�
 
 ### 5.1 Priority 1: Stable acceptance 後清理 ✅ Done
 
-- ✅ v1.5.1: close attribution PnL sign、ATR 5m fallback、portfolio pre-check
-- ✅ v1.5.2: IRSF exit timing guard、modify readback retry、per-symbol tactical overrides
+- ✅ v1.5.0_stable 04-01 patch: close attribution PnL sign、ATR 5m fallback、portfolio pre-check
+- ✅ v1.5.0_stable 04-08 patch: IRSF exit timing guard、modify readback retry、per-symbol tactical overrides
 - ✅ 兩輪 production log analysis 完成，所有 P0/P1 issues 已修復
 - 剩餘：持續累積 incident-free production evidence
 
@@ -190,7 +190,7 @@ stable release closure 做完之後，`1.5.x` 的後續優先級應維持精簡�
 
 ### 6.1 可以說「已經有了」的
 
-- stable runtime 已通過兩輪 production evidence 驗證（v1.5.1 + v1.5.2）
+- stable runtime 已通過兩輪 production evidence 驗證（v1.5.0_stable 04-01 patch + v1.5.0_stable 04-08 patch）
 - close attribution、ATR resilience、portfolio pre-check、exit timing、readback retry、per-symbol tuning 均已落地
 - scanner → tactical → execution → position monitor → close reconciliation 完整閉環已在 production 持續運行
 - 帳戶 balance $50,137.11（初始 $50,000），HWM $50,888.97
@@ -204,4 +204,4 @@ stable release closure 做完之後，`1.5.x` 的後續優先級應維持精簡�
 
 ### 6.3 一句話版結論
 
-> `prop-firm-pilot` 已通過 `v1.5.1` + `v1.5.2` 兩輪 production-driven 修復，runtime 穩定性與 exit 精準度顯著提升；接下來的重點是 portfolio / memory / exposure closure，而不是架構變更。
+> `prop-firm-pilot` 已通過 `v1.5.0_stable 04-01 patch` + `v1.5.0_stable 04-08 patch` 兩輪 production-driven 修復，runtime 穩定性與 exit 精準度顯著提升；接下來的重點是 portfolio / memory / exposure closure，而不是架構變更。

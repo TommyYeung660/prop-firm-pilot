@@ -11,86 +11,56 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ---
 
 ## [Unreleased]
-**Post-v1.5.2 Development Window**
+**v1.5.0_stable Production Patches**
 
-> **Status**: `v1.5.2` 已於 `2026-04-08` 發佈，基於 `prod_logs_20260401` 和 `prod_logs_20260408` 兩輪 production evidence 完成 6 項修復與優化。系統已從 stable baseline 進入 iterative improvement 階段。
+> **Status**: `v1.5.0_stable` 持續在 production 運行。基於 `prod_logs_20260401` 和 `prod_logs_20260408` 兩輪 production evidence，已完成 6 項修復與優化。系統版本仍為 `v1.5.0_stable`，尚未做版本 bump。
+
+### Production Patch 2 — 2026-04-08（基於 prod_logs_20260408）
+
+> **Production evidence**: `prod_logs_20260408_v1.5.0_stable` bundle（2026-04-03 ~ 04-08）
+> **Result**: Balance $50,137.11, HWM $50,888.97, 6 trades, 50% win rate, PF 0.9556
+
+#### Fixed
+- `CloseControlPlane._execute_modify_only()` 現在會在 `modify_position()` 之後加入可配置延遲（default 0.5s）再做 `verify_sl_tp()` readback，且失敗後會重試一次（delay 遞增）；解決 CADJPY 連續 6+ 小時 `verify_failed` / `readback_status=mismatch` 的問題（根因：broker 尚未 propagate 修改到 positions API）
+
+#### Added
+- `TacticalExitConfig.defensive_exit_min_hold_seconds`（default=0）：IRSF（`initial_risk_structure_failure`）觸發前的最低持倉時間。Production 設為 300s（5 分鐘 grace period）。解決 4/6 trades 在開倉後數分鐘內即被 5m EMA/RSI/candle 噪音觸發 IRSF 殺倉、損失 $443.92 的問題
+- `SymbolTacticalOverride` model + `TacticalConfig.symbol_overrides`：per-symbol tactical exit 參數覆蓋機制。EURCHF 使用 `defensive_exit_loss_r=-0.50`（全域 -0.35）、`defensive_exit_min_hold_seconds=600`（全域 300s）
+- `TacticalExitManager.resolve_exit_config(symbol)`：合併全域 config 與 per-symbol overrides
+- `TacticalExitManager.evaluate_position()` 新增 keyword-only `symbol=""` 參數（backward-compatible）
+
+#### Changed
+- `_should_defensive_exit_initial_risk()` 新增 hold-time guard：當 `defensive_exit_min_hold_seconds > 0` 且 `hold_seconds < min_hold` 時，IRSF 不會觸發
+- `scheduler.py` 現在把 `symbol_overrides`、`verify_retry_delay_seconds`、`verify_max_retries` 從 config 傳入對應模組
+
+#### Tests
+- 11 new tests：IRSF hold-time guard (4)、retry verification (3)、symbol override (4)
+- 全量測試：1475 passed, 7 pre-existing failures（無回歸）
+
+### Production Patch 1 — 2026-04-01（基於 prod_logs_20260401）
+
+> **Production evidence**: `prod_logs_20260401_v1.5.0_stable` bundle（2026-03-31 ~ 04-01）
+> **Result**: +$414.7 net PnL, 62.5% win rate, 8 trades
+
+#### Fixed
+- `CloseReconciler._resolve_final_close_reason()` 現在會驗證 PnL 符號與 close reason 一致性；broker 回報 `TAKE_PROFIT` 但實際 PnL < -$1 時，會被 override 為 `sl_hit`（反之亦然）
+- `scheduler.py` 平倉前處理現在也會做 PnL 符號一致性檢查，與 `CloseReconciler` 形成雙重防線
+
+#### Added
+- `TacticalValidator` 5m ATR fallback：當 1H bars 不可用時，自動以 5m bars 計算 ATR 並乘以 √12 (≈3.464) 換算為 1H 等效 ATR
+- `PortfolioRiskGuard` pre-check：在 tactical validation 之前先檢查 portfolio 層級風控（fail-open 設計）
+
+#### Tests
+- 14 new tests：PnL sign contradiction (5)、ATR 5m fallback (5)、portfolio pre-check (4)
+- 全量測試：1464 passed, 7 pre-existing failures（無回歸）
 
 ### Planned
 - **Portfolio / exposure budget v1**: base/quote exposure budget、setup grouping、portfolio-level admission guard
 - **Trade-memory v1**: raw event / reflection / retrieval 分層與 quality gate
 - **Agent-enabled bounded path**: 在 default-off 基線上重新定義 agent-enabled path 的 acceptance boundary
-- **Multi-day acceptance evidence**: acceptance bundle、run summary、incident-free evidence 累積
 
 ### Tracking
 - Roadmap: `docs/PropFirmPilot_v1.5.0_road_map.md`
-
----
-
-## [1.5.2] — 2026-04-08
-**Production Optimization — Exit Timing, Verify Resilience, Symbol-Level Tuning**
-
-> **Production evidence**: `prod_logs_20260408_v1.5.0_stable` bundle（2026-04-03 ~ 04-08）
-> **Result**: Balance $50,137.11, HWM $50,888.97, 6 trades, 50% win rate, PF 0.9556
-
-### Fixed
-- `CloseControlPlane._execute_modify_only()` 現在會在 `modify_position()` 之後加入可配置延遲（default 0.5s）再做 `verify_sl_tp()` readback，且失敗後會重試一次（delay 遞增）；解決 CADJPY 連續 6+ 小時 `verify_failed` / `readback_status=mismatch` 的問題（根因：broker 尚未 propagate 修改到 positions API）
-- `CloseControlPlane.__init__` 新增 `verify_retry_delay_seconds`（default=0.5）和 `verify_max_retries`（default=1）參數
-
-### Added
-- `TacticalExitConfig.defensive_exit_min_hold_seconds`（default=0）：IRSF（`initial_risk_structure_failure`）觸發前的最低持倉時間。Production 設為 300s（5 分鐘 grace period）。解決 4/6 trades 在開倉後數分鐘內即被 5m EMA/RSI/candle 噪音觸發 IRSF 殺倉、損失 $443.92 的問題
-- `SymbolTacticalOverride` model：per-symbol tactical exit 參數覆蓋機制，支援 `defensive_exit_loss_r` 和 `defensive_exit_min_hold_seconds` 兩個可選欄位
-- `TacticalConfig.symbol_overrides`：`dict[str, SymbolTacticalOverride]`，以 symbol 為 key 的覆蓋字典（default 空 dict，backward-compatible）
-- `TacticalExitManager.resolve_exit_config(symbol)`：合併全域 config 與 per-symbol overrides，回傳最終有效的 `TacticalExitConfig`
-- `TacticalExitManager.evaluate_position()` 新增 keyword-only `symbol=""` 參數，自動套用 per-symbol overrides（backward-compatible）
-- Production EURCHF override：`defensive_exit_loss_r=-0.50`（全域 -0.35）、`defensive_exit_min_hold_seconds=600`（全域 300s），針對低波動 range-bound 貨幣對放寬門檻
-
-### Changed
-- `_should_defensive_exit_initial_risk()` 新增 hold-time guard：當 `defensive_exit_min_hold_seconds > 0` 且 `hold_seconds < min_hold` 時，IRSF 不會觸發（`hold_seconds=None` 視為未知，不阻擋）
-- `scheduler.py` 現在把 `config.tactical.symbol_overrides` 傳入 `TacticalExitManager` 構造函數，並在 `evaluate_position()` 呼叫中傳入 `symbol=intent.symbol`
-- `scheduler.py` 現在把 `verify_retry_delay_seconds` 和 `verify_max_retries` 從 config 傳入 `CloseControlPlane`
-
-### Tests
-- `tests/test_tactical_exit_rules.py`：新增 `TestInitialRiskHoldTimeGuard` 4 個測試（blocked/allowed/backward-compat/none-passthrough）
-- `tests/test_close_control_plane.py`：新增 3 個 retry verification 測試（retry-success/all-fail/no-retry）
-- `tests/test_tactical_exit_manager.py`：新增 4 個 symbol override 測試（global-fallback/full-override/partial-override/evaluate-with-symbol）
-- 全量測試：1475 passed, 7 pre-existing failures（無回歸）
-
-### Production Config (`config/e8_signature_50k_challenge.yaml`)
-- `tactical.exit.defensive_exit_min_hold_seconds: 300`
-- `tactical.exit.verify_retry_delay_seconds: 0.5`
-- `tactical.exit.verify_max_retries: 1`
-- `tactical.symbol_overrides.EURCHF.defensive_exit_loss_r: -0.50`
-- `tactical.symbol_overrides.EURCHF.defensive_exit_min_hold_seconds: 600`
-
-### Stats
-- 10 files changed, ~400 lines added, 11 new tests
-
----
-
-## [1.5.1] — 2026-04-01
-**Production Hotfix — Close Attribution, ATR Resilience, Portfolio Pre-Check**
-
-> **Production evidence**: `prod_logs_20260401_v1.5.0_stable` bundle（2026-03-31 ~ 04-01）
-> **Result**: +$414.7 net PnL, 62.5% win rate, 8 trades
-
-### Fixed
-- `CloseReconciler._resolve_final_close_reason()` 現在會驗證 PnL 符號與 close reason 一致性；broker 回報 `TAKE_PROFIT` 但實際 PnL < -$1 時，會被 override 為 `sl_hit`（反之亦然），避免 GBPJPY BUY 以 PnL=-$248.40 記為 `tp_hit` 的矛盾
-- `scheduler.py` 平倉前處理現在也會做 PnL 符號一致性檢查，與 `CloseReconciler` 形成雙重防線
-
-### Added
-- `TacticalValidator` 5m ATR fallback：當 1H bars 不可用時，自動以 5m bars 計算 ATR 並乘以 √12 (≈3.464) 換算為 1H 等效 ATR，避免 `atr.fail.insufficient_1h_data` 導致永久 SKIP
-- `TacticalHardGatesConfig` 新增 `atr_5m_fallback_enabled`（default=True）和 `atr_5m_to_1h_scale`（default=3.464）配置項
-- `PortfolioRiskGuard` pre-check：在 tactical validation 之前先檢查 portfolio 層級風控（same-direction limit、correlated-pair limit），避免已知會被拒的交易白跑整條 pipeline
-- `scheduler._portfolio_risk_precheck()` 採用 fail-open 設計，guard 異常時仍放行交易
-
-### Tests
-- `tests/test_close_reconciler.py`：新增 5 個 PnL sign contradiction 測試
-- `tests/test_tactical_validator.py`：新增 5 個 5m ATR fallback 測試（總計 49 個）
-- `tests/test_portfolio_risk_precheck.py`：新增 4 個 portfolio pre-check 測試
-- 全量測試：1464 passed, 7 pre-existing failures（無回歸）
-
-### Stats
-- 7 files changed, ~400 lines added
 
 ---
 
