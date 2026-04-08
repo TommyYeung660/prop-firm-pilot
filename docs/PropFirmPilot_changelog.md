@@ -11,104 +11,86 @@ Versioning: [Semantic Versioning](https://semver.org/).
 ---
 
 ## [Unreleased]
-**Post-v1.5.0_preview Stable Acceptance Window**
+**Post-v1.5.2 Development Window**
 
-> **Status**: `v1.5.0_preview` 已於 `2026-03-18` 對齊目前 `main` 的最新 preview 實作基線：bounded capital utilization uplift、preview incident remediation、side-aware scanner live activation，以及 first-batch JPY cross rollout（`EURJPY`、`AUDJPY`、`CADJPY` + dynamic JPY pip-value live sizing）
-> **Reason**: 當前主線的 `v1.5.0_preview` 已不再只是 uplift preview lane；它同時承載了 `prod_logs_20260318_v1.5.0_preview` 暴露出的 correctness remediation，以及 side-aware / JPY cross 兩輪 live-path productization。stable acceptance 必須建立在這個整合後的 preview baseline 上，而不是只驗收其中單一子項
+> **Status**: `v1.5.2` 已於 `2026-04-08` 發佈，基於 `prod_logs_20260401` 和 `prod_logs_20260408` 兩輪 production evidence 完成 6 項修復與優化。系統已從 stable baseline 進入 iterative improvement 階段。
 
-### In Progress: v1.5.0_preview_2 Runtime Repair
-
-#### Fixed
-- stale / previous-day intraday bars 現在會在 scanner admission fail closed，不再被誤當成 startup retryable
-- tactical retry expiry 對 `atr.fail.insufficient_1h_data`、freshness 類 wait 不再 degrade 到 execution
-- retry-expiry degrade 現在會寫出標準化 `TACTICAL_RESULT resolution=EXECUTE_DEGRADED`，讓 metrics snapshot 與 prod bundle summary 對齊
-- websocket 退化時的 market-data quote continuity 現在會先走 `EODHD real-time REST`，再退到 intraday REST，讓 `FXTickAggregator` 可持續關閉 `1m/5m/1h` bars，同時維持 fail-closed
-
-#### Changed
-- project version identity 將從 `1.5.0_preview` / `1.5.0rc0` 升到 `1.5.0_preview_2` / `1.5.0rc1`
-- `src/diagnostics/analyze_preview_bundle.py` 的主 log 選擇將跟隨 shared release tag，不再硬編碼 `v1.5.0_preview`
-
-### Implemented: v1.5.0_preview Incident Remediation Baseline
-
-#### Fixed
-- `PropFirmGuard` 的 `Best Day Rule` 新單 gate 現在只看 actual `daily_pnl`，不再把 hypothetical TP potential profit 當成當日已發生 PnL，因此 `0` 交易 / `0` 當日 PnL 不會再被錯誤阻擋
-- execution-side Best Day gate 與 compliance snapshot wording 已對齊 actual daily PnL semantics，避免 scheduler / engine 對同一規則出現不同語義
-- deterministic compliance headroom 現在前移到 candidate / intent admission，必定被拒的單子會直接以 `SCANNER_SKIP reason=compliance_headroom` 被淘汰，不再白跑 LLM / tactical / execution 流程
-- tactical result payload 現在會保留 `spread`、`atr_regime`、`data_freshness` 的獨立 hard-gate facts，incident review 不再只看到被壓扁的單一 summary reason
-- `ScannerBridge.run_pipeline()` 現在只有在 process success、artifact success、ingestion success 與 `target_date` matched 同時成立時才會記成 success；缺 target-date bundle 只會記成 incomplete
-- `AlertService.send()` 現在具備 Telegram retry accounting、failure metrics 與 secondary sink；primary send 失敗或 circuit open 時，告警會落到 `TradeJournal` `ALERT_FALLBACK`，不再完全消失
-
-#### Changed
-- `MarketDataHub` 的 live path 現在改為 `broker quote-first + API bars-first + websocket auxiliary`；websocket degraded 不再單獨決定整個系統是否可交易
-- `get_entry_readiness()` 現在只在 primary path 真正不可用時 block entry；若 broker quote 與 API bars 可用，即使 websocket 退化，系統仍可運行
-- `feed_status()` 現在會輸出 routing 與 degraded summary，明確區分 broker quote、API bars 與 websocket auxiliary 狀態
-- `docs/PropFirmPilot_v1.5.0_road_map.md` 與 `docs/plans/2026-03-18-v1.5.0-preview-incident-remediation*.md` 現在已同步吸收這輪 postmortem 結論與 corrective actions
-
-#### Added
-- `src/diagnostics/analyze_preview_bundle.py`：新增可重跑的 preview incident bundle diagnostics script，輸出 websocket failure、REST fallback、stale-age distribution、market-data block counts 與 tactical hard-gate provenance
-- `TradeJournal` secondary alert sink：當 Telegram channel 失效時，至少把 alert 原文與 failure reason 落到 journal，供 incident 後追查
-- regression tests 覆蓋 Best Day actual-PnL-only、candidate admission headroom、market-data hybrid routing、scanner success contract、Telegram retry / fallback
-
-#### Evidence
-- incident bundle 關鍵證據：websocket failures `15`、REST fallback warnings `129`、`market_data.quote_unavailable` log/journal 各 `2`
-- tactical hard-gate evidence：`spread.fail.ratio_too_wide = 72`、`atr.fail.insufficient_1h_data = 133`
-- 這輪 remediation 的正式 postmortem 已寫入 `docs/plans/2026-03-18-v1.5.0-preview-incident-remediation.md`
-
-#### Validated
-- `uv run pytest tests/test_prop_firm_guard_e8_one.py tests/test_prop_firm_guard.py tests/test_engine.py tests/test_scheduler.py tests/test_tactical_validator.py tests/optimize/test_tactical_entry_stats.py tests/data/test_market_data_hub.py tests/test_scanner_bridge.py tests/test_alert_service.py tests/test_operational_metrics.py -q` → `421 passed`
-- `uv run ruff check src/compliance/prop_firm_guard.py src/data/market_data_hub.py src/decision/tactical_validator.py src/execution/engine.py src/monitor/alert_service.py src/main.py src/optimize/tactical_entry_stats.py src/scheduler/scheduler.py src/signal/scanner_bridge.py src/diagnostics/analyze_preview_bundle.py tests/test_prop_firm_guard.py tests/test_prop_firm_guard_e8_one.py tests/test_engine.py tests/test_scheduler.py tests/test_tactical_validator.py tests/optimize/test_tactical_entry_stats.py tests/data/test_market_data_hub.py tests/test_scanner_bridge.py tests/test_alert_service.py tests/test_operational_metrics.py` → `All checks passed!`
-
-### Implemented: Side-Aware Scanner Live Activation
-- side-aware FX scanner live path 現已在 preview acceptance window 落地；`config/e8_one_5k_challenge.yaml` 啟用 `scanner.topk_short = 1`，讓 live ingestion 可以同時接受 long 與 bounded short 候選
-- `ScannerBridge` 現在支援 `fx_signal_v2`，會把 `scanner_side` 與 `scanner_direction_quality` 帶進 TradingAgents context；`TradeIntent` / `DecisionStore` 也會持久化 `scanner_side`
-- scheduler 現在會以 `(symbol, side)` 去重，對 mixed long/short bundle 以 direction-aware quality 排序，並把 side-aware quality 套進 blended confidence、decision cache key 與 decision formatting
-- TradingAgents 對 scanner side 只剩 confirm / veto 權限；reverse actionable decision 會被取消為 `direction_mismatch`
-- legacy `PropFirmPilot.run_daily_cycle()` 現在也補齊同樣的 direction-aware ranking 與 reverse-side hard veto，不再只在 scheduler mode 正確
-
-### Implemented: First-Batch JPY Cross Universe Expansion
-- `prop-firm-pilot` runtime universe 現在從 7 pairs 擴到 first-batch 10 pairs：`EURUSD / GBPUSD / USDJPY / AUDUSD / NZDUSD / USDCAD / USDCHF / EURJPY / AUDJPY / CADJPY`
-- `config/e8_one_5k_challenge.yaml`、websocket subscription 與 instrument table 已同步擴到這 10 個 symbols，避免 runtime universe / market-data subscription / sizing spec 出現分裂
-- `TradingAgents` FX context 已新增 `EURJPY`、`AUDJPY`、`CADJPY` 的 pair description、macro driver、日均波幅與 session bias，避免新 pair 在 agent prompt 中退回 generic fallback
-- JPY-quoted pairs 的 live sizing 現在不再只依賴靜態 `pip_value`；`ExecutionEngine` 與 legacy `PropFirmPilot` path 都會以 live `USDJPY` quote 解析 USD pip value，讓 `USDJPY / EURJPY / AUDJPY / CADJPY` sizing 與 risk audit 對齊 USD account 真實 pip economics
-- rollout 目前只啟用 first batch：`EURJPY`、`AUDJPY`、`CADJPY`；`GBPJPY`、`NZDJPY`、`CHFJPY` 仍維持 deferred，待 spread / volatility / tactical calibration 完成後再評估
-
-### Cross-Repo Note
-- `qlib_market_scanner` 的 FX baseline / cost table 現在同步擴到 first-batch 10-pair universe，`EURJPY / AUDJPY / CADJPY` 不再落回 generic spread / pip-value defaults
-- 這輪 rollout 同時修正 scanner repo 對 `NZDUSD / USDCAD / USDCHF` 的 cost-table缺口，避免當前 live universe 仍部分吃 default transaction-cost assumptions
-
-### Validated
-- `uv run pytest tests/unit/test_config.py tests/unit/test_dynamic_costs.py -q`（`qlib_market_scanner`）→ `21 passed`
-- `uv run pytest tests/test_config.py tests/test_agent_bridge_config.py tests/test_pip_value_resolver.py tests/test_position_sizer.py tests/test_engine.py tests/test_main_daily_cycle.py tests/test_switchover.py -q`（`prop-firm-pilot`）→ `153 passed`
-
-### Cross-Repo Note
-- `qlib_market_scanner` 已補上 `--topk-short` runtime activation，signals export 會保留 `configured_topk_short`，作為 preview live activation 的上游契約
-- 本 repo 這輪工作不是重做 scanner alpha，而是把 upstream side-aware bundle 變成 live-safe ingestion contract
-
-### Validated
-- `uv run pytest tests/test_config.py tests/test_scanner_bridge.py tests/scheduler/test_llm_thresholds.py tests/test_scheduler.py -q` → `218 passed`
-- `uv run pytest tests/test_main_daily_cycle.py tests/test_main_logging.py -q` → `5 passed`
-- `uv run ruff check src/main.py tests/test_main_daily_cycle.py` → `All checks passed!`
-- `uv run ruff format --check src/main.py tests/test_main_daily_cycle.py` → `2 files already formatted`
-
-### Planned: v1.5.0 (stable) — Stable Acceptance On Top Of Preview Uplift
-- 定義第一個「穩定版」基準：系統必須能穩定可靠地進出場，而不是只靠 hotfix 維持可用
-- 將 `v1.5.0_preview` 已落地的 bounded capital utilization uplift、`2026-03-18` preview incident remediation、side-aware scanner live activation 與 first-batch JPY cross rollout 一起納入 multi-day stable acceptance，而不是把這些 preview 子項拆開重做
-- tactical entry 與 tactical exit 需達到 production-grade reliability，包含 data provenance、execution integrity、close verification 與 postmortem replayability
-- 把 `v1.5.0_beta` 已吸收的 scanner contract、cadence decision 與 entry / exit control plane 升級為 stable release gate，而不是再做一次大重寫
-- 不重新開啟 `qlib_market_scanner` 的 FX release cadence 選型；`v1.5.0 stable` 直接沿用已凍結的 `1d` canonical cadence
-- 以目前 first-batch 10-pair runtime universe 作為 stable 驗收 baseline；`GBPJPY`、`NZDJPY`、`CHFJPY` 仍明確維持 deferred，不在本輪 stable 內被誤寫成已啟用
-- 重新設計 `TradingAgents` 與 intraday FX 場景的耦合方式，使其能消化更高頻率的 scanner / market context 與交易記憶
-- 建立穩定可靠的交易記憶體系，將 trade journal、reflection、lesson memory、execution outcome 串成可持續改善的 learning loop
-- 將多元化倉位與資金效率正式納入風控與配置層，而不是只做單筆交易最小風險化
-
-### Cross-Repo Note
-- `v1.5.0_preview` 已建立在已核對的 upstream contract 之上：`qlib_market_scanner` 已具備 `1d` canonical cadence、`dsr_net_oos_daily_v1`、scorecard / decision artifacts 與 RD-Agent factor promotion gate；`qlib_rd_agent` 已具備 `discovered/candidate/manifest` artifact 與 `runs/<run_id>/...` archive contract
-- `v1.5.0 stable` 的工作重點是 integrated acceptance，包括 preview uplift 與 preview incident remediation 的 regression-free validation，不是再替 upstream scanner / rd-agent 重新補 contract plumbing
+### Planned
+- **Portfolio / exposure budget v1**: base/quote exposure budget、setup grouping、portfolio-level admission guard
+- **Trade-memory v1**: raw event / reflection / retrieval 分層與 quality gate
+- **Agent-enabled bounded path**: 在 default-off 基線上重新定義 agent-enabled path 的 acceptance boundary
+- **Multi-day acceptance evidence**: acceptance bundle、run summary、incident-free evidence 累積
 
 ### Tracking
 - Roadmap: `docs/PropFirmPilot_v1.5.0_road_map.md`
-- Cross-repo note: `docs/PropFirmPilot_v1.5.0_Cross_Repo_Change_Note.md`
-- Implementation plan: `docs/plans/2026-03-17-v1.5.0-side-aware-live-activation.md`
+
+---
+
+## [1.5.2] — 2026-04-08
+**Production Optimization — Exit Timing, Verify Resilience, Symbol-Level Tuning**
+
+> **Production evidence**: `prod_logs_20260408_v1.5.0_stable` bundle（2026-04-03 ~ 04-08）
+> **Result**: Balance $50,137.11, HWM $50,888.97, 6 trades, 50% win rate, PF 0.9556
+
+### Fixed
+- `CloseControlPlane._execute_modify_only()` 現在會在 `modify_position()` 之後加入可配置延遲（default 0.5s）再做 `verify_sl_tp()` readback，且失敗後會重試一次（delay 遞增）；解決 CADJPY 連續 6+ 小時 `verify_failed` / `readback_status=mismatch` 的問題（根因：broker 尚未 propagate 修改到 positions API）
+- `CloseControlPlane.__init__` 新增 `verify_retry_delay_seconds`（default=0.5）和 `verify_max_retries`（default=1）參數
+
+### Added
+- `TacticalExitConfig.defensive_exit_min_hold_seconds`（default=0）：IRSF（`initial_risk_structure_failure`）觸發前的最低持倉時間。Production 設為 300s（5 分鐘 grace period）。解決 4/6 trades 在開倉後數分鐘內即被 5m EMA/RSI/candle 噪音觸發 IRSF 殺倉、損失 $443.92 的問題
+- `SymbolTacticalOverride` model：per-symbol tactical exit 參數覆蓋機制，支援 `defensive_exit_loss_r` 和 `defensive_exit_min_hold_seconds` 兩個可選欄位
+- `TacticalConfig.symbol_overrides`：`dict[str, SymbolTacticalOverride]`，以 symbol 為 key 的覆蓋字典（default 空 dict，backward-compatible）
+- `TacticalExitManager.resolve_exit_config(symbol)`：合併全域 config 與 per-symbol overrides，回傳最終有效的 `TacticalExitConfig`
+- `TacticalExitManager.evaluate_position()` 新增 keyword-only `symbol=""` 參數，自動套用 per-symbol overrides（backward-compatible）
+- Production EURCHF override：`defensive_exit_loss_r=-0.50`（全域 -0.35）、`defensive_exit_min_hold_seconds=600`（全域 300s），針對低波動 range-bound 貨幣對放寬門檻
+
+### Changed
+- `_should_defensive_exit_initial_risk()` 新增 hold-time guard：當 `defensive_exit_min_hold_seconds > 0` 且 `hold_seconds < min_hold` 時，IRSF 不會觸發（`hold_seconds=None` 視為未知，不阻擋）
+- `scheduler.py` 現在把 `config.tactical.symbol_overrides` 傳入 `TacticalExitManager` 構造函數，並在 `evaluate_position()` 呼叫中傳入 `symbol=intent.symbol`
+- `scheduler.py` 現在把 `verify_retry_delay_seconds` 和 `verify_max_retries` 從 config 傳入 `CloseControlPlane`
+
+### Tests
+- `tests/test_tactical_exit_rules.py`：新增 `TestInitialRiskHoldTimeGuard` 4 個測試（blocked/allowed/backward-compat/none-passthrough）
+- `tests/test_close_control_plane.py`：新增 3 個 retry verification 測試（retry-success/all-fail/no-retry）
+- `tests/test_tactical_exit_manager.py`：新增 4 個 symbol override 測試（global-fallback/full-override/partial-override/evaluate-with-symbol）
+- 全量測試：1475 passed, 7 pre-existing failures（無回歸）
+
+### Production Config (`config/e8_signature_50k_challenge.yaml`)
+- `tactical.exit.defensive_exit_min_hold_seconds: 300`
+- `tactical.exit.verify_retry_delay_seconds: 0.5`
+- `tactical.exit.verify_max_retries: 1`
+- `tactical.symbol_overrides.EURCHF.defensive_exit_loss_r: -0.50`
+- `tactical.symbol_overrides.EURCHF.defensive_exit_min_hold_seconds: 600`
+
+### Stats
+- 10 files changed, ~400 lines added, 11 new tests
+
+---
+
+## [1.5.1] — 2026-04-01
+**Production Hotfix — Close Attribution, ATR Resilience, Portfolio Pre-Check**
+
+> **Production evidence**: `prod_logs_20260401_v1.5.0_stable` bundle（2026-03-31 ~ 04-01）
+> **Result**: +$414.7 net PnL, 62.5% win rate, 8 trades
+
+### Fixed
+- `CloseReconciler._resolve_final_close_reason()` 現在會驗證 PnL 符號與 close reason 一致性；broker 回報 `TAKE_PROFIT` 但實際 PnL < -$1 時，會被 override 為 `sl_hit`（反之亦然），避免 GBPJPY BUY 以 PnL=-$248.40 記為 `tp_hit` 的矛盾
+- `scheduler.py` 平倉前處理現在也會做 PnL 符號一致性檢查，與 `CloseReconciler` 形成雙重防線
+
+### Added
+- `TacticalValidator` 5m ATR fallback：當 1H bars 不可用時，自動以 5m bars 計算 ATR 並乘以 √12 (≈3.464) 換算為 1H 等效 ATR，避免 `atr.fail.insufficient_1h_data` 導致永久 SKIP
+- `TacticalHardGatesConfig` 新增 `atr_5m_fallback_enabled`（default=True）和 `atr_5m_to_1h_scale`（default=3.464）配置項
+- `PortfolioRiskGuard` pre-check：在 tactical validation 之前先檢查 portfolio 層級風控（same-direction limit、correlated-pair limit），避免已知會被拒的交易白跑整條 pipeline
+- `scheduler._portfolio_risk_precheck()` 採用 fail-open 設計，guard 異常時仍放行交易
+
+### Tests
+- `tests/test_close_reconciler.py`：新增 5 個 PnL sign contradiction 測試
+- `tests/test_tactical_validator.py`：新增 5 個 5m ATR fallback 測試（總計 49 個）
+- `tests/test_portfolio_risk_precheck.py`：新增 4 個 portfolio pre-check 測試
+- 全量測試：1464 passed, 7 pre-existing failures（無回歸）
+
+### Stats
+- 7 files changed, ~400 lines added
 
 ---
 

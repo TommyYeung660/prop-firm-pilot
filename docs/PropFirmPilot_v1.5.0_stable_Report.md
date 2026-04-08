@@ -1,12 +1,12 @@
 # PropFirmPilot `v1.5.0_stable` 系統報告
 
-> **更新日期**: `2026-03-23`
+> **更新日期**: `2026-04-08`
 >
 > **文件角色**: `v1.5.0_stable` implementation baseline 的系統解說文件
 >
 > **適用範圍**: 目前 `main` 上的 stable runtime 實作，包括 scanner ingestion、scheduler、tactical entry/exit、execution、monitoring、close reconciliation 與 broker-neutral backend
 >
-> **狀態說明**: 本文件描述的是當前 `main` 已採用的 `v1.5.0_stable` release identity 與 stable runtime implementation baseline；目前重點已從版本 bump 轉為 stable acceptance 證據、portfolio closure 與 operator evidence 累積
+> **狀態說明**: 本文件描述的是當前 `main` 上 `v1.5.2` 的 stable runtime implementation。系統已通過兩輪 production log analysis（`prod_logs_20260401` + `prod_logs_20260408`）驗證，完成 6 項 production-driven 修復與優化，正在持續累積 production evidence
 
 ---
 
@@ -452,6 +452,12 @@ stable execution path 不再只用單一固定 lot sizing，而是把幾個因�
 
 這些動作都會透過 `CloseControlPlane` 走同一條 broker-facing path，而不是各模組私自寫 broker API。
 
+#### v1.5.2 新增的 exit 保護
+
+- **IRSF hold-time guard**: `initial_risk_structure_failure` 觸發前需滿足最低持倉時間（`defensive_exit_min_hold_seconds`，production=300s）。Production 4/3→4/8 發現 4/6 trades 在開倉後數分鐘內即被 5m EMA/RSI/candle 噪音觸發 IRSF 殺倉，損失 $443.92。加入 grace period 後，position 有足夠時間讓 thesis 發揮
+- **Per-symbol tactical overrides**: `SymbolTacticalOverride` 可 per-symbol 覆蓋 `defensive_exit_loss_r` 和 `defensive_exit_min_hold_seconds`。EURCHF（低波動 range-bound，日均 45 pips）使用 `loss_r=-0.50`（全域 -0.35）、`min_hold=600s`（全域 300s）
+- **Modify readback retry**: `CloseControlPlane` 在 modify 後加入 0.5s delay 再做 readback，失敗後重試 1 次。解決 broker propagation lag 導致的 false `verify_failed` 問題（CADJPY 曾連續 6+ 小時 mismatch）
+
 ### 8.4 Best Day 接近上限時會怎樣
 
 若系統偵測到 Best Day Rule 接近安全上限，`position monitor` 會主動關閉獲利中的 positions，避免日內已實現 / 未實現利潤把帳戶推向違規。
@@ -512,6 +518,8 @@ position re-evaluation 是 agent-enabled 的例外路徑，不是 stable 預設�
 
 都能共用同一條 broker-facing control plane，而不是各自實作自己的關倉邏輯。
 
+v1.5.2 後，`modify_only` path 加入了 readback retry 機制：修改 SL/TP 後會等待 `verify_retry_delay_seconds`（default 0.5s）再做 `verify_sl_tp()` readback，若失敗會重試 `verify_max_retries`（default 1）次，避免 broker propagation lag 導致的 false mismatch。
+
 ### 9.3 `CloseReconciler` 如何決定最後的 close facts
 
 position 真正消失之後，系統會嘗試湊齊 close facts：
@@ -569,7 +577,7 @@ position 真正消失之後，系統會嘗試湊齊 close facts：
 | **`PropFirmGuard`** | safety-critical compliance core | drawdown、Best Day、admission headroom 與 execution-side gating |
 | **`BrokerFactory`** | broker-neutral runtime selector | 在 `matchtrader` / `tradelocker` 間切換 backend |
 | **`TradeLockerClient` / `MatchTraderClient`** | concrete broker adapters | 登入、報價、開倉、關倉、修改單、持倉查詢 |
-| **`CloseControlPlane`** | close-domain execution bus | 統一路由 modify / partial / full close |
+| **`CloseControlPlane`** | close-domain execution bus | 統一路由 modify / partial / full close；modify 具備 retry-with-delay readback |
 | **`CloseReconciler`** | canonical close attribution layer | 合併 broker facts 與 fallback data，產出最終 close reason |
 | **`AlertService`** | operator notification layer | Telegram send、retry、circuit breaker、fallback sink |
 | **`TradeJournal`** | append-only lifecycle log | 保存 trade / scanner / tactical / alert / equity events |
@@ -582,20 +590,20 @@ position 真正消失之後，系統會嘗試湊齊 close facts：
 
 目前可以很明確地說：
 
-- 系統已具備一條 **不依賴 LLM 的完整 trading path**
+- 系統已具備一條 **不依賴 LLM 的完整 trading path**，且已通過兩輪 production evidence 驗證
+- v1.5.1 修復了 close attribution 正確性、ATR resilience、portfolio pre-check
+- v1.5.2 修復了 IRSF exit timing、modify readback retry、per-symbol tactical tuning
 - broker-neutral runtime 已完成接線
-- scanner -> tactical -> execution -> close reconciliation 已形成完整閉環
-- market-data continuity fallback 與 canonical close attribution 都已落地
+- scanner → tactical → execution → close reconciliation 已形成完整閉環並在 production 持續運行
+- market-data continuity fallback、canonical close attribution、per-symbol tactical tuning 均已落地
+- 帳戶 balance $50,137.11（初始 $50,000），HWM $50,888.97
 
 ### 11.2 還未完成的 stable release closure
 
-目前還不能說「正式 stable release 已完成」，主要是因為以下幾項仍未 formalize：
-
-- open-book worst-case natural-SL portfolio risk guard
-- exposure / portfolio budget v1
-- trade-memory v1 與 quality gate
-- multi-day acceptance evidence
-- version bump 與 release identity closure
+- portfolio-level aggregate worst-case risk guard（`PortfolioRiskGuard` pre-check 已有，但完整 open-risk reservation 尚未落地）
+- exposure / portfolio budget v1（base/quote exposure budget 尚未 formalize）
+- trade-memory v1 與 quality gate（journal / reflection 已運作，但 schema 未凍結）
+- agent-enabled path acceptance（LLM path 維持 default-off）
 
 ### 11.3 為什麼 `TradingAgents` default-off 是合理的
 
@@ -607,8 +615,19 @@ position 真正消失之後，系統會嘗試湊齊 close facts：
 
 因此，這個預設不代表 agent 路徑被放棄，而是代表 stable 主線先把 execution correctness 放在前面。
 
+### 11.4 v1.5.1 / v1.5.2 production-driven 改進總覽
+
+| 版本 | 修復項 | 影響 |
+|---|---|---|
+| v1.5.1 | Close reason PnL sign validation | 避免負 PnL 記為 `tp_hit` |
+| v1.5.1 | 5m ATR fallback | 1H data 不可用時不再永久 SKIP |
+| v1.5.1 | Portfolio risk pre-check | 已知會被拒的交易不再白跑 pipeline |
+| v1.5.2 | IRSF min hold time guard (300s) | 避免 5m 噪音在數分鐘內殺倉 |
+| v1.5.2 | Modify readback retry (0.5s + 1 retry) | 解決 broker propagation lag false mismatch |
+| v1.5.2 | Per-symbol tactical overrides | EURCHF 低波動對特化配置 |
+
 ---
 
 ## 12. 一句話版結論
 
-> `PropFirmPilot` 目前的 `v1.5.0_stable` implementation 已經能用 `scanner -> tactical -> execution -> position monitor -> close reconciliation` 這條 deterministic 主路徑完整跑完一筆交易；而 `TradingAgents` 則被保留為顯式 opt-in 的 bounded confirm / veto 層，而不是 stable 預設依賴。 
+> `PropFirmPilot` 的 `v1.5.2` implementation 已通過兩輪 production evidence 驗證，runtime 穩定性與 exit 精準度顯著提升；deterministic `scanner → tactical → execution → close reconciliation` 主路徑持續在 production 運行，`TradingAgents` 維持 default-off 的 bounded opt-in 設計。
