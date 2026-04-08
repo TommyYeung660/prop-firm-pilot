@@ -401,7 +401,7 @@ class SchedulerConfig(BaseModel):
     )
     # v1.3.5: Dual-timeframe separation
     scanner_timeframe: str = Field(
-        default="1d", description="Timeframe for Qlib scanner pipeline (1d recommended)"
+        default="1h", description="Timeframe for Qlib scanner pipeline (1h for FX, fallback 1d)"
     )
     agent_timeframe: str = Field(
         default="4h", description="Timeframe for TradingAgents entry analysis (4h recommended)"
