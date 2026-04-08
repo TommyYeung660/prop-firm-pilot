@@ -117,7 +117,7 @@ scheduler:
   multi_timeframe_enabled: true  # 啟用多時間框架流程；daily 給方向，較短週期做進場時機確認
   entry_timeframe: "4h"  # 多時間框架的進場確認週期；目前用 4h 供 tactical / agent 參考
   intraday_lookback_days: 90  # 日內模型/分析抓取回看天數；越大資料更多但成本更高
-  scanner_timeframe: "1d"  # qlib scanner 的主時間框架；1d 代表訊號只在日 K 收盤後更新
+  scanner_timeframe: "1h"  # qlib scanner 的主時間框架；1h 每小時更新信號，失敗自動 fallback 1d
   agent_timeframe: "4h"  # 若之後手動開啟 TradingAgents，預設仍以 4h 看進場結構
 
   breakeven_activation_pct: 0.3  # 部位浮盈達 TP 距離 30% 時，就允許將 SL 上移至 breakeven
