@@ -527,6 +527,12 @@ class TacticalExitConfig(BaseModel):
         default=True,
         description="Require a strong opposing 5m candle before defensive initial-risk exit",
     )
+    defensive_exit_min_hold_seconds: int = Field(
+        default=0,
+        description=(
+            "Minimum hold time before initial_risk_structure_failure can trigger (0=disabled)"
+        ),
+    )
     severe_reversal_min_hold_seconds: int = Field(
         default=900,
         description="Minimum hold time in seconds before severe reversal can force immediate exit",
@@ -553,6 +559,14 @@ class TacticalExitConfig(BaseModel):
     )
     use_llm_exception_path: bool = Field(
         default=True, description="Allow LLM re-evaluation only for tactical exception cases"
+    )
+    verify_retry_delay_seconds: float = Field(
+        default=0.5,
+        description="Delay in seconds before first SL/TP verify readback after modify",
+    )
+    verify_max_retries: int = Field(
+        default=1,
+        description="Number of additional verify attempts after initial failure (0=no retry)",
     )
 
 

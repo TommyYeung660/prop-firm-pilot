@@ -334,3 +334,70 @@ def test_dynamic_tp_atr_frac_zero_disables_threshold() -> None:
     candidate = calculate_dynamic_take_profit(snapshot, config_zero, state="TREND_EXTENSION")
 
     assert candidate is not None, "Threshold=0 should allow any directional improvement"
+
+
+# ── Initial-Risk Hold-Time Guard ───────────────────────────────────────────
+
+
+class TestInitialRiskHoldTimeGuard:
+    """Defensive exit should not fire before minimum hold time."""
+
+    def test_irsf_blocked_before_min_hold_seconds(self) -> None:
+        """Position held < min_hold should NOT trigger defensive exit."""
+        config = TacticalExitConfig(
+            defensive_exit_min_hold_seconds=300,
+            defensive_exit_loss_r=-0.35,
+            defensive_exit_require_strong_candle=True,
+        )
+        snapshot = _make_snapshot(
+            unrealized_r=-0.5,
+            hold_seconds=120,
+            bars_5min=_make_failed_buy_5min_bars(),
+        )
+        decision = choose_tactical_exit(snapshot, config)
+        assert decision.reason != "initial_risk_structure_failure"
+
+    def test_irsf_allowed_after_min_hold_seconds(self) -> None:
+        """Position held >= min_hold should trigger defensive exit normally."""
+        config = TacticalExitConfig(
+            defensive_exit_min_hold_seconds=300,
+            defensive_exit_loss_r=-0.35,
+            defensive_exit_require_strong_candle=True,
+        )
+        snapshot = _make_snapshot(
+            unrealized_r=-0.5,
+            hold_seconds=600,
+            bars_5min=_make_failed_buy_5min_bars(),
+        )
+        decision = choose_tactical_exit(snapshot, config)
+        assert decision.reason == "initial_risk_structure_failure"
+
+    def test_irsf_default_min_hold_zero_backward_compat(self) -> None:
+        """Default config (min_hold=0) should not change existing behavior."""
+        config = TacticalExitConfig(
+            defensive_exit_loss_r=-0.35,
+            defensive_exit_require_strong_candle=True,
+        )
+        snapshot = _make_snapshot(
+            unrealized_r=-0.5,
+            hold_seconds=30,
+            bars_5min=_make_failed_buy_5min_bars(),
+        )
+        decision = choose_tactical_exit(snapshot, config)
+        assert decision.reason == "initial_risk_structure_failure"
+
+    def test_irsf_blocked_when_hold_seconds_is_none(self) -> None:
+        """When hold_seconds is None and min_hold > 0, IRSF should still work."""
+        config = TacticalExitConfig(
+            defensive_exit_min_hold_seconds=300,
+            defensive_exit_loss_r=-0.35,
+            defensive_exit_require_strong_candle=True,
+        )
+        snapshot = _make_snapshot(
+            unrealized_r=-0.5,
+            hold_seconds=None,
+            bars_5min=_make_failed_buy_5min_bars(),
+        )
+        decision = choose_tactical_exit(snapshot, config)
+        # hold_seconds=None means unknown duration, so the guard doesn't block
+        assert decision.reason == "initial_risk_structure_failure"

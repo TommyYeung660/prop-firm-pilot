@@ -139,9 +139,7 @@ def build_exit_signal_context(snapshot: TacticalExitSnapshot) -> ExitSignalConte
         closes = cast(pd.Series, snapshot.bars_5min["close"])
         ema_fast = float(compute_ema(closes, 8).iloc[-1])
         ema_slow = float(compute_ema(closes, 21).iloc[-1])
-        context.ema_aligned = (
-            ema_fast > ema_slow if snapshot.side == "BUY" else ema_fast < ema_slow
-        )
+        context.ema_aligned = ema_fast > ema_slow if snapshot.side == "BUY" else ema_fast < ema_slow
 
         rsi = compute_rsi(closes, 14)
         if snapshot.side == "BUY":
@@ -196,6 +194,13 @@ def _should_defensive_exit_initial_risk(
     """Return True when an initial-risk position shows clear structure failure."""
     if snapshot.unrealized_r > config.defensive_exit_loss_r:
         return False
+    # v1.5.2: Don't exit before minimum hold time — let the thesis play out
+    if (
+        config.defensive_exit_min_hold_seconds > 0
+        and snapshot.hold_seconds is not None
+        and snapshot.hold_seconds < config.defensive_exit_min_hold_seconds
+    ):
+        return False
     if context.ema_aligned is not False:
         return False
     if not context.adverse_rsi:
@@ -231,12 +236,7 @@ def _is_profit_protection(
 
     atr_bad = context.atr_regime_ratio is not None and context.atr_regime_ratio > 1.35
     ema_bad = context.ema_aligned is False
-    return bool(
-        context.opposing_candle
-        or context.weakening_rsi
-        or atr_bad
-        or ema_bad
-    )
+    return bool(context.opposing_candle or context.weakening_rsi or atr_bad or ema_bad)
 
 
 def classify_tactical_exit_state(
