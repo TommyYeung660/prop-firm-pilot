@@ -570,6 +570,23 @@ class TacticalExitConfig(BaseModel):
     )
 
 
+class SymbolTacticalOverride(BaseModel):
+    """Per-symbol overrides for tactical exit thresholds.
+
+    Any field set to None uses the global default.
+
+    Usage:
+        override = SymbolTacticalOverride(defensive_exit_loss_r=-0.50)
+    """
+
+    defensive_exit_loss_r: float | None = Field(
+        default=None, description="Override defensive_exit_loss_r for this symbol"
+    )
+    defensive_exit_min_hold_seconds: int | None = Field(
+        default=None, description="Override defensive_exit_min_hold_seconds for this symbol"
+    )
+
+
 class TacticalConfig(BaseModel):
     """v1.3.7: Tactical execution module configuration.
 
@@ -592,6 +609,10 @@ class TacticalConfig(BaseModel):
     decision_cache: TacticalDecisionCacheConfig = Field(default_factory=TacticalDecisionCacheConfig)
     intent_dedup: TacticalIntentDedupConfig = Field(default_factory=TacticalIntentDedupConfig)
     exit: TacticalExitConfig = Field(default_factory=TacticalExitConfig)
+    symbol_overrides: dict[str, SymbolTacticalOverride] = Field(
+        default_factory=dict,
+        description="Per-symbol overrides for tactical thresholds (keyed by symbol name)",
+    )
 
 
 class WebSocketConfig(BaseModel):

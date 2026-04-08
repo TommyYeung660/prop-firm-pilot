@@ -175,7 +175,10 @@ class Scheduler:
 
         # v1.3.7: Tactical execution module (shadow mode)
         self._tactical_validator = tactical_validator or TacticalValidator(config.tactical)
-        self._tactical_exit_manager = TacticalExitManager(config.tactical.exit)
+        self._tactical_exit_manager = TacticalExitManager(
+            config.tactical.exit,
+            symbol_overrides=config.tactical.symbol_overrides,
+        )
         self._close_control_plane = CloseControlPlane(
             matchtrader=self._matchtrader,
             normalize_price=self._normalize_tactical_price,
@@ -3891,6 +3894,7 @@ class Scheduler:
                 snapshot=snapshot,
                 budget=budget,
                 now=now,
+                symbol=intent.symbol,
             )
             await self._handle_tactical_exit_evaluation(pos, intent, evaluation)
             evaluation_summaries.append(

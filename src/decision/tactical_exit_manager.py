@@ -12,7 +12,7 @@ Usage:
 from dataclasses import dataclass
 from datetime import datetime
 
-from src.config import TacticalExitConfig
+from src.config import SymbolTacticalOverride, TacticalExitConfig
 from src.decision.tactical_exit_rules import (
     TacticalExitDecision,
     TacticalExitSnapshot,
@@ -47,8 +47,13 @@ class TacticalExitEvaluation:
 class TacticalExitManager:
     """Apply cooldown and write-budget policy on top of pure exit rules."""
 
-    def __init__(self, config: TacticalExitConfig) -> None:
+    def __init__(
+        self,
+        config: TacticalExitConfig,
+        symbol_overrides: dict[str, SymbolTacticalOverride] | None = None,
+    ) -> None:
         self._config = config
+        self._symbol_overrides = symbol_overrides or {}
 
     def _hold_result(
         self,
@@ -97,14 +102,29 @@ class TacticalExitManager:
         """Return True when an action should bypass low-budget suppression."""
         return action in {"EXIT_NOW", "MOVE_TO_BREAKEVEN"}
 
+    def resolve_exit_config(self, symbol: str) -> TacticalExitConfig:
+        """Return exit config with per-symbol overrides applied."""
+        override = self._symbol_overrides.get(symbol)
+        if override is None:
+            return self._config
+        data = self._config.model_dump()
+        if override.defensive_exit_loss_r is not None:
+            data["defensive_exit_loss_r"] = override.defensive_exit_loss_r
+        if override.defensive_exit_min_hold_seconds is not None:
+            data["defensive_exit_min_hold_seconds"] = override.defensive_exit_min_hold_seconds
+        return TacticalExitConfig(**data)
+
     def evaluate_position(
         self,
         snapshot: TacticalExitSnapshot,
         budget: WriteBudgetSnapshot,
         now: datetime,
+        *,
+        symbol: str = "",
     ) -> TacticalExitEvaluation:
         """Evaluate one position under tactical exit rules plus operating guards."""
-        decision = choose_tactical_exit(snapshot, self._config)
+        config = self.resolve_exit_config(symbol) if symbol else self._config
+        decision = choose_tactical_exit(snapshot, config)
         requires_llm_exception_review = (
             decision.requires_llm_exception and self._config.use_llm_exception_path
         )
