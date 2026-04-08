@@ -14,7 +14,10 @@ Usage:
     outcome = await control.execute(intent)
 """
 
+import asyncio
 from collections.abc import Callable
+
+from loguru import logger
 
 from src.decision.close_models import CloseIntent, CloseOutcome
 from src.execution.broker_protocol import BrokerClientProtocol
@@ -30,6 +33,8 @@ class CloseControlPlane:
         price_precision_resolver: Callable[[str], int | None] | None = None,
         *,
         broker: BrokerClientProtocol | None = None,
+        verify_retry_delay_seconds: float = 0.5,
+        verify_max_retries: int = 1,
     ) -> None:
         selected_broker = broker if broker is not None else matchtrader
         if selected_broker is None:
@@ -41,6 +46,8 @@ class CloseControlPlane:
         self._matchtrader = selected_broker
         self._normalize_price = normalize_price
         self._price_precision_resolver = price_precision_resolver
+        self._verify_retry_delay_seconds = verify_retry_delay_seconds
+        self._verify_max_retries = verify_max_retries
         self._pending_close_actions: dict[str, CloseOutcome] = {}
 
     async def execute(self, intent: CloseIntent) -> CloseOutcome:
@@ -72,26 +79,39 @@ class CloseControlPlane:
                 broker_result=broker_result,
             )
 
-        verified = await self._matchtrader.verify_sl_tp(
-            position_id=intent.position_id,
-            expected_sl=expected_sl,
-            expected_tp=expected_tp,
-            price_precision=self._price_precision_resolver(intent.symbol),
-        )
-        if not verified:
-            return CloseOutcome(
-                trigger_source=intent.trigger_source,
-                action_kind=intent.action_kind,
-                execution_status="verify_failed",
-                readback_status="mismatch",
-                broker_result=broker_result,
+        precision = self._price_precision_resolver(intent.symbol)
+        max_attempts = 1 + self._verify_max_retries
+        for attempt in range(max_attempts):
+            delay = self._verify_retry_delay_seconds * (attempt + 1)
+            await asyncio.sleep(delay)
+            verified = await self._matchtrader.verify_sl_tp(
+                position_id=intent.position_id,
+                expected_sl=expected_sl,
+                expected_tp=expected_tp,
+                price_precision=precision,
             )
+            if verified:
+                return CloseOutcome(
+                    trigger_source=intent.trigger_source,
+                    action_kind=intent.action_kind,
+                    execution_status="accepted",
+                    readback_status="verified",
+                    broker_result=broker_result,
+                )
+            if attempt < max_attempts - 1:
+                logger.info(
+                    "Modify verify attempt {}/{} failed for {}, retrying in {:.1f}s",
+                    attempt + 1,
+                    max_attempts,
+                    intent.position_id,
+                    self._verify_retry_delay_seconds * (attempt + 2),
+                )
 
         return CloseOutcome(
             trigger_source=intent.trigger_source,
             action_kind=intent.action_kind,
-            execution_status="accepted",
-            readback_status="verified",
+            execution_status="verify_failed",
+            readback_status="mismatch",
             broker_result=broker_result,
         )
 

@@ -37,6 +37,7 @@ async def test_execute_modify_only_returns_verify_failed_when_readback_mismatch(
         matchtrader=broker,
         normalize_price=_normalize_price,
         price_precision_resolver=_resolve_precision,
+        verify_retry_delay_seconds=0.01,
     )
 
     outcome = await control.execute(
@@ -153,6 +154,7 @@ async def test_close_control_plane_broker_protocol_paths_are_preserved() -> None
         broker=broker,
         normalize_price=_normalize_price,
         price_precision_resolver=_resolve_precision,
+        verify_retry_delay_seconds=0.01,
     )
 
     modify_outcome = await control.execute(
@@ -200,7 +202,9 @@ async def test_close_control_plane_positional_matchtrader_call_remains_supported
     )
     broker.verify_sl_tp.return_value = True
 
-    control = CloseControlPlane(broker, _normalize_price, _resolve_precision)
+    control = CloseControlPlane(
+        broker, _normalize_price, _resolve_precision, verify_retry_delay_seconds=0.01
+    )
 
     outcome = await control.execute(
         CloseIntent(
@@ -219,3 +223,116 @@ async def test_close_control_plane_positional_matchtrader_call_remains_supported
     assert outcome.execution_status == "accepted"
     broker.modify_position.assert_awaited_once()
     broker.verify_sl_tp.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_modify_retries_verify_on_first_mismatch() -> None:
+    """If first verify_sl_tp fails but second succeeds, outcome should be accepted."""
+    from src.decision.close_control_plane import CloseControlPlane
+
+    broker = AsyncMock()
+    broker.modify_position.return_value = OrderResult(
+        success=True, position_id="POS-R1", message="OK"
+    )
+    broker.verify_sl_tp = AsyncMock(side_effect=[False, True])
+
+    control = CloseControlPlane(
+        broker=broker,
+        normalize_price=_normalize_price,
+        price_precision_resolver=_resolve_precision,
+        verify_retry_delay_seconds=0.01,
+        verify_max_retries=1,
+    )
+
+    outcome = await control.execute(
+        CloseIntent(
+            trigger_source="tactical_exit",
+            action_kind="modify_only",
+            position_id="POS-R1",
+            intent_id="INT-R1",
+            symbol="CADJPY",
+            side="BUY",
+            requested_sl=95.500,
+            requested_tp=97.000,
+            reason_code="breakeven_threshold_reached",
+        )
+    )
+
+    assert outcome.execution_status == "accepted"
+    assert outcome.readback_status == "verified"
+    assert broker.verify_sl_tp.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_execute_modify_returns_mismatch_after_all_retries_exhausted() -> None:
+    """If all verify attempts fail, outcome should be verify_failed."""
+    from src.decision.close_control_plane import CloseControlPlane
+
+    broker = AsyncMock()
+    broker.modify_position.return_value = OrderResult(
+        success=True, position_id="POS-R2", message="OK"
+    )
+    broker.verify_sl_tp = AsyncMock(return_value=False)
+
+    control = CloseControlPlane(
+        broker=broker,
+        normalize_price=_normalize_price,
+        price_precision_resolver=_resolve_precision,
+        verify_retry_delay_seconds=0.01,
+        verify_max_retries=1,
+    )
+
+    outcome = await control.execute(
+        CloseIntent(
+            trigger_source="tactical_exit",
+            action_kind="modify_only",
+            position_id="POS-R2",
+            intent_id="INT-R2",
+            symbol="CADJPY",
+            side="BUY",
+            requested_sl=95.500,
+            requested_tp=97.000,
+            reason_code="breakeven_threshold_reached",
+        )
+    )
+
+    assert outcome.execution_status == "verify_failed"
+    assert outcome.readback_status == "mismatch"
+    assert broker.verify_sl_tp.call_count == 2  # initial + 1 retry
+
+
+@pytest.mark.asyncio
+async def test_execute_modify_no_retry_when_max_retries_zero() -> None:
+    """With verify_max_retries=0, only one verify attempt is made."""
+    from src.decision.close_control_plane import CloseControlPlane
+
+    broker = AsyncMock()
+    broker.modify_position.return_value = OrderResult(
+        success=True, position_id="POS-R3", message="OK"
+    )
+    broker.verify_sl_tp = AsyncMock(return_value=False)
+
+    control = CloseControlPlane(
+        broker=broker,
+        normalize_price=_normalize_price,
+        price_precision_resolver=_resolve_precision,
+        verify_retry_delay_seconds=0.01,
+        verify_max_retries=0,
+    )
+
+    outcome = await control.execute(
+        CloseIntent(
+            trigger_source="tactical_exit",
+            action_kind="modify_only",
+            position_id="POS-R3",
+            intent_id="INT-R3",
+            symbol="EURUSD",
+            side="SELL",
+            requested_sl=1.10500,
+            requested_tp=1.09500,
+            reason_code="trailing_stop_update",
+        )
+    )
+
+    assert outcome.execution_status == "verify_failed"
+    assert broker.verify_sl_tp.call_count == 1

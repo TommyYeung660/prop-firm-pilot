@@ -180,6 +180,8 @@ class Scheduler:
             matchtrader=self._matchtrader,
             normalize_price=self._normalize_tactical_price,
             price_precision_resolver=self._price_precision_for_symbol,
+            verify_retry_delay_seconds=config.tactical.exit.verify_retry_delay_seconds,
+            verify_max_retries=config.tactical.exit.verify_max_retries,
         )
         self._close_reconciler = CloseReconciler(pip_size_resolver=self._get_pip_size)
         self._pending_close_outcomes: dict[str, CloseOutcome] = {}
